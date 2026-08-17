@@ -2,8 +2,10 @@ import { isAbsolute } from "node:path";
 import {
   SafeTunnelControlPlaneError,
   safeTunnelClientVersion,
+  type SafeTunnelApprovedDeviceAuthorization,
   type SafeTunnelControlPlane,
   type SafeTunnelDeviceAuthorization,
+  type SafeTunnelDeviceAuthorizationCompletion,
   type SafeTunnelHeartbeatTunnelStatus,
   type SafeTunnelMachineHeartbeat,
   type SafeTunnelMachineTunnelConfig,
@@ -290,30 +292,62 @@ export class SafeTunnelService {
     controlApiBaseUrl: string,
     started: SafeTunnelDeviceAuthorization,
     signal?: AbortSignal,
-  ) {
+  ): Promise<SafeTunnelApprovedDeviceAuthorization> {
     const expiresAtMilliseconds = Date.parse(started.expiresAt);
+    // The hosted cadence baseline starts at authorization creation, so the
+    // first completion request must also wait one full interval.
+    let delaySeconds = started.intervalSeconds;
 
     for (;;) {
-      throwIfAborted(signal);
-      if (expiresAtMilliseconds <= this.now().getTime()) {
-        throw new SafeTunnelServiceError("authorization_expired");
-      }
+      await this.waitForNextPoll(delaySeconds, expiresAtMilliseconds, signal);
 
-      const completion = await this.dependencies.controlPlane.completeDeviceAuthorization({
-        controlApiBaseUrl,
-        deviceCode: started.deviceCode,
-      }, signal === undefined ? {} : { signal });
+      let completion: SafeTunnelDeviceAuthorizationCompletion;
+      try {
+        completion = await this.dependencies.controlPlane.completeDeviceAuthorization({
+          controlApiBaseUrl,
+          deviceCode: started.deviceCode,
+        }, signal === undefined ? {} : { signal });
+      } catch (error: unknown) {
+        // A bounded hosted rate limit is retryable backpressure: honor its
+        // Retry-After rather than failing the approval flow or busy-looping.
+        if (error instanceof SafeTunnelControlPlaneError
+          && error.code === "rate_limited"
+          && error.retryAfterSeconds !== undefined) {
+          delaySeconds = error.retryAfterSeconds;
+          continue;
+        }
+        throw error;
+      }
       throwIfAborted(signal);
       if (completion.kind === "approved") return completion.authorization;
 
-      const remainingMilliseconds = expiresAtMilliseconds - this.now().getTime();
-      if (remainingMilliseconds <= 0) {
-        throw new SafeTunnelServiceError("authorization_expired");
-      }
-      await this.sleep(
-        Math.min(started.intervalSeconds * 1000, remainingMilliseconds),
-        signal,
-      );
+      // A rejected early poll does not advance the hosted cadence baseline, so
+      // its Retry-After is the authoritative delay; pending polls resume the
+      // plain interval cadence.
+      delaySeconds = completion.kind === "slow_down"
+        ? completion.retryAfterSeconds
+        : started.intervalSeconds;
+    }
+  }
+
+  private async waitForNextPoll(
+    delaySeconds: number,
+    expiresAtMilliseconds: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    const remainingMilliseconds = expiresAtMilliseconds - this.now().getTime();
+    if (remainingMilliseconds <= 0) {
+      throw new SafeTunnelServiceError("authorization_expired");
+    }
+    await this.sleep(
+      Math.min(delaySeconds * 1000, remainingMilliseconds),
+      signal,
+    );
+    // Never send a completion request for an expired device code.
+    throwIfAborted(signal);
+    if (expiresAtMilliseconds <= this.now().getTime()) {
+      throw new SafeTunnelServiceError("authorization_expired");
     }
   }
 

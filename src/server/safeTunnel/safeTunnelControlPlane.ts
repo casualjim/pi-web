@@ -39,6 +39,7 @@ export class SafeTunnelControlPlaneError extends Error {
   constructor(
     readonly code: SafeTunnelControlPlaneErrorCode,
     readonly operation: SafeTunnelControlPlaneOperation,
+    readonly retryAfterSeconds?: number,
   ) {
     super(controlPlaneErrorMessage(code, operation));
   }
@@ -64,7 +65,8 @@ export interface SafeTunnelApprovedDeviceAuthorization {
 
 export type SafeTunnelDeviceAuthorizationCompletion =
   | { readonly kind: "approved"; readonly authorization: SafeTunnelApprovedDeviceAuthorization }
-  | { readonly kind: "pending" };
+  | { readonly kind: "pending" }
+  | { readonly kind: "slow_down"; readonly retryAfterSeconds: number };
 
 export interface SafeTunnelRegisteredMachine {
   readonly machine: {
@@ -201,29 +203,41 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       },
       operation,
       async (response) => {
-        if (response.status === 409 || response.status === 403 || response.status === 410) {
-          const applicationCode = await readApplicationErrorCode(response);
-          if (response.status === 409 && applicationCode === "authorization_pending") {
-            return { kind: "pending" };
-          }
-          if (applicationCode === "authorization_denied") {
-            throw new SafeTunnelControlPlaneError("authorization_denied", operation);
-          }
-          if (applicationCode === "authorization_expired") {
-            throw new SafeTunnelControlPlaneError("authorization_expired", operation);
-          }
-          throw mappedHttpError(response.status, operation);
+        if (response.status === 200) {
+          return {
+            kind: "approved",
+            authorization: parseControlPlaneResponse(
+              await readSuccessJson(response, operation),
+              operation,
+              parseApprovedDeviceAuthorization,
+            ),
+          };
         }
 
-        requireExpectedResponse(response, 200, operation);
-        return {
-          kind: "approved",
-          authorization: parseControlPlaneResponse(
-            await readSuccessJson(response, operation),
-            operation,
-            parseApprovedDeviceAuthorization,
-          ),
-        };
+        // Completion errors are part of the device-poll protocol: parse the
+        // hosted error envelope and Retry-After before generic status mapping.
+        const applicationCode = await readApplicationErrorCode(response);
+        if (response.status === 409 && applicationCode === "authorization_pending") {
+          return { kind: "pending" };
+        }
+        if (response.status === 429) {
+          const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+          if (applicationCode === "slow_down" && retryAfterSeconds !== undefined) {
+            return { kind: "slow_down", retryAfterSeconds };
+          }
+          // rate_limit_exceeded and untrusted slow_down envelopes stay
+          // retryable-or-terminal errors; without a usable Retry-After the
+          // owner must not guess a delay.
+          throw new SafeTunnelControlPlaneError("rate_limited", operation, retryAfterSeconds);
+        }
+        if (applicationCode === "authorization_denied") {
+          throw new SafeTunnelControlPlaneError("authorization_denied", operation);
+        }
+        if (applicationCode === "device_code_expired") {
+          throw new SafeTunnelControlPlaneError("authorization_expired", operation);
+        }
+        if (response.ok) throw new SafeTunnelControlPlaneError("invalid_response", operation);
+        throw mappedHttpError(response.status, operation);
       },
     );
   }
@@ -406,6 +420,14 @@ function mappedHttpError(
   if (status === 429) return new SafeTunnelControlPlaneError("rate_limited", operation);
   if (status >= 500) return new SafeTunnelControlPlaneError("service_unavailable", operation);
   return new SafeTunnelControlPlaneError("request_rejected", operation);
+}
+
+function parseRetryAfterSeconds(value: string | null): number | undefined {
+  // Hosted 429 responses carry a positive integer delta-seconds Retry-After;
+  // anything else (HTTP-date, fraction, zero) is not trustworthy cadence.
+  if (value === null || !/^\d+$/u.test(value.trim())) return undefined;
+  const seconds = Number(value.trim());
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
 }
 
 async function readSuccessJson(

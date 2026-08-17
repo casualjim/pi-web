@@ -84,6 +84,180 @@ describe("SafeTunnelService", () => {
     })]);
   });
 
+  it("waits one provider interval before the first poll and between pending polls", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.completions = [{ kind: "pending" }, { kind: "pending" }];
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      sleep: (milliseconds) => {
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    });
+
+    expect(controlPlane.events).toEqual([
+      "sleep:1000",
+      "complete",
+      "sleep:1000",
+      "complete",
+      "sleep:1000",
+      "complete",
+    ]);
+  });
+
+  it("honors slow_down Retry-After as polling control flow", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.completions = [
+      { kind: "slow_down", retryAfterSeconds: 9 },
+      { kind: "pending" },
+    ];
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      sleep: (milliseconds) => {
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    });
+
+    expect(controlPlane.events).toEqual([
+      "sleep:1000",
+      "complete",
+      "sleep:9000",
+      "complete",
+      "sleep:1000",
+      "complete",
+    ]);
+  });
+
+  it("retries a bounded rate limit after its Retry-After delay", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.completions = [new SafeTunnelControlPlaneError(
+      "rate_limited",
+      "complete_device_authorization",
+      4,
+    )];
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      sleep: (milliseconds) => {
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    });
+
+    expect(controlPlane.events).toEqual([
+      "sleep:1000",
+      "complete",
+      "sleep:4000",
+      "complete",
+    ]);
+  });
+
+  it("fails a rate limit without Retry-After instead of busy-looping", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.completions = [new SafeTunnelControlPlaneError(
+      "rate_limited",
+      "complete_device_authorization",
+    )];
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      sleep: (milliseconds) => {
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await expect(service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    })).rejects.toMatchObject({ code: "rate_limited" });
+    expect(controlPlane.events).toEqual(["sleep:1000", "complete"]);
+  });
+
+  it("expires without polling when the authorization already expired", async () => {
+    const controlPlane = new FakeControlPlane();
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      now: () => new Date("2030-01-01T00:10:00.000Z"),
+      sleep: (milliseconds) => {
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await expect(service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    })).rejects.toMatchObject({ code: "authorization_expired" });
+    expect(controlPlane.events).toEqual([]);
+  });
+
+  it("stops at expiry and never polls an expired device code", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.completions = [{ kind: "pending" }];
+    let nowMilliseconds = Date.parse("2030-01-01T00:09:58.000Z");
+    const service = createService(controlPlane, new MemoryStateStorage(), {
+      now: () => new Date(nowMilliseconds),
+      sleep: (milliseconds) => {
+        nowMilliseconds += milliseconds;
+        controlPlane.events.push(`sleep:${milliseconds.toString()}`);
+        return Promise.resolve();
+      },
+    });
+
+    await expect(service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    })).rejects.toMatchObject({ code: "authorization_expired" });
+    expect(controlPlane.events).toEqual(["sleep:1000", "complete", "sleep:1000"]);
+  });
+
+  it("cancels an in-progress polling sleep", async () => {
+    const controlPlane = new FakeControlPlane();
+    const service = new SafeTunnelService({
+      controlPlane,
+      stateStorage: new MemoryStateStorage(),
+      frpcTrustedCaPath: trustedCaPath,
+      now: () => new Date("2030-01-01T00:00:00.000Z"),
+    });
+    const controller = new AbortController();
+
+    const login = service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    }, {}, { signal: controller.signal });
+    // Let the flow reach the real initial pre-poll sleep, then cancel it.
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    expect(controlPlane.events).toEqual([]);
+    controller.abort();
+
+    await expect(login).rejects.toThrow("Safe Tunnel enablement was cancelled.");
+    expect(controlPlane.events).toEqual([]);
+  });
+
   it("rejects relative advanced frpc paths before Control API or durable effects", async () => {
     const loginControlPlane = new FakeControlPlane();
     const loginStorage = new MemoryStateStorage();
@@ -235,13 +409,17 @@ describe("applySafeTunnelLocalTarget", () => {
 function createService(
   controlPlane: SafeTunnelControlPlane,
   stateStorage: SafeTunnelStateStorage,
+  options: {
+    readonly now?: () => Date;
+    readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  } = {},
 ): SafeTunnelService {
   return new SafeTunnelService({
     controlPlane,
     stateStorage,
     frpcTrustedCaPath: trustedCaPath,
-    now: () => new Date("2030-01-01T00:00:00.000Z"),
-    sleep: () => Promise.resolve(),
+    now: options.now ?? (() => new Date("2030-01-01T00:00:00.000Z")),
+    ...(options.sleep === undefined ? { sleep: () => Promise.resolve() } : { sleep: options.sleep }),
   });
 }
 
@@ -318,6 +496,8 @@ class FakeControlPlane implements SafeTunnelControlPlane {
     lastSeenAt: "2030-01-01T00:00:00.000Z",
     nextHeartbeatSeconds: 30,
   };
+  completions: (SafeTunnelDeviceAuthorizationCompletion | Error)[] = [];
+  readonly events: string[] = [];
   heartbeatError: Error | undefined;
   readonly heartbeatInputs: {
     readonly clientVersion: string;
@@ -334,7 +514,12 @@ class FakeControlPlane implements SafeTunnelControlPlane {
   }
 
   completeDeviceAuthorization(): Promise<SafeTunnelDeviceAuthorizationCompletion> {
-    return Promise.resolve({ kind: "approved", authorization: this.authorization });
+    this.events.push("complete");
+    const next = this.completions.shift();
+    if (next === undefined) {
+      return Promise.resolve({ kind: "approved", authorization: this.authorization });
+    }
+    return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
   }
 
   registerMachine(input: {

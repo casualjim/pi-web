@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   HttpSafeTunnelControlPlane,
+  SafeTunnelControlPlaneError,
   safeTunnelClientVersion,
   type SafeTunnelFetch,
 } from "./safeTunnelControlPlane.js";
@@ -49,6 +50,71 @@ describe("HttpSafeTunnelControlPlane", () => {
     expect(transport.requests[1]?.init.body).toBe(JSON.stringify({
       deviceCode: "device-code-private",
     }));
+  });
+
+  it("parses device-completion 429 envelopes as polling control flow before generic mapping", async () => {
+    const secret = "raw-provider-secret";
+    const transport = sequencedFetch([
+      jsonResponse(429, { error: { code: "slow_down", message: secret } }, { "retry-after": "7" }),
+      jsonResponse(429, { error: { code: "rate_limit_exceeded", message: secret } }, { "retry-after": "4" }),
+      jsonResponse(429, { error: { code: "slow_down", message: secret } }),
+      jsonResponse(429, { error: { code: "slow_down", message: secret } }, { "retry-after": "soon" }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const complete = () => controlPlane.completeDeviceAuthorization({
+      controlApiBaseUrl,
+      deviceCode: "device-code-private",
+    });
+
+    await expect(complete()).resolves.toEqual({ kind: "slow_down", retryAfterSeconds: 7 });
+
+    const rateLimited = await complete().then(
+      () => { throw new Error("expected rate_limit_exceeded rejection"); },
+      (error: unknown) => error,
+    );
+    expect(rateLimited).toBeInstanceOf(SafeTunnelControlPlaneError);
+    expect(rateLimited).toMatchObject({
+      code: "rate_limited",
+      operation: "complete_device_authorization",
+      retryAfterSeconds: 4,
+    });
+    expect(String(rateLimited) + JSON.stringify(rateLimited)).not.toContain(secret);
+
+    // A slow_down without a trustworthy positive-integer Retry-After is not
+    // control flow; the owner must not guess a delay.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const untrusted = await complete().then(
+        () => { throw new Error("expected slow_down rejection"); },
+        (error: unknown) => error,
+      );
+      if (!(untrusted instanceof SafeTunnelControlPlaneError)) {
+        throw new Error("expected SafeTunnelControlPlaneError");
+      }
+      expect(untrusted.code).toBe("rate_limited");
+      expect(untrusted.retryAfterSeconds).toBeUndefined();
+    }
+  });
+
+  it("maps hosted device-completion terminal codes before generic HTTP mapping", async () => {
+    const transport = sequencedFetch([
+      jsonResponse(400, { error: { code: "device_code_expired" } }),
+      jsonResponse(403, { error: { code: "authorization_denied" } }),
+      jsonResponse(400, { error: { code: "invalid_device_code" } }),
+      jsonResponse(409, { error: { code: "device_authorization_completed" } }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const complete = () => controlPlane.completeDeviceAuthorization({
+      controlApiBaseUrl,
+      deviceCode: "device-code-private",
+    });
+
+    await expect(complete()).rejects.toMatchObject({
+      code: "authorization_expired",
+      operation: "complete_device_authorization",
+    });
+    await expect(complete()).rejects.toMatchObject({ code: "authorization_denied" });
+    await expect(complete()).rejects.toMatchObject({ code: "request_rejected" });
+    await expect(complete()).rejects.toMatchObject({ code: "conflict" });
   });
 
   it("registers one machine and preserves bearer credentials exactly in the request", async () => {
@@ -318,10 +384,14 @@ function heartbeatResponse() {
   };
 }
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 

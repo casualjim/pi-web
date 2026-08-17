@@ -13,6 +13,16 @@ import {
   type SafeTunnelRegisteredMachine,
 } from "./safeTunnelControlPlane.js";
 import {
+  hostedFrpcConfigToml,
+  hostedLocalPiWebUrl,
+  hostedMachineId,
+  hostedMachineSlug,
+  hostedMachineToken,
+  hostedProxyName,
+  hostedPublicHostname,
+  hostedPublicUrl,
+} from "./safeTunnelHostedFixtures.testSupport.js";
+import {
   SafeTunnelService,
   SafeTunnelServiceError,
   applySafeTunnelLocalTarget,
@@ -25,18 +35,18 @@ import {
   type SafeTunnelStateStorage,
 } from "./safeTunnelState.js";
 
-const machineToken = "piwt_mtok_v1_machine_private";
+const machineToken = hostedMachineToken;
 const connectorToken = "piwt_ctok_v1_connector_private";
-const frpcToken = "0123456789abcdef0123456789abcdef";
-const publicUrl = "https://machine.example.test";
-const localPiWebUrl = "http://127.0.0.1:8504";
+const machineSlug = hostedMachineSlug;
+const publicUrl = hostedPublicUrl;
+const localPiWebUrl = hostedLocalPiWebUrl;
 const trustedCaPath = "/private/safe-tunnel/frps-roots.pem";
 const machine = {
   controlApiBaseUrl: "https://control.example.test",
   credentialStatus: "active" as const,
-  machineId: "machine_123",
+  machineId: hostedMachineId,
   machineToken,
-  machineSlug: "machine-slug",
+  machineSlug,
   publicUrl,
 };
 
@@ -60,7 +70,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test/",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     }, {
       onDeviceAuthorization: (authorization) => {
         observed.push(`approval:${authorization.userCode}`);
@@ -80,7 +90,7 @@ describe("SafeTunnelService", () => {
     expect(JSON.stringify(storage.state)).not.toContain("credentialBoundary");
     expect(controlPlane.registerInputs).toEqual([expect.objectContaining({
       connectorAccessToken: connectorToken,
-      machineSlug: "machine-slug",
+      machineSlug,
     })]);
   });
 
@@ -98,7 +108,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     });
 
     expect(controlPlane.events).toEqual([
@@ -128,7 +138,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     });
 
     expect(controlPlane.events).toEqual([
@@ -159,7 +169,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     });
 
     expect(controlPlane.events).toEqual([
@@ -187,7 +197,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     })).rejects.toMatchObject({ code: "rate_limited" });
     expect(controlPlane.events).toEqual(["sleep:1000", "complete"]);
   });
@@ -206,7 +216,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     })).rejects.toMatchObject({ code: "authorization_expired" });
     expect(controlPlane.events).toEqual([]);
   });
@@ -228,7 +238,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     })).rejects.toMatchObject({ code: "authorization_expired" });
     expect(controlPlane.events).toEqual(["sleep:1000", "complete", "sleep:1000"]);
   });
@@ -247,7 +257,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     }, {}, { signal: controller.signal });
     // Let the flow reach the real initial pre-poll sleep, then cancel it.
     await new Promise((resolve) => { setTimeout(resolve, 0); });
@@ -272,7 +282,7 @@ describe("SafeTunnelService", () => {
       controlApiBaseUrl: "https://control.example.test",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     }, {
       onMachineRegistered: () => { observed.push("registered"); },
     })).rejects.toMatchObject({ code: "invalid_login" });
@@ -296,7 +306,7 @@ describe("SafeTunnelService", () => {
       frpcPath: "relative/frpc",
       localPiWebUrl,
       machineName: "Test machine",
-      machineSlug: "machine-slug",
+      machineSlug,
     })).rejects.toMatchObject({ code: "invalid_login" });
     expect(startAuthorization).not.toHaveBeenCalled();
     expect(loginControlPlane.registerInputs).toEqual([]);
@@ -489,39 +499,19 @@ class FakeControlPlane implements SafeTunnelControlPlane {
       id: machine.machineId,
       accountId: "account_123",
       name: "Test machine",
-      slug: "machine-slug",
+      slug: hostedMachineSlug,
     },
-    publicHostname: "machine.example.test",
+    publicHostname: hostedPublicHostname,
     publicUrl,
     machineToken,
   };
   tunnelConfig: SafeTunnelMachineTunnelConfig = {
     machineId: machine.machineId,
-    publicHostname: "machine.example.test",
+    publicHostname: hostedPublicHostname,
     publicUrl,
     localPiWebUrl,
-    proxyName: "pi-web-machine-123",
-    frpcConfigToml: [
-      "serverAddr = \"relay.example.test\"",
-      "serverPort = 7000",
-      "user = \"\"",
-      `metadatas.pi_web_machine_token = "${machineToken}"`,
-      "",
-      "[auth]",
-      "method = \"token\"",
-      `token = "${frpcToken}"`,
-      "",
-      "[transport.tls]",
-      "enable = true",
-      "",
-      "[[proxies]]",
-      "name = \"pi-web-machine-123\"",
-      "type = \"http\"",
-      "localIP = \"127.0.0.1\"",
-      "localPort = 8504",
-      "customDomains = [\"machine.example.test\"]",
-      "",
-    ].join("\n"),
+    proxyName: hostedProxyName,
+    frpcConfigToml: hostedFrpcConfigToml,
   };
   heartbeat: SafeTunnelMachineHeartbeat = {
     machineId: machine.machineId,

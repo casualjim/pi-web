@@ -5,9 +5,19 @@ import {
   validateSafeTunnelFrpcConfig,
   type SafeTunnelFrpcConfigInput,
 } from "./safeTunnelFrpcConfig.js";
+import {
+  hostedFrpcConfigToml,
+  hostedLocalPiWebUrl,
+  hostedMachineToken,
+  hostedProxyName,
+  hostedPublicHostname,
+  hostedRelayAuthToken,
+  hostedRelayServerAddr,
+  hostedRelayServerPort,
+} from "./safeTunnelHostedFixtures.testSupport.js";
 
-const frpcToken = "private-relay-token-0123456789abcdef";
-const machineToken = "piwt_mtok_v1_machine_private";
+const frpcToken = hostedRelayAuthToken;
+const machineToken = hostedMachineToken;
 const trustedCaFile = "/private/safe-tunnel/frps-roots.pem";
 const trust = { trustedCaFile, machineToken } as const;
 
@@ -18,29 +28,14 @@ function prepareSafeTunnelFrpcConfig(
   return prepareSafeTunnelFrpcConfigWithTrust(configInput, desiredLocalPiWebUrl, trust);
 }
 
-const providerConfig = [
-  'serverAddr = "relay.example.test"',
-  "serverPort = 7000",
-  'user = ""',
-  `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}`,
-  'auth.method = "token"',
-  `auth.token = ${JSON.stringify(frpcToken)}`,
-  "transport.tls.enable = true",
-  "",
-  "[[proxies]]",
-  'name = "account-machine"',
-  'type = "http"',
-  'localIP = "127.0.0.1"',
-  "localPort = 8504",
-  'customDomains = ["dev-box.ns.tunnels.pi-web.dev"]',
-  "",
-].join("\n");
+// The byte-exact hosted provider shape; see safeTunnelHostedFixtures.testSupport.ts.
+const providerConfig = hostedFrpcConfigToml;
 
 const input = {
   frpcConfigToml: providerConfig,
-  localPiWebUrl: "http://127.0.0.1:8504",
-  proxyName: "account-machine",
-  publicHostname: "dev-box.ns.tunnels.pi-web.dev",
+  localPiWebUrl: hostedLocalPiWebUrl,
+  proxyName: hostedProxyName,
+  publicHostname: hostedPublicHostname,
 } as const;
 
 const templateAction = "{{ .Envs.PI_WEB_SERVICE_CREDENTIAL }}";
@@ -53,7 +48,7 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
   {
     field: "serverAddr",
     frpcConfigToml: providerConfig.replace(
-      'serverAddr = "relay.example.test"',
+      `serverAddr = ${JSON.stringify(hostedRelayServerAddr)}`,
       `serverAddr = ${JSON.stringify(templateAction)}`,
     ),
   },
@@ -67,15 +62,15 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
   {
     field: "auth.method",
     frpcConfigToml: providerConfig.replace(
-      'auth.method = "token"',
-      `auth.method = ${JSON.stringify(templateAction)}`,
+      'method = "token"',
+      `method = ${JSON.stringify(templateAction)}`,
     ),
   },
   {
     field: "auth.token",
     frpcConfigToml: providerConfig.replace(
-      `auth.token = ${JSON.stringify(frpcToken)}`,
-      `auth.token = ${JSON.stringify(templateAction)}`,
+      `token = ${JSON.stringify(frpcToken)}`,
+      `token = ${JSON.stringify(templateAction)}`,
     ),
   },
   {
@@ -88,7 +83,7 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
   {
     field: "proxies.name",
     frpcConfigToml: providerConfig.replace(
-      'name = "account-machine"',
+      `name = ${JSON.stringify(hostedProxyName)}`,
       `name = ${JSON.stringify(templateAction)}`,
     ),
     inputOverrides: { proxyName: templateAction },
@@ -117,12 +112,33 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
   {
     field: "proxies.customDomains",
     frpcConfigToml: providerConfig.replace(
-      'customDomains = ["dev-box.ns.tunnels.pi-web.dev"]',
+      `customDomains = [${JSON.stringify(hostedPublicHostname)}]`,
       `customDomains = [${JSON.stringify(templateAction)}]`,
     ),
     inputOverrides: { publicHostname: templateAction },
   },
 ];
+
+describe("hosted provider fixture", () => {
+  it("keeps the exact hosted serialization shape", () => {
+    // Drift guard for safeTunnelHostedFixtures.testSupport.ts: the hosted
+    // serializer emits root keys first (including the dotted machine-token
+    // metadata and transport.tls.enable), then the [auth] table, then the
+    // single [[proxies]] element, with one trailing newline.
+    const [rootSection] = providerConfig.split("\n[", 1);
+    expect(rootSection).toContain(`serverAddr = ${JSON.stringify(hostedRelayServerAddr)}`);
+    expect(rootSection).toContain('user = ""');
+    expect(rootSection).toContain(
+      `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}`,
+    );
+    expect(rootSection).toContain("transport.tls.enable = true");
+    expect(providerConfig).not.toContain("[metadatas]");
+    expect(providerConfig).toContain("\n[auth]\n");
+    expect(providerConfig.indexOf("[auth]")).toBeLessThan(providerConfig.indexOf("[[proxies]]"));
+    expect(providerConfig.endsWith("\n")).toBe(true);
+    expect(providerConfig.endsWith("\n\n")).toBe(false);
+  });
+});
 
 describe("prepareSafeTunnelFrpcConfig", () => {
   it("generates one bounded proxy using only PI WEB's desired local target", () => {
@@ -132,24 +148,24 @@ describe("prepareSafeTunnelFrpcConfig", () => {
     );
 
     expect(parse(generated)).toEqual({
-      serverAddr: "relay.example.test",
-      serverPort: 7000,
+      serverAddr: hostedRelayServerAddr,
+      serverPort: hostedRelayServerPort,
       user: "",
       metadatas: { pi_web_machine_token: machineToken },
       auth: { method: "token", token: frpcToken },
       transport: {
         tls: {
           enable: true,
-          serverName: "relay.example.test",
+          serverName: hostedRelayServerAddr,
           trustedCaFile,
         },
       },
       proxies: [{
-        name: "account-machine",
+        name: hostedProxyName,
         type: "http",
         localIP: "::1",
         localPort: 19000,
-        customDomains: ["dev-box.ns.tunnels.pi-web.dev"],
+        customDomains: [hostedPublicHostname],
       }],
     });
     expect(generated).not.toContain("127.0.0.1");
@@ -244,8 +260,8 @@ describe("prepareSafeTunnelFrpcConfig", () => {
 
   it("rejects templates that could inject TOML structure after validation", () => {
     const frpcConfigToml = providerConfig.replace(
-      `auth.token = ${JSON.stringify(frpcToken)}`,
-      `auth.token = ${JSON.stringify(templateAction)}`,
+      `token = ${JSON.stringify(frpcToken)}`,
+      `token = ${JSON.stringify(templateAction)}`,
     );
     const renderedPayload = [
       `${frpcToken}"`,
@@ -253,8 +269,10 @@ describe("prepareSafeTunnelFrpcConfig", () => {
       "#",
     ].join("\n");
 
+    // Inside the hosted [auth] table the rendered payload still injects TOML
+    // structure (a smuggled auth.includes key), which the allowlist rejects.
     expect(parse(frpcConfigToml.replace(templateAction, renderedPayload)))
-      .toMatchObject({ includes: ["/tmp/provider-owned/*.toml"] });
+      .toMatchObject({ auth: { includes: ["/tmp/provider-owned/*.toml"] } });
     expect(() => prepareSafeTunnelFrpcConfig(
       { ...input, frpcConfigToml },
       input.localPiWebUrl,
@@ -264,8 +282,8 @@ describe("prepareSafeTunnelFrpcConfig", () => {
   it("checks the serialized boundary when TOML escapes hide a template action", () => {
     const escapedTemplateAction = "\\u007b\\u007b .Envs.PI_WEB_SERVICE_CREDENTIAL \\u007d\\u007d";
     const frpcConfigToml = providerConfig.replace(
-      `auth.token = ${JSON.stringify(frpcToken)}`,
-      `auth.token = "${escapedTemplateAction}"`,
+      `token = ${JSON.stringify(frpcToken)}`,
+      `token = "${escapedTemplateAction}"`,
     );
 
     expect(frpcConfigToml).not.toContain("{{");
@@ -282,13 +300,13 @@ describe("prepareSafeTunnelFrpcConfig", () => {
       '\nincludes = ["/tmp/provider-owned/*.toml"]\n\n[[proxies]]',
     )],
     ["unexpected proxy field", providerConfig.replace(
-      'customDomains = ["dev-box.ns.tunnels.pi-web.dev"]',
-      'customDomains = ["dev-box.ns.tunnels.pi-web.dev"]\nplugin = "static_file"',
+      `customDomains = [${JSON.stringify(hostedPublicHostname)}]`,
+      `customDomains = [${JSON.stringify(hostedPublicHostname)}]\nplugin = "static_file"`,
     )],
     ["provider target mismatch", providerConfig.replace("localPort = 8504", "localPort = 22")],
     ["additional public hostname", providerConfig.replace(
-      'customDomains = ["dev-box.ns.tunnels.pi-web.dev"]',
-      'customDomains = ["dev-box.ns.tunnels.pi-web.dev", "admin.example.test"]',
+      `customDomains = [${JSON.stringify(hostedPublicHostname)}]`,
+      `customDomains = [${JSON.stringify(hostedPublicHostname)}, "admin.example.test"]`,
     )],
     ["plaintext relay transport", providerConfig.replace(
       "transport.tls.enable = true",
@@ -343,7 +361,7 @@ describe("prepareSafeTunnelFrpcConfig", () => {
     for (const unsafe of [
       generated.replace(trustedCaFile, "/tmp/provider-ca.pem"),
       generated.replace(
-        'serverName = "relay.example.test"',
+        `serverName = ${JSON.stringify(hostedRelayServerAddr)}`,
         'serverName = "attacker.example"',
       ),
       generated.replace(`trustedCaFile = ${JSON.stringify(trustedCaFile)}\n`, ""),

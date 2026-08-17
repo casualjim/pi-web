@@ -10,6 +10,15 @@ import type {
 import type { SafeTunnelFrpcRuntimeFiles } from "./safeTunnelFrpcRuntimeFiles.js";
 import { applySafeTunnelLocalTarget } from "./safeTunnelService.js";
 import {
+  hostedFrpcConfigToml,
+  hostedLocalPiWebUrl,
+  hostedMachineId,
+  hostedMachineToken,
+  hostedProxyName,
+  hostedPublicHostname,
+  hostedPublicUrl,
+} from "./safeTunnelHostedFixtures.testSupport.js";
+import {
   SafeTunnelFrpcSupervisor,
   SafeTunnelFrpcSupervisorError,
   type SafeTunnelFrpcConfigProvider,
@@ -20,9 +29,8 @@ import {
 const configPath = "/private/safe-tunnel/frpc.toml";
 const trustedCaPath = "/private/safe-tunnel/frps-roots.pem";
 const managedPath = "/private/safe-tunnel/bin/frpc";
-const publicUrl = "https://machine.example.test";
-const frpcToken = "0123456789abcdef0123456789abcdef";
-const machineToken = "piwt_mtok_v1_machine_private";
+const publicUrl = hostedPublicUrl;
+const machineToken = hostedMachineToken;
 
 describe("SafeTunnelFrpcSupervisor", () => {
   it("writes one constrained config and launches one owned child", async () => {
@@ -220,33 +228,13 @@ function createFixture(): {
 
 class FakeConfigProvider implements SafeTunnelFrpcConfigProvider {
   config = applySafeTunnelLocalTarget({
-    machineId: "machine_123",
-    publicHostname: "machine.example.test",
+    machineId: hostedMachineId,
+    publicHostname: hostedPublicHostname,
     publicUrl,
-    localPiWebUrl: "http://127.0.0.1:8504",
-    proxyName: "pi-web-machine-123",
-    frpcConfigToml: [
-      "serverAddr = \"relay.example.test\"",
-      "serverPort = 7000",
-      "user = \"\"",
-      `metadatas.pi_web_machine_token = "${machineToken}"`,
-      "",
-      "[auth]",
-      "method = \"token\"",
-      `token = "${frpcToken}"`,
-      "",
-      "[transport.tls]",
-      "enable = true",
-      "",
-      "[[proxies]]",
-      "name = \"pi-web-machine-123\"",
-      "type = \"http\"",
-      "localIP = \"127.0.0.1\"",
-      "localPort = 8504",
-      "customDomains = [\"machine.example.test\"]",
-      "",
-    ].join("\n"),
-  }, "http://127.0.0.1:8504", trustedCaPath, machineToken);
+    localPiWebUrl: hostedLocalPiWebUrl,
+    proxyName: hostedProxyName,
+    frpcConfigToml: hostedFrpcConfigToml,
+  }, hostedLocalPiWebUrl, trustedCaPath, machineToken);
   error: Error | undefined;
   observedSignal: AbortSignal | undefined;
   waitForAbort = false;

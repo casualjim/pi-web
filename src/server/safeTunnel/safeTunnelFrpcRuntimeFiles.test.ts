@@ -60,12 +60,17 @@ describe("FileSafeTunnelFrpcRuntimeFiles", () => {
     expect(await readFile(configPath, "utf8")).toBe(
       "serverAddr = \"new-relay.example.test\"\n",
     );
-    expect((await stat(runtimeDirectory)).mode & 0o777)
-      .toBe(safeTunnelFrpcRuntimeDirectoryMode);
-    expect((await stat(configPath)).mode & 0o777)
-      .toBe(safeTunnelFrpcConfigFileMode);
-    expect((await stat(trustedCaPath)).mode & 0o777)
-      .toBe(safeTunnelFrpcTrustedCaFileMode);
+    // POSIX permission bits are only observable where the filesystem honors
+    // them; the injected linux platform still exercises the chmod path on
+    // every host.
+    if (process.platform !== "win32") {
+      expect((await stat(runtimeDirectory)).mode & 0o777)
+        .toBe(safeTunnelFrpcRuntimeDirectoryMode);
+      expect((await stat(configPath)).mode & 0o777)
+        .toBe(safeTunnelFrpcConfigFileMode);
+      expect((await stat(trustedCaPath)).mode & 0o777)
+        .toBe(safeTunnelFrpcTrustedCaFileMode);
+    }
     expect(await readFile(trustedCaPath, "utf8"))
       .toContain(getCACertificates("default")[0]);
     expect((await readdir(runtimeDirectory)).sort()).toEqual([

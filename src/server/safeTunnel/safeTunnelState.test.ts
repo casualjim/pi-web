@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   FileSafeTunnelStateStorage,
@@ -26,8 +26,10 @@ afterEach(async () => {
 
 describe("Safe Tunnel state paths", () => {
   it("stores PI WEB-owned state beneath PI_WEB_DATA_DIR", () => {
+    // Resolved with the host path semantics so the layout contract holds on
+    // every platform, not only on POSIX path shapes.
     expect(defaultSafeTunnelStatePath({ PI_WEB_DATA_DIR: "./data" }, "/workspace"))
-      .toBe("/workspace/data/safe-tunnel/config.json");
+      .toBe(join(resolve("/workspace", "data"), "safe-tunnel", "config.json"));
   });
 
 });
@@ -111,9 +113,14 @@ describe("FileSafeTunnelStateStorage", () => {
         },
       },
     });
-    expect((await stat(join(tempDirectory, "data", "safe-tunnel"))).mode & 0o777)
-      .toBe(safeTunnelStateDirectoryMode);
-    expect((await stat(filePath)).mode & 0o777).toBe(safeTunnelStateFileMode);
+    // POSIX permission bits are only observable where the filesystem
+    // honors them; the injected linux platform still exercises the chmod
+    // path on every host.
+    if (process.platform !== "win32") {
+      expect((await stat(join(tempDirectory, "data", "safe-tunnel"))).mode & 0o777)
+        .toBe(safeTunnelStateDirectoryMode);
+      expect((await stat(filePath)).mode & 0o777).toBe(safeTunnelStateFileMode);
+    }
     const source = await readFile(filePath, "utf8");
     expect(source).toContain('"machineToken": "AbC-._~+/=="');
     expect(source).not.toContain("credentialBoundary");

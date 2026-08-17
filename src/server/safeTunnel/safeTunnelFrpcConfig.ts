@@ -9,8 +9,21 @@ const maximumFrpcSecretCharacters = 4_096;
 const maximumFrpcNameCharacters = 253;
 const maximumFrpcPathCharacters = 4_096;
 
-const rootKeys = new Set(["auth", "proxies", "serverAddr", "serverPort", "transport"]);
+// The hosted fail-closed machine identity key: the frps NewProxy plugin
+// authorizes an exact machine/proxy/domain from this global metadata value.
+const frpcMachineTokenMetadataKey = "pi_web_machine_token";
+
+const rootKeys = new Set([
+  "auth",
+  "metadatas",
+  "proxies",
+  "serverAddr",
+  "serverPort",
+  "transport",
+  "user",
+]);
 const authKeys = new Set(["method", "token"]);
+const machineMetadataKeys = new Set([frpcMachineTokenMetadataKey]);
 const transportKeys = new Set(["tls"]);
 const providerTlsKeys = new Set(["enable"]);
 const preparedTlsKeys = new Set(["enable", "serverName", "trustedCaFile"]);
@@ -32,6 +45,14 @@ export interface SafeTunnelFrpcConfigInput {
 export interface SafeTunnelFrpcTransportTrust {
   /** Absolute PI WEB-owned CA bundle path; provider TOML never selects this path. */
   readonly trustedCaFile: string;
+  /**
+   * Persisted machine credential used for the tunnel-config request. The
+   * provider TOML must carry it as global metadatas.pi_web_machine_token so
+   * the fail-closed frps NewProxy plugin authorizes this exact machine;
+   * the [auth].token transport credential alone is intentionally
+   * insufficient. Never logged or returned to the browser.
+   */
+  readonly machineToken: string;
 }
 
 /**
@@ -59,6 +80,7 @@ export function prepareSafeTunnelFrpcConfig(
   assertOnlyKeys(parsed, rootKeys);
   const serverAddr = requireServerAddress(parsed["serverAddr"]);
   const serverPort = requirePort(parsed["serverPort"]);
+  requireHostedMachineIdentity(parsed, trust.machineToken);
   const auth = requireTable(parsed["auth"]);
   assertOnlyKeys(auth, authKeys);
   const authMethod = auth["method"] === undefined
@@ -103,6 +125,8 @@ export function prepareSafeTunnelFrpcConfig(
   const prepared = stringify({
     serverAddr,
     serverPort,
+    user: "",
+    metadatas: { [frpcMachineTokenMetadataKey]: trust.machineToken },
     auth: {
       method: "token",
       token: authToken,
@@ -147,6 +171,8 @@ export function validateSafeTunnelFrpcConfig(
   assertOnlyKeys(parsed, rootKeys);
   const serverAddr = requireServerAddress(parsed["serverAddr"]);
   requirePort(parsed["serverPort"]);
+  // Re-run the hosted machine-identity checks on the exact pre-launch TOML.
+  requireHostedMachineIdentity(parsed, trust.machineToken);
 
   const auth = requireTable(parsed["auth"]);
   assertOnlyKeys(auth, authKeys);
@@ -182,6 +208,21 @@ export function validateSafeTunnelFrpcConfig(
 interface LocalTarget {
   readonly localIP: string;
   readonly localPort: number;
+}
+
+/**
+ * Requires the hosted machine identity exactly as the fail-closed frps
+ * NewProxy authorization contract needs it: root user = "" (so frp does not
+ * prefix the assigned proxy name) and exactly the pi_web_machine_token global
+ * metadata equal to the persisted machine credential. Parsed structure is
+ * compared, so a TOML [metadatas] table is accepted only where it is
+ * equivalent to the hosted dotted key.
+ */
+function requireHostedMachineIdentity(parsed: TomlTable, machineToken: string): void {
+  if (parsed["user"] !== "") throw invalidConfig();
+  const metadatas = requireTable(parsed["metadatas"]);
+  assertOnlyKeys(metadatas, machineMetadataKeys);
+  if (metadatas[frpcMachineTokenMetadataKey] !== machineToken) throw invalidConfig();
 }
 
 function localTarget(value: string): LocalTarget {

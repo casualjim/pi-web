@@ -258,6 +258,33 @@ describe("SafeTunnelService", () => {
     expect(controlPlane.events).toEqual([]);
   });
 
+  it("rejects a registration bound to a different account before persisting", async () => {
+    const controlPlane = new FakeControlPlane();
+    controlPlane.registered = {
+      ...controlPlane.registered,
+      machine: { ...controlPlane.registered.machine, accountId: "account_other" },
+    };
+    const storage = new MemoryStateStorage();
+    const service = createService(controlPlane, storage);
+    const observed: string[] = [];
+
+    await expect(service.login({
+      controlApiBaseUrl: "https://control.example.test",
+      localPiWebUrl,
+      machineName: "Test machine",
+      machineSlug: "machine-slug",
+    }, {
+      onMachineRegistered: () => { observed.push("registered"); },
+    })).rejects.toMatchObject({ code: "invalid_login" });
+
+    // Registration was dispatched, but nothing is persisted or observed for a
+    // machine bound to an account other than the approving one.
+    expect(controlPlane.registerInputs).toHaveLength(1);
+    expect(observed).toEqual([]);
+    expect(storage.saves).toEqual([]);
+    expect(storage.state.machine).toBeUndefined();
+  });
+
   it("rejects relative advanced frpc paths before Control API or durable effects", async () => {
     const loginControlPlane = new FakeControlPlane();
     const loginStorage = new MemoryStateStorage();
@@ -308,6 +335,8 @@ describe("SafeTunnelService", () => {
     expect(config.frpcConfigToml).toContain(`trustedCaFile = "${trustedCaPath}"`);
     expect(config.frpcConfigToml).toContain("localIP = \"127.0.0.1\"");
     expect(config.frpcConfigToml).toContain("localPort = 8504");
+    expect(config.frpcConfigToml).toContain("user = \"\"");
+    expect(config.frpcConfigToml).toContain(`pi_web_machine_token = "${machineToken}"`);
 
     await expect(service.recordHeartbeat({ tunnelStatus: "running" })).resolves.toEqual(
       controlPlane.heartbeat,
@@ -390,6 +419,7 @@ describe("applySafeTunnelLocalTarget", () => {
       new FakeControlPlane().tunnelConfig,
       "http://127.0.0.1:8600",
       trustedCaPath,
+      machineToken,
     );
 
     expect(prepared.frpcConfigToml).toContain("localPort = 8600");
@@ -402,7 +432,7 @@ describe("applySafeTunnelLocalTarget", () => {
     expect(() => applySafeTunnelLocalTarget({
       ...config,
       frpcConfigToml: `${config.frpcConfigToml}\n[[proxies]]\nname = "extra"\n`,
-    }, localPiWebUrl, trustedCaPath)).toThrow(SafeTunnelServiceError);
+    }, localPiWebUrl, trustedCaPath, machineToken)).toThrow(SafeTunnelServiceError);
   });
 });
 
@@ -454,7 +484,7 @@ class FakeControlPlane implements SafeTunnelControlPlane {
     expiresAt: "2030-01-01T01:00:00.000Z",
     account: { id: "account_123", publicNamespace: "account" },
   };
-  readonly registered: SafeTunnelRegisteredMachine = {
+  registered: SafeTunnelRegisteredMachine = {
     machine: {
       id: machine.machineId,
       accountId: "account_123",
@@ -474,6 +504,8 @@ class FakeControlPlane implements SafeTunnelControlPlane {
     frpcConfigToml: [
       "serverAddr = \"relay.example.test\"",
       "serverPort = 7000",
+      "user = \"\"",
+      `metadatas.pi_web_machine_token = "${machineToken}"`,
       "",
       "[auth]",
       "method = \"token\"",

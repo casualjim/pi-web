@@ -7,8 +7,9 @@ import {
 } from "./safeTunnelFrpcConfig.js";
 
 const frpcToken = "private-relay-token-0123456789abcdef";
+const machineToken = "piwt_mtok_v1_machine_private";
 const trustedCaFile = "/private/safe-tunnel/frps-roots.pem";
-const trust = { trustedCaFile } as const;
+const trust = { trustedCaFile, machineToken } as const;
 
 function prepareSafeTunnelFrpcConfig(
   configInput: SafeTunnelFrpcConfigInput,
@@ -20,6 +21,8 @@ function prepareSafeTunnelFrpcConfig(
 const providerConfig = [
   'serverAddr = "relay.example.test"',
   "serverPort = 7000",
+  'user = ""',
+  `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}`,
   'auth.method = "token"',
   `auth.token = ${JSON.stringify(frpcToken)}`,
   "transport.tls.enable = true",
@@ -131,6 +134,8 @@ describe("prepareSafeTunnelFrpcConfig", () => {
     expect(parse(generated)).toEqual({
       serverAddr: "relay.example.test",
       serverPort: 7000,
+      user: "",
+      metadatas: { pi_web_machine_token: machineToken },
       auth: { method: "token", token: frpcToken },
       transport: {
         tls: {
@@ -148,6 +153,63 @@ describe("prepareSafeTunnelFrpcConfig", () => {
       }],
     });
     expect(generated).not.toContain("127.0.0.1");
+  });
+
+  it("preserves the empty user and exact machine metadata in the serialized config", () => {
+    const generated = prepareSafeTunnelFrpcConfig(input, input.localPiWebUrl);
+
+    // frps NewProxy authorization fails closed without this exact identity.
+    expect(generated).toContain('user = ""');
+    expect(generated).toContain(
+      `pi_web_machine_token = ${JSON.stringify(machineToken)}`,
+    );
+  });
+
+  it("accepts an equivalent [metadatas] table representation", () => {
+    const tableForm = providerConfig
+      .replace(
+        `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}\n`,
+        "",
+      )
+      .replace(
+        "transport.tls.enable = true\n",
+        `transport.tls.enable = true\n\n[metadatas]\npi_web_machine_token = ${JSON.stringify(machineToken)}\n`,
+      );
+    expect(parse(tableForm)).toEqual(parse(providerConfig));
+
+    const generated = prepareSafeTunnelFrpcConfig(
+      { ...input, frpcConfigToml: tableForm },
+      input.localPiWebUrl,
+    );
+    expect(generated).toBe(prepareSafeTunnelFrpcConfig(input, input.localPiWebUrl));
+  });
+
+  it.each([
+    ["missing empty user", providerConfig.replace('user = ""\n', "")],
+    ["non-empty user", providerConfig.replace('user = ""', 'user = "prefix"')],
+    ["missing machine metadata", providerConfig.replace(
+      `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}\n`,
+      "",
+    )],
+    ["extra provider metadata", providerConfig.replace(
+      "transport.tls.enable = true",
+      'metadatas.workload = "other"\ntransport.tls.enable = true',
+    )],
+    ["mismatched machine token", providerConfig.replace(
+      JSON.stringify(machineToken),
+      JSON.stringify("piwt_mtok_v1_other_machine"),
+    )],
+    // A [metadatas] table here would capture the following transport key, so
+    // it is not equivalent to the hosted dotted key.
+    ["misplaced [metadatas] table", providerConfig.replace(
+      `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}`,
+      `[metadatas]\npi_web_machine_token = ${JSON.stringify(machineToken)}`,
+    )],
+  ])("rejects %s", (_label, frpcConfigToml) => {
+    expect(() => prepareSafeTunnelFrpcConfig(
+      { ...input, frpcConfigToml },
+      input.localPiWebUrl,
+    )).toThrow("provider frpc configuration is invalid");
   });
 
   it.each([
@@ -285,10 +347,19 @@ describe("prepareSafeTunnelFrpcConfig", () => {
         'serverName = "attacker.example"',
       ),
       generated.replace(`trustedCaFile = ${JSON.stringify(trustedCaFile)}\n`, ""),
+      generated.replace('user = ""\n', ""),
+      generated.replace(machineToken, "piwt_mtok_v1_other_machine"),
     ]) {
       expect(() => { validateSafeTunnelFrpcConfig(unsafe, trust); })
         .toThrow("provider frpc configuration is invalid");
     }
+    // The expected machine identity itself is bound to the persisted credential.
+    expect(() => {
+      validateSafeTunnelFrpcConfig(generated, {
+        ...trust,
+        machineToken: "piwt_mtok_v1_other_machine",
+      });
+    }).toThrow("provider frpc configuration is invalid");
   });
 
   it("rejects malformed or oversized TOML before it can reach frpc", () => {

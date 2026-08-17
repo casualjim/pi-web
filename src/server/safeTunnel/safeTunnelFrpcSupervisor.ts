@@ -201,7 +201,10 @@ export class SafeTunnelFrpcSupervisor implements SafeTunnelFrpcRuntime {
     try {
       validateSafeTunnelFrpcConfig(
         tunnelConfig.frpcConfigToml,
-        { trustedCaFile: this.dependencies.files.trustedCaPath },
+        {
+          trustedCaFile: this.dependencies.files.trustedCaPath,
+          machineToken: tunnelConfig.machineToken,
+        },
       );
     } catch {
       throw this.failStart(new SafeTunnelFrpcSupervisorError("tunnel_config_failed"));

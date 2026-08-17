@@ -22,6 +22,7 @@ const trustedCaPath = "/private/safe-tunnel/frps-roots.pem";
 const managedPath = "/private/safe-tunnel/bin/frpc";
 const publicUrl = "https://machine.example.test";
 const frpcToken = "0123456789abcdef0123456789abcdef";
+const machineToken = "piwt_mtok_v1_machine_private";
 
 describe("SafeTunnelFrpcSupervisor", () => {
   it("writes one constrained config and launches one owned child", async () => {
@@ -123,6 +124,24 @@ describe("SafeTunnelFrpcSupervisor", () => {
     });
   });
 
+  it("rejects a prepared config that lost its machine identity before launch", async () => {
+    const fixture = createFixture();
+    fixture.configProvider.config = {
+      ...fixture.configProvider.config,
+      frpcConfigToml: fixture.configProvider.config.frpcConfigToml.replace(
+        `pi_web_machine_token = "${machineToken}"\n`,
+        "",
+      ),
+    };
+
+    await expect(fixture.supervisor.start({})).rejects.toMatchObject({
+      code: "tunnel_config_failed",
+    });
+
+    expect(fixture.files.writes).toEqual([]);
+    expect(fixture.launcher.requests).toEqual([]);
+  });
+
   it("cancels an in-progress configuration request before stopping", async () => {
     const fixture = createFixture();
     fixture.configProvider.waitForAbort = true;
@@ -200,7 +219,7 @@ function createFixture(): {
 }
 
 class FakeConfigProvider implements SafeTunnelFrpcConfigProvider {
-  readonly config = applySafeTunnelLocalTarget({
+  config = applySafeTunnelLocalTarget({
     machineId: "machine_123",
     publicHostname: "machine.example.test",
     publicUrl,
@@ -209,6 +228,8 @@ class FakeConfigProvider implements SafeTunnelFrpcConfigProvider {
     frpcConfigToml: [
       "serverAddr = \"relay.example.test\"",
       "serverPort = 7000",
+      "user = \"\"",
+      `metadatas.pi_web_machine_token = "${machineToken}"`,
       "",
       "[auth]",
       "method = \"token\"",
@@ -225,7 +246,7 @@ class FakeConfigProvider implements SafeTunnelFrpcConfigProvider {
       "customDomains = [\"machine.example.test\"]",
       "",
     ].join("\n"),
-  }, "http://127.0.0.1:8504", trustedCaPath);
+  }, "http://127.0.0.1:8504", trustedCaPath, machineToken);
   error: Error | undefined;
   observedSignal: AbortSignal | undefined;
   waitForAbort = false;

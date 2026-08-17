@@ -76,6 +76,12 @@ export interface SafeTunnelLoginResult {
 export interface SafeTunnelPreparedTunnelConfig extends SafeTunnelMachineTunnelConfig {
   readonly localPiWebUrl: string;
   readonly frpcConfigToml: string;
+  /**
+   * Persisted machine credential the prepared TOML must carry as global
+   * machine metadata. Server-internal operation memory only: never returned
+   * to the browser or logged.
+   */
+  readonly machineToken: string;
 }
 
 export interface SafeTunnelServiceDependencies {
@@ -161,6 +167,12 @@ export class SafeTunnelService {
         clientVersion: safeTunnelClientVersion,
       }),
     );
+    // The registered machine must belong to the account that approved this
+    // device authorization; a mismatch is invalid provider output, not an
+    // account selection.
+    if (registeredMachine.machine.accountId !== authorization.account.id) {
+      throw new SafeTunnelServiceError("invalid_login");
+    }
     if (registeredMachine.machine.slug !== login.machineSlug) {
       throw new SafeTunnelServiceError("invalid_login");
     }
@@ -250,6 +262,7 @@ export class SafeTunnelService {
       tunnelConfig,
       loaded.state.localPiWebUrl,
       this.frpcTrustedCaPath,
+      credentials.machineToken,
     );
   }
 
@@ -460,18 +473,20 @@ export function applySafeTunnelLocalTarget(
   tunnelConfig: SafeTunnelMachineTunnelConfig,
   localPiWebUrl: string,
   frpcTrustedCaPath: string,
+  machineToken: string,
 ): SafeTunnelPreparedTunnelConfig {
   try {
     const normalizedLocalPiWebUrl = normalizeSafeTunnelLocalPiWebUrl(localPiWebUrl);
     const frpcConfigToml = prepareSafeTunnelFrpcConfig(
       tunnelConfig,
       normalizedLocalPiWebUrl,
-      { trustedCaFile: frpcTrustedCaPath },
+      { trustedCaFile: frpcTrustedCaPath, machineToken },
     );
     return {
       ...tunnelConfig,
       localPiWebUrl: normalizedLocalPiWebUrl,
       frpcConfigToml,
+      machineToken,
     };
   } catch {
     throw new SafeTunnelServiceError("invalid_tunnel_config");

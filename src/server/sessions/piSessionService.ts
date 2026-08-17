@@ -9,8 +9,11 @@ import {
   createAgentSessionServices,
   createEditToolDefinition,
   defineTool,
+  hasTrustRequiringProjectResources,
+  ProjectTrustStore,
   readStoredCredential,
   SessionManager,
+  SettingsManager,
   type AgentSessionRuntimeDiagnostic,
   type AgentSessionServices,
   type CreateAgentSessionRuntimeFactory,
@@ -19,6 +22,9 @@ import {
   type ExtensionUIDialogOptions,
   type ExtensionUIContext,
   type ModelRuntime,
+  type ProjectTrustContext,
+  type ProjectTrustEvent,
+  type ProjectTrustEventResult,
   type ResourceDiagnostic,
 } from "@earendil-works/pi-coding-agent";
 import type { ClientArchiveSessionsResponse, ClientCommand, ClientCommandResult, ClientMessagePage, ClientSession, ClientSessionCleanupExecuteResponse, ClientSessionCleanupPreviewResponse, ClientSessionModel, ClientSessionStatus, ClientSessionTreeForkRequest, ClientSessionTreeForkResult, ClientSessionTreeNavigateRequest, ClientSessionTreeNavigateResult, ClientThinkingLevel, SessionStreamSnapshot, SessionUiEvent } from "../types.js";
@@ -81,6 +87,7 @@ import {
 } from "./sessionNotificationStore.js";
 import { plainTextTheme } from "./plainTextTheme.js";
 import { SessionUnreadStore, type SessionUnreadMutation } from "./sessionUnreadStore.js";
+import { resolveSessionModelOptions } from "./sessionModelScope.js";
 
 /**
  * Minimal structured-logging seam, shaped like Fastify's logger so sessiond can
@@ -711,6 +718,178 @@ export function createPiWebCustomToolDefinitions(
 }
 
 /**
+ * Error collected from a `project_trust` handler, mirroring the per-extension
+ * errors the SDK's `emitProjectTrustEvent` returns (its `extensionPath` and
+ * `error` fields are what the reported message needs).
+ */
+export interface WebProjectTrustExtensionError {
+  extensionPath: string;
+  error: string;
+}
+
+/**
+ * The slice of the SDK's `LoadExtensionsResult` the trust event emitter reads:
+ * each pre-trust extension's path and its registered `project_trust` handlers.
+ * Narrowing keeps this module free of the SDK's full `Extension` internals; a
+ * real `LoadExtensionsResult` (as handed to the resource loader's
+ * `resolveProjectTrust` callback) is structurally assignable to it.
+ */
+export interface WebProjectTrustExtensionSet {
+  extensions: {
+    path: string;
+    handlers: Map<string, readonly ((event: ProjectTrustEvent, ctx: ProjectTrustContext) => unknown)[]>;
+  }[];
+}
+
+/**
+ * Inputs for {@link resolveWebProjectTrusted} — the web mirror of the inputs
+ * the SDK's `resolveProjectTrusted` takes.
+ */
+export interface WebProjectTrustResolution {
+  cwd: string;
+  /**
+   * The pre-trust extension set the SDK loaded for this resolution (user/global
+   * extensions; project-local ones are not loaded yet because trust is still
+   * unresolved). When present, those extensions may decide trust via the
+   * `project_trust` event.
+   */
+  extensionsResult?: WebProjectTrustExtensionSet;
+  /** The agent dir's trust store; `remember`-ed decisions are written here. */
+  trustStore: ProjectTrustStore;
+  /** Settings manager whose `defaultProjectTrust` applies when nothing decided. */
+  settingsManager: SettingsManager;
+  /**
+   * Reports a `project_trust` handler error, mirroring the SDK's
+   * `onExtensionError`.
+   */
+  onExtensionError?: (message: string) => void;
+}
+
+/**
+ * Run the `project_trust` event over a pre-trust extension set, mirroring
+ * `emitProjectTrustEvent` in the SDK's `dist/core/extensions/runner.js`. That
+ * helper is not part of the package's public exports (the main index exports
+ * only the `ProjectTrust*` types and `ProjectTrustStore`, and the package's
+ * `exports` map blocks subpath imports, so `resolveProjectTrusted`/
+ * `emitProjectTrustEvent` are not callable from here), so PI WEB reimplements
+ * its documented decision loop over the SDK-provided extension objects: per
+ * extension, the registered `project_trust` handlers run in order; the first
+ * handler returning `yes`/`no` decides and `undecided` falls through to the
+ * next handler/extension; a throwing handler is collected as an error and
+ * later handlers still get their chance.
+ */
+export async function emitWebProjectTrustEvent(
+  extensionsResult: WebProjectTrustExtensionSet,
+  event: ProjectTrustEvent,
+  ctx: ProjectTrustContext,
+): Promise<{ result?: ProjectTrustEventResult; errors: WebProjectTrustExtensionError[] }> {
+  const errors: WebProjectTrustExtensionError[] = [];
+  for (const extension of extensionsResult.extensions) {
+    // A single extension may register multiple handlers for the same event.
+    // The handlers map is keyed exactly as the extension registered it, so a
+    // `project_trust` key guarantees `ProjectTrustHandler` entries — the same
+    // assumption the SDK's emitProjectTrustEvent makes.
+    const handlers = extension.handlers.get("project_trust");
+    if (handlers === undefined || handlers.length === 0) continue;
+    for (const handler of handlers) {
+      try {
+        const handlerResult: unknown = await handler(event, ctx);
+        // The SDK reads `trusted` straight off the handler result, so a
+        // non-object would throw there; PI WEB reports it as a handler error
+        // and lets the next handler/extension try.
+        if (typeof handlerResult !== "object" || handlerResult === null) {
+          errors.push({ extensionPath: extension.path, error: "project_trust handler returned a non-object result" });
+          continue;
+        }
+        const trusted = "trusted" in handlerResult ? handlerResult.trusted : undefined;
+        if (trusted === "undecided") {
+          continue;
+        }
+        // Rebuild the decision so only the documented `trusted`/`remember`
+        // fields carry over — the SDK's resolver reads exactly those two.
+        const remember = "remember" in handlerResult ? handlerResult.remember : undefined;
+        return {
+          result: {
+            trusted: trusted === "yes" ? "yes" : "no",
+            ...(remember === true ? { remember: true } : {}),
+          },
+          errors,
+        };
+      } catch (error) {
+        errors.push({
+          extensionPath: extension.path,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { errors };
+}
+
+/**
+ * PI WEB's headless project-trust context. `hasUI` is false because there is
+ * no browser trust prompt (chartered behavior: `ask` never loads untrusted
+ * resources), so the UI methods are inert — the same no-UI shape the SDK
+ * passes when pi runs without a trust UI. The host mode is `rpc`, mirroring
+ * how PI WEB binds its session extension contexts.
+ */
+function webProjectTrustContext(cwd: string): ProjectTrustContext {
+  return {
+    cwd,
+    mode: "rpc",
+    hasUI: false,
+    ui: {
+      select: () => Promise.resolve(undefined),
+      confirm: () => Promise.resolve(false),
+      input: () => Promise.resolve(undefined),
+      notify: () => undefined,
+    },
+  };
+}
+
+/**
+ * Resolve whether a workspace's project-local `.pi/` resources may load, the
+ * way `pi` resolves it — a faithful mirror of the SDK's `resolveProjectTrusted`
+ * (`dist/core/project-trust.js`, also not a public export). PI WEB has no
+ * browser trust prompt, so the precedence is, in order:
+ *
+ * 1. Nothing trust-requiring under `cwd` → trusted.
+ * 2. Pre-trust extensions (user/global — project-local ones are not loaded
+ *    yet) may decide via the `project_trust` event; `remember: true` persists
+ *    the decision to the agent dir's `trust.json`. Handler errors are reported
+ *    through {@link WebProjectTrustResolution.onExtensionError} and never
+ *    abort resolution.
+ * 3. Otherwise the saved `trust.json` decision wins.
+ * 4. Otherwise `defaultProjectTrust` decides (`always` trusts; `never`/`ask`
+ *    do not — `ask` cannot prompt in the browser, matching `pi` run without a
+ *    trust UI).
+ */
+export async function resolveWebProjectTrusted(resolution: WebProjectTrustResolution): Promise<boolean> {
+  const { cwd, trustStore, settingsManager } = resolution;
+  if (!hasTrustRequiringProjectResources(cwd)) return true;
+  if (resolution.extensionsResult) {
+    const { result, errors } = await emitWebProjectTrustEvent(
+      resolution.extensionsResult,
+      { type: "project_trust", cwd },
+      webProjectTrustContext(cwd),
+    );
+    for (const error of errors) {
+      resolution.onExtensionError?.(`Extension "${error.extensionPath}" project_trust error: ${error.error}`);
+    }
+    if (result) {
+      const trusted = result.trusted === "yes";
+      if (result.remember === true) {
+        trustStore.set(cwd, trusted);
+      }
+      return trusted;
+    }
+  }
+  const saved = trustStore.get(cwd);
+  if (saved !== null) return saved;
+  return settingsManager.getDefaultProjectTrust() === "always";
+}
+
+/**
  * Resource-loader options that append PI WEB's own system-prompt sections.
  *
  * `appendSystemPromptOverride` composes with what the loader already resolved,
@@ -735,12 +914,50 @@ function createDefaultRuntimeFactory(
 ): PiWebCreateAgentSessionRuntimeFactory {
   const resourceLoaderOptions = piWebResourceLoaderOptions(appendSystemPromptSections);
   return async ({ cwd, agentDir, sessionManager, sessionStartEvent, initialModel, initialThinkingLevel, delegationToolsEnabled }) => {
+    // PI WEB always honors pi's project-trust model. When the workspace ships
+    // trust-requiring resources, trust is resolved exactly once, mirroring the
+    // SDK's flow: the resource loader first loads the pre-trust extension set
+    // (user/global; project-local ones stay out) and calls back with it, so
+    // those extensions may decide via the `project_trust` event; the resolved
+    // value then lands in the SettingsManager before any project-local
+    // resource (extensions, packages, settings, prompts) loads. With no
+    // browser trust prompt, an untrusted project's resources are skipped
+    // (matching `pi` run without a UI). Projects without trust-requiring
+    // resources skip resolution entirely and are trusted, as before.
+    const projectTrustRequiring = hasTrustRequiringProjectResources(cwd);
+    const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: !projectTrustRequiring });
+    // Pre-session-creation trust failures (`project_trust` handler errors)
+    // land in the runtime diagnostics next to the services diagnostics,
+    // exactly as the CLI appends its project-trust diagnostics.
+    const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
     const services: AgentSessionServices = await createAgentSessionServices({
       cwd,
       agentDir,
       modelRuntime,
+      settingsManager,
       ...(resourceLoaderOptions === undefined ? {} : { resourceLoaderOptions }),
+      ...(projectTrustRequiring
+        ? {
+            resourceLoaderReloadOptions: {
+              resolveProjectTrust: async ({ extensionsResult }) =>
+                resolveWebProjectTrusted({
+                  cwd,
+                  trustStore: new ProjectTrustStore(agentDir),
+                  settingsManager,
+                  extensionsResult,
+                  onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+                }),
+            },
+          }
+        : {}),
     });
+    const modelOptions = await resolveSessionModelOptions({
+      services,
+      hasExistingSession: sessionManager.buildSessionContext().messages.length > 0,
+      ...(initialModel === undefined ? {} : { initialModel }),
+      ...(initialThinkingLevel === undefined ? {} : { initialThinkingLevel }),
+    });
+    services.diagnostics.push(...modelOptions.diagnostics);
     const resolvedDelegationToolsEnabled = delegationToolsEnabled
       ?? await sessionAllowsDelegationTools(sessionManager, sessionManagers);
     const customTools = createPiWebCustomToolDefinitions(cwd, resolvedDelegationToolsEnabled, spawn, subsessions, askUser);
@@ -749,10 +966,11 @@ function createDefaultRuntimeFactory(
       sessionManager,
       customTools,
       ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
-      ...(initialModel === undefined ? {} : { model: initialModel }),
-      ...(initialThinkingLevel === undefined ? {} : { thinkingLevel: initialThinkingLevel }),
+      ...(modelOptions.model === undefined ? {} : { model: modelOptions.model }),
+      ...(modelOptions.thinkingLevel === undefined ? {} : { thinkingLevel: modelOptions.thinkingLevel }),
+      ...(modelOptions.scopedModels.length === 0 ? {} : { scopedModels: modelOptions.scopedModels }),
     });
-    return { ...result, services, diagnostics: services.diagnostics };
+    return { ...result, services, diagnostics: [...projectTrustDiagnostics, ...services.diagnostics] };
   };
 }
 

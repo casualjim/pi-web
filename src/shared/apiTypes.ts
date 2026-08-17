@@ -449,6 +449,19 @@ export interface WorkspaceRemovalHostState extends WorkspaceRemovalPresentation 
   readonly precondition: string;
 }
 
+/**
+ * Per-project Pi trust state for a workspace path, as stored in the agent
+ * directory's `trust.json` (shared with the Pi CLI).
+ */
+export interface WorkspaceTrustResponse {
+  /** The workspace path the decision is keyed on. */
+  path: string;
+  /** Raw stored decision: `true`/`false` for an explicit entry, `null` when unset. */
+  decision: boolean | null;
+  /** Effective trust the toggle reflects: the stored decision, else `defaultProjectTrust === "always"`. */
+  trusted: boolean;
+}
+
 export interface WorkspaceRemovalRequest {
   precondition: string;
 }
@@ -1189,6 +1202,8 @@ export interface PiWebRuntimeComponent {
   component: PiWebServiceComponent;
   label: string;
   runtimeVersion?: string;
+  /** Version of the Pi coding agent library loaded by this component's process; omitted when the component does not report it. */
+  piVersion?: string;
   available: boolean;
   capabilities: PiWebCapability[];
   /** Present only for a session daemon that supports active-profile reporting. */

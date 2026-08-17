@@ -323,6 +323,21 @@ Models fetched by a background refresh appear the next time a client asks for th
 
 To turn the background refresh off entirely, set `PI_WEB_OFFLINE` or `PI_OFFLINE` in the session daemon's environment and restart it. In offline mode PI WEB performs no provider catalog network requests, including after logins, and sessions use the catalogs already stored in the agent directory. The `PI_WEB_SKIP_VERSION_CHECK` and `PI_SKIP_VERSION_CHECK` keys do **not** affect this refresh; they only suppress PI WEB release checks.
 
+### Project trust for project-local resources
+
+PI WEB always honors Pi's project-trust settings before loading a workspace's project-local `.pi/` resources — `.pi/extensions/*`, the `packages` declared in `.pi/settings.json`, and the other `.pi/` settings and resources. There is no opt-out config key: trust applies at every session start, the way `pi` itself applies it.
+
+A project-local `.pi/extension` is arbitrary code that runs inside the agent process on every session for that workspace, so an untrusted workspace must not load one.
+
+Trust is resolved the way `pi` resolves it with no trust prompt to show:
+
+- A workspace with no trust-requiring `.pi/` resources is always loaded (there is nothing to gate).
+- User/global extensions (loaded before the decision, exactly as `pi` does) may decide trust through the `project_trust` extension event, and may request `remember` to persist their decision to the agent directory's `trust.json`. When the event decides, it wins — the same order `pi` uses.
+- Otherwise a saved decision in the agent directory's `trust.json` (from the Pi CLI's trust prompt, the workspace trust toggle, or a `remember`-ing extension) wins.
+- Otherwise the agent's `defaultProjectTrust` setting decides: `always` loads the project resources, and `never` skips them. `ask` skips them too, because PI WEB has no browser trust prompt yet and a non-interactive `pi` also treats `ask` as untrusted.
+
+This mirrors the Pi CLI: with `defaultProjectTrust: "never"`, an opened workspace's `.pi/` extensions and packages are ignored rather than loaded silently.
+
 ### Session daemon tools
 
 `spawnSessions` controls whether agents receive the `spawn_session` tool. It defaults to `true`; set it to `false` if you do not want an agent to start independent PI WEB sessions.

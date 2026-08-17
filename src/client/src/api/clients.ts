@@ -52,6 +52,7 @@ import {
   parseThinkingLevelsResponse,
   parseWriteWorkspaceFileResponse,
   parseWorkspaceProviderResolution,
+  parseWorkspaceTrustResponse,
   requireMachineStatusSnapshot,
 } from "./parsers";
 import { messagePath } from "./urls";
@@ -365,6 +366,21 @@ export const filesApi = {
   },
 };
 
+const workspaceTrustPath = (machineId: string, projectId: string, workspaceId: string) =>
+  `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/trust`;
+
+const projectTrustPath = (machineId: string, path: string) => {
+  const params = new URLSearchParams({ path });
+  return `${machinePrefix(machineId)}/projects/trust?${params.toString()}`;
+};
+
+export const trustApi = {
+  /** Existing-decision lookup for a raw path (add-project dialog); the server resolves the path first. */
+  projectTrust: (path: string, machineId = "local") => request(projectTrustPath(machineId, path), parseWorkspaceTrustResponse),
+  workspaceTrust: (projectId: string, workspaceId: string, machineId = "local") => request(workspaceTrustPath(machineId, projectId, workspaceId), parseWorkspaceTrustResponse),
+  setWorkspaceTrust: (projectId: string, workspaceId: string, trusted: boolean, machineId = "local") => request(workspaceTrustPath(machineId, projectId, workspaceId), parseWorkspaceTrustResponse, { method: "PUT", body: JSON.stringify({ trusted }) }),
+};
+
 export const api = {
   ...piWebApi,
   ...machinesApi,
@@ -376,4 +392,6 @@ export const api = {
   ...sessionsApi,
   ...terminalsApi,
   ...filesApi,
+  ...trustApi,
+
 };

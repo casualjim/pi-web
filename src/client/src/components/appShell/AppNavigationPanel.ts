@@ -139,6 +139,7 @@ export class AppNavigationPanel extends LitElement {
       <workspace-list
         .workspaces=${this.workspaces}
         .selected=${this.selectedWorkspace}
+        .machineId=${this.selectedMachine?.id ?? "local"}
         .statusSnapshot=${this.selectedMachineStatusSnapshot()}
         .deletingWorkspaceIds=${this.deletingWorkspaceIds}
         .collapsible=${this.collapsible}

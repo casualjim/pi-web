@@ -3,7 +3,7 @@ import type { Workspace } from "../../../shared/apiTypes";
 import { FEDERATED_HTTP_ROUTES, FEDERATED_WEBSOCKET_ROUTES, SESSION_TREE_FORK_PROXY_TIMEOUT_MS, PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS, SESSION_TREE_NAVIGATION_PROXY_TIMEOUT_MS, WORKSPACE_FILE_PREVIEW_ROUTE_PATH, WORKSPACE_REMOVAL_FEDERATION_TIMEOUT_MS, type FederatedHttpRouteSpec } from "../../../shared/federatedRoutes";
 import { MAX_INLINE_PREVIEW_BYTES } from "../../../shared/workspaceFiles";
 import { PLUGIN_BACKEND_REQUEST_BODY_MAX_BYTES, PLUGIN_BACKEND_RESPONSE_BODY_MAX_BYTES } from "../../../shared/pluginBackendProtocol";
-import { configApi, filesApi, machineStatusApi, piPackagesApi, piWebApi, pluginsApi, projectsApi, sessionsApi, terminalsApi, workspacesApi } from "./clients";
+import { configApi, filesApi, machineStatusApi, piPackagesApi, piWebApi, pluginsApi, projectsApi, sessionsApi, terminalsApi, trustApi, workspacesApi } from "./clients";
 import { globalSessionEvents, realtimeEvents, sessionEvents, terminalSocket } from "./sockets";
 import { requestPluginBackend } from "./pluginBackends";
 import { workspaceFilePreviewUrl } from "./urls";
@@ -108,6 +108,15 @@ describe("federated route contract", () => {
     expect(FEDERATED_WEBSOCKET_ROUTES.some((path) => path.includes("plugin-backends"))).toBe(false);
   });
 
+  it("allowlists only workspace trust reads and writes without adding a trust WebSocket", () => {
+    expect(FEDERATED_HTTP_ROUTES.filter((route) => route.path.includes("trust"))).toEqual([
+      { method: "GET", path: "/projects/trust" },
+      { method: "GET", path: "/projects/:projectId/workspaces/:workspaceId/trust" },
+      { method: "PUT", path: "/projects/:projectId/workspaces/:workspaceId/trust" },
+    ]);
+    expect(FEDERATED_WEBSOCKET_ROUTES.some((path) => path.includes("trust"))).toBe(false);
+  });
+
   it("covers machine-scoped client HTTP calls with remote proxy routes", async () => {
     const fetchMock = vi.fn<FetchLike>(() => Promise.resolve(jsonResponse({})));
     vi.stubGlobal("fetch", fetchMock);
@@ -134,6 +143,9 @@ describe("federated route contract", () => {
       ignoreParseFailure(workspacesApi.writeWorkspaceFile("p 1", "w 1", "README.md", "hello", { overwrite: false }, machineId)),
       ignoreParseFailure(workspacesApi.deleteWorkspaceFile("p 1", "w 1", "README.md", machineId)),
       ignoreParseFailure(workspacesApi.moveWorkspaceFile("p 1", "w 1", "README.md", "docs/README.md", { overwrite: false }, machineId)),
+      ignoreParseFailure(trustApi.workspaceTrust("p 1", "w 1", machineId)),
+      ignoreParseFailure(trustApi.setWorkspaceTrust("p 1", "w 1", true, machineId)),
+      ignoreParseFailure(trustApi.projectTrust("/repo", machineId)),
       ignoreParseFailure(requestPluginBackend({ pluginId: "board-tools", backendRevision: "server-r1", machineId, projectId: "p 1", workspaceId: "w 1" }, "cards.summary", { includeClosed: false })),
       ignoreParseFailure(filesApi.files("README", { kind: "tracked", mode: "file", projectId: "p 1", workspaceId: "w 1", machineId })),
       ignoreParseFailure(sessionsApi.sessions("/repo", machineId)),

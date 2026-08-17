@@ -70,6 +70,11 @@ export const FEDERATED_HTTP_ROUTES = [
     propagateCancellation: true,
   },
   { method: "GET", path: "/projects/:projectId/workspaces/:workspaceId/files" },
+  // Path-driven existing-decision lookup for the add-project dialog; the
+  // server resolves the path before reading through ProjectTrustStore.
+  { method: "GET", path: "/projects/trust" },
+  { method: "GET", path: "/projects/:projectId/workspaces/:workspaceId/trust" },
+  { method: "PUT", path: "/projects/:projectId/workspaces/:workspaceId/trust" },
   { method: "GET", path: "/projects/:projectId/workspaces/:workspaceId/terminals" },
   { method: "POST", path: "/projects/:projectId/workspaces/:workspaceId/terminals" },
   { method: "DELETE", path: "/projects/:projectId/workspaces/:workspaceId/terminals" },

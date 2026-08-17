@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PiSessionService } from "./piSessionService.js";
 import { CapturingSessionEventHub, sessionGateway } from "./piSessionService.testSupport.js";
@@ -144,6 +144,10 @@ describe("resolveSessionModelOptions", () => {
       defaultProvider: PROVIDER,
       defaultModel: DEFAULT_MODEL,
     }));
+    // Project settings are trust-gated: a workspace shipping `.pi/settings.json`
+    // only loads its overrides once trusted. Persist the decision through the
+    // SDK store so the key is canonicalized the way the lookup reads it.
+    new ProjectTrustStore(agentDir).set(workspace, true);
 
     const gateway = sessionGateway([]);
     gateway.create = (cwd) => SessionManager.inMemory(cwd);

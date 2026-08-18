@@ -624,9 +624,19 @@ interface ServerPluginActivation {
 }
 ```
 
-A server plugin may contribute at most one `workspaceProvider`. The host-owned frozen activation context contains its `pluginId`, `packageRoot`, JSON settings snapshot, scoped logger, activation `AbortSignal`, and an argv-based `execFile()` helper. `execFile()` has host-owned timeout/output bounds; pass the current callback's signal into every command request. The API exposes no shell parser, Fastify instance, route registration, concrete service, event bus, or service locator.
+A server plugin may contribute at most one `workspaceProvider`. The host-owned frozen activation context contains its `pluginId`, `packageRoot`, JSON settings snapshot, scoped logger, activation `AbortSignal`, and an argv-based `execFile()` helper. `execFile()` has host-owned timeout/output bounds and accepts an optional bounded stdin payload — see [Command stdin and sensitive payloads](#command-stdin-and-sensitive-payloads). Pass the current callback's signal into every command request. The API exposes no shell parser, Fastify instance, route registration, concrete service, event bus, or service locator.
 
 Every activation, lifecycle, provider, and request signal is scoped to that one invocation. The host aborts it when the invocation times out or settles. Do not retain a signal as a plugin-lifetime shutdown notification; release plugin-owned resources in the explicit `stop()` callback. Deadlines remain cooperative, so plugins must observe each supplied signal.
+
+### Command stdin and sensitive payloads
+
+`execFile()` accepts an optional `stdin: string | Uint8Array` payload that the host pipes to the command's standard input — no shell is involved, so the bytes reach the command exactly as given. Prefer stdin over `args` or `env` for secrets: argv is visible in process listings, and environment blocks propagate to child processes.
+
+- Strings are UTF-8 encoded; `Uint8Array` payloads pass through byte for byte. An empty payload behaves like an absent stdin.
+- The host enforces a byte cap on the payload (1 MiB by default; the host controls the bound) and rejects over-cap requests before spawning. Cap errors report byte counts only, never payload content.
+- The host never logs the payload, never includes it in errors, and zeroes its retained copy once the command settles. The plugin remains responsible for its own copy.
+- A command that exits without reading stdin does not fail the operation; the command's own exit status remains the outcome.
+- Command results return captured stdout/stderr as text to the plugin. Never echo a secret back through a provider `request()` response: those responses cross to browser callers.
 
 Sessiond resolves the enabled catalog once per process start. It imports, validates, activates, and starts each server entry before publishing its contribution. A failed entry is attributed and skipped without aborting ordinary activation of other plugins; a failed `start` is rolled back with `stop` when available. Successful plugins stop in reverse activation order. Sessiond inspects each optional `health()` callback once while building the startup workspace authority; an unhealthy provider is excluded, a degraded provider remains eligible, and that inspection is not polled again during the process lifetime. Server entries are never hot-reloaded or unloaded after config/package edits.
 

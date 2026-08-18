@@ -45,6 +45,13 @@ export interface ServerPluginExecFileRequest {
   env?: Readonly<Record<string, string>>;
   /** Environment keys removed after host defaults and plugin overrides merge. */
   unsetEnv?: readonly string[];
+  /**
+   * Optional payload piped to the command's standard input; no shell is
+   * involved. Strings are UTF-8 encoded. The host enforces a byte cap, never
+   * logs the payload or includes it in errors, and zeroes its retained copy
+   * once the command settles. Empty payloads behave like an absent stdin.
+   */
+  stdin?: string | Uint8Array;
   /** Requested timeout; the host may apply a lower maximum. */
   timeoutMs?: number;
   signal: AbortSignal;

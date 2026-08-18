@@ -116,7 +116,7 @@ describe("public server plugin API", () => {
       "fallback" | "probe" | "list" | "request" | "prepareRemove"
     >();
     expectTypeOf<keyof ServerPluginExecFileRequest>().toEqualTypeOf<
-      "file" | "args" | "cwd" | "env" | "unsetEnv" | "timeoutMs" | "signal"
+      "file" | "args" | "cwd" | "env" | "unsetEnv" | "stdin" | "timeoutMs" | "signal"
     >();
     expectTypeOf<ReadonlyKeys<ServerPluginActivationContext>>().toEqualTypeOf<keyof ServerPluginActivationContext>();
     expectTypeOf<ReadonlyKeys<ServerPluginLogger>>().toEqualTypeOf<keyof ServerPluginLogger>();

@@ -1046,6 +1046,30 @@ export interface SessionModel {
   reasoning?: unknown;
 }
 
+/**
+ * One row of a session machine's full available-model catalog: the model plus
+ * its membership in pi's enabled-models scope (`enabledModels` setting). Model
+ * scope is selection UX for picking/cycling, never an authorization boundary.
+ */
+export interface SessionModelCatalogEntry {
+  provider: string;
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  reasoning?: unknown;
+  enabled: boolean;
+}
+
+/**
+ * The session machine's full available model catalog with per-model enabled
+ * state. Enabled models come first — in the same set and order as the
+ * session's pickable ("Enabled") model list — followed by the remaining
+ * models in catalog order.
+ */
+export interface SessionModelCatalogResponse {
+  models: SessionModelCatalogEntry[];
+}
+
 // Domain type is owned by pi and re-exported from the shared thinking-levels
 // module. Wire/data fields below intentionally use `string` so an unknown level
 // from a newer pi runtime parses and renders gracefully instead of failing.

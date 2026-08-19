@@ -6,7 +6,7 @@ import { ModelRuntime, ProjectTrustStore, SessionManager, SettingsManager } from
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PiSessionService } from "./piSessionService.js";
 import { CapturingSessionEventHub, sessionGateway } from "./piSessionService.testSupport.js";
-import { resolveSessionModelOptions } from "./sessionModelScope.js";
+import { applyEnabledModelToggle, catalogWithEnabledFirst, liveScopedModelIds, persistedEnabledModelPatterns, resolveEnabledModelIds, resolveSessionModelOptions } from "./sessionModelScope.js";
 
 const PROVIDER = "anthropic";
 const FIRST_MODEL = "claude-opus-4-6";
@@ -175,5 +175,146 @@ describe("resolveSessionModelOptions", () => {
     } finally {
       await service.dispose();
     }
+  });
+});
+
+describe("resolveEnabledModelIds", () => {
+  it("prefers the session's live scope over configured patterns, mirroring pi's selector", async () => {
+    const ids = await resolveEnabledModelIds({
+      settingsManager: SettingsManager.inMemory({ enabledModels: [`${PROVIDER}/${DEFAULT_MODEL}`] }),
+      modelRuntime,
+      scopedModels: [{ model: { provider: PROVIDER, id: FIRST_MODEL } }],
+    });
+
+    expect(ids).toEqual([`${PROVIDER}/${FIRST_MODEL}`]);
+  });
+
+  it("returns null when no scope is configured, pi's \"everything enabled\" state", async () => {
+    await expect(resolveEnabledModelIds({
+      settingsManager: SettingsManager.inMemory({}),
+      modelRuntime,
+      scopedModels: [],
+    })).resolves.toBeNull();
+    await expect(resolveEnabledModelIds({
+      settingsManager: SettingsManager.inMemory({ enabledModels: [] }),
+      modelRuntime,
+      scopedModels: [],
+    })).resolves.toBeNull();
+  });
+
+  it("resolves configured patterns against the runtime catalog when no live scope exists", async () => {
+    const ids = await resolveEnabledModelIds({
+      settingsManager: SettingsManager.inMemory({ enabledModels: [`${PROVIDER}/${FIRST_MODEL}`, `${PROVIDER}/${DEFAULT_MODEL}`] }),
+      modelRuntime,
+      scopedModels: [],
+    });
+
+    expect(ids).toEqual([`${PROVIDER}/${FIRST_MODEL}`, `${PROVIDER}/${DEFAULT_MODEL}`]);
+  });
+
+  it("keeps no-match patterns in the list so edits cannot silently drop them", async () => {
+    const ids = await resolveEnabledModelIds({
+      settingsManager: SettingsManager.inMemory({ enabledModels: ["anthropic/not-a-real-model", `${PROVIDER}/${FIRST_MODEL}`] }),
+      modelRuntime,
+      scopedModels: [],
+    });
+
+    // pi appends no-match patterns after the resolved matches, regardless of
+    // their configured order.
+    expect(ids).toEqual([`${PROVIDER}/${FIRST_MODEL}`, "anthropic/not-a-real-model"]);
+  });
+});
+
+describe("applyEnabledModelToggle", () => {
+  const available = ["anthropic/a", "anthropic/b", "openai/c"];
+
+  it("treats enabling a model in the all-enabled state as a no-op", () => {
+    expect(applyEnabledModelToggle(null, available, "anthropic/a", true)).toBeNull();
+  });
+
+  it("disabling from the all-enabled state narrows to everything but the target", () => {
+    expect(applyEnabledModelToggle(null, available, "anthropic/a", false)).toEqual(["anthropic/b", "openai/c"]);
+  });
+
+  it("appends newly enabled models, preserving the existing enabled order", () => {
+    expect(applyEnabledModelToggle(["anthropic/b"], available, "openai/c", true)).toEqual(["anthropic/b", "openai/c"]);
+  });
+
+  it("returns the same reference when the toggle changes nothing", () => {
+    const enabled = ["anthropic/a", "anthropic/b"];
+    expect(applyEnabledModelToggle(enabled, available, "anthropic/a", true)).toBe(enabled);
+    expect(applyEnabledModelToggle(enabled, available, "openai/c", false)).toBe(enabled);
+  });
+
+  it("removes disabled models from the list", () => {
+    expect(applyEnabledModelToggle(["anthropic/a", "anthropic/b"], available, "anthropic/a", false)).toEqual(["anthropic/b"]);
+  });
+});
+
+describe("persistedEnabledModelPatterns", () => {
+  const available = ["anthropic/a", "anthropic/b"];
+
+  it("normalizes the all-enabled state to undefined (no scope), like pi", () => {
+    expect(persistedEnabledModelPatterns(null, available)).toBeUndefined();
+    expect(persistedEnabledModelPatterns(["anthropic/a", "anthropic/b"], available)).toBeUndefined();
+  });
+
+  it("persists partial scopes as the explicit id list", () => {
+    expect(persistedEnabledModelPatterns(["anthropic/b"], available)).toEqual(["anthropic/b"]);
+    expect(persistedEnabledModelPatterns([], available)).toEqual([]);
+  });
+
+  it("keeps stale patterns riding along even when they make the list longer than the catalog", () => {
+    expect(persistedEnabledModelPatterns(["anthropic/a", "anthropic/b", "anthropic/gone"], available)).toEqual(["anthropic/a", "anthropic/b", "anthropic/gone"]);
+  });
+});
+
+describe("liveScopedModelIds", () => {
+  const available = ["anthropic/a", "anthropic/b"];
+
+  it("clears the scope for the all-enabled state and for lists covering the whole catalog", () => {
+    expect(liveScopedModelIds(null, available)).toBeNull();
+    expect(liveScopedModelIds(["anthropic/a", "anthropic/b"], available)).toBeNull();
+  });
+
+  it("clears the scope when no enabled id is currently available, like pi", () => {
+    expect(liveScopedModelIds([], available)).toBeNull();
+    expect(liveScopedModelIds(["anthropic/gone"], available)).toBeNull();
+  });
+
+  it("scopes the session to a partial enabled list", () => {
+    expect(liveScopedModelIds(["anthropic/b"], available)).toEqual(["anthropic/b"]);
+  });
+});
+
+describe("catalogWithEnabledFirst", () => {
+  const available = [
+    { provider: "anthropic", id: "a" },
+    { provider: "anthropic", id: "b" },
+    { provider: "openai", id: "c" },
+  ];
+
+  it("marks every model enabled in catalog order when nothing is scoped", () => {
+    expect(catalogWithEnabledFirst(available, null)).toEqual([
+      { model: available[0], enabled: true },
+      { model: available[1], enabled: true },
+      { model: available[2], enabled: true },
+    ]);
+  });
+
+  it("lists enabled models first in enabled-list order, then the rest in catalog order", () => {
+    expect(catalogWithEnabledFirst(available, ["openai/c", "anthropic/a"])).toEqual([
+      { model: available[2], enabled: true },
+      { model: available[0], enabled: true },
+      { model: available[1], enabled: false },
+    ]);
+  });
+
+  it("skips enabled ids that match nothing available and ignores duplicates", () => {
+    expect(catalogWithEnabledFirst(available, ["anthropic/gone", "anthropic/a", "anthropic/a"])).toEqual([
+      { model: available[0], enabled: true },
+      { model: available[1], enabled: false },
+      { model: available[2], enabled: false },
+    ]);
   });
 });

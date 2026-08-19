@@ -1,6 +1,6 @@
 import { LitElement, html } from "lit";
 import { customElement, query, state } from "lit/decorators.js";
-import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
+import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type CommandOption, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionModel, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
 import type { AppAction } from "../actions";
 import { initialAppState, type AppState } from "../appState";
 import { isSessionActive } from "../../../shared/activity";
@@ -58,6 +58,7 @@ import "./PromptEditor";
 import type { PromptEditor } from "./PromptEditor";
 import "./StatusBar";
 import "./CommandPicker";
+import "./ModelPicker";
 import "./ActionPalette";
 import "./AuthDialog";
 import "./ProjectDialog";
@@ -1896,20 +1897,31 @@ export class PiWebApp extends LitElement {
   }
 
   private async openModelDialog() {
-    const models = await this.sessions.listModels();
-    const currentProvider = this.state.status?.model?.provider;
-    const currentId = this.state.status?.model?.id;
+    const [models, catalog] = await Promise.all([this.sessions.listModels(), this.sessions.listModelCatalog()]);
+    const selectedValue = this.currentModelValue();
     this.setState({
       modelDialog: {
         title: "Select Model",
-        ...(currentProvider !== undefined && currentId !== undefined ? { selectedValue: `${currentProvider}/${currentId}` } : {}),
-        options: models.map((model) => {
-          const provider = model.provider ?? "";
-          const id = model.id ?? "";
-          const isCurrent = provider === currentProvider && id === currentId;
-          return { value: `${provider}/${id}`, label: `${id}${isCurrent ? " ✓ current" : ""}`, description: provider };
-        }),
+        ...(selectedValue !== undefined ? { selectedValue } : {}),
+        options: this.modelDialogOptions(models),
+        catalog,
       },
+    });
+  }
+
+  private currentModelValue(): string | undefined {
+    const provider = this.state.status?.model?.provider;
+    const id = this.state.status?.model?.id;
+    return provider !== undefined && id !== undefined ? `${provider}/${id}` : undefined;
+  }
+
+  private modelDialogOptions(models: readonly Pick<SessionModel, "provider" | "id">[]): CommandOption[] {
+    const selectedValue = this.currentModelValue();
+    return models.map((model) => {
+      const provider = model.provider ?? "";
+      const id = model.id ?? "";
+      const value = `${provider}/${id}`;
+      return { value, label: `${id}${value === selectedValue ? " ✓ current" : ""}`, description: provider };
     });
   }
 
@@ -2080,6 +2092,16 @@ export class PiWebApp extends LitElement {
     void this.openModelDialog();
   };
 
+  private readonly handleToggleModelEnabled = async (provider: string, modelId: string, enabled: boolean): Promise<void> => {
+    const catalog = await this.sessions.setModelEnabled(provider, modelId, enabled);
+    const dialog = this.state.modelDialog;
+    if (catalog === undefined || dialog === undefined) return;
+    // The fresh catalog's enabled rows are the session's Enabled list in
+    // order, so rebuilding both data sets keeps the dialog's modes and pi's
+    // persisted scope consistent without another round trip.
+    this.setState({ modelDialog: { ...dialog, catalog, options: this.modelDialogOptions(catalog.filter((entry) => entry.enabled)) } });
+  };
+
   private readonly handleSelectThinking = (): void => {
     void this.openThinkingDialog();
   };
@@ -2167,7 +2189,7 @@ export class PiWebApp extends LitElement {
             <prompt-editor .sessionId=${state.selectedSession.id} .cwd=${state.selectedWorkspace?.path} .machineId=${selectedMachineId(state)} .projectId=${state.selectedWorkspace?.projectId} .workspaceId=${state.selectedWorkspace?.id} .disabled=${state.selectedSession.archived === true} .canSteer=${state.status?.isStreaming === true} .isCompacting=${state.status?.isCompacting === true} .canStop=${state.status?.isStreaming === true || state.status?.isBashRunning === true || state.status?.isCompacting === true || (state.status?.pendingMessageCount ?? 0) > 0} .status=${state.status} .availableThinkingLevels=${state.availableThinkingLevels} .sending=${state.sendingPrompts[state.selectedSession.id] === true} .onSend=${this.handleSendPrompt} .onStop=${this.handleStopActiveWork} .onSelectModel=${this.handleSelectModel} .onSelectThinking=${this.handleSelectThinking}></prompt-editor>
             ${this.renderStatusBar(state)}
             ${state.commandDialog !== undefined ? html`<command-picker .title=${state.commandDialog.title} .options=${state.commandDialog.options} .onPick=${(value: string) => this.sessions.respondToCommand(state.commandDialog?.requestId ?? "", value)} .onCancel=${() => { this.sessions.cancelCommand(); }}></command-picker>` : null}
-            ${state.modelDialog !== undefined ? html`<command-picker title=${state.modelDialog.title} .searchable=${true} .options=${state.modelDialog.options} .selectedValue=${state.modelDialog.selectedValue} .onPick=${(value: string) => { void this.pickModel(value); }} .onCancel=${() => { this.setState({ modelDialog: undefined }); }}></command-picker>` : null}
+            ${state.modelDialog !== undefined ? html`<model-picker title=${state.modelDialog.title} .options=${state.modelDialog.options} .catalog=${state.modelDialog.catalog} .selectedValue=${state.modelDialog.selectedValue} .onPick=${(value: string) => { void this.pickModel(value); }} .onToggleEnabled=${this.handleToggleModelEnabled} .onCancel=${() => { this.setState({ modelDialog: undefined }); }}></model-picker>` : null}
             ${state.thinkingDialog !== undefined ? html`<command-picker title=${state.thinkingDialog.title} .options=${state.thinkingDialog.options} .selectedValue=${state.thinkingDialog.selectedValue} .onPick=${(value: string) => { void this.pickThinking(value); }} .onCancel=${() => { this.setState({ thinkingDialog: undefined }); }}></command-picker>` : null}
           ` : html`<div class="empty">${this.sessionEmptyMessage()}</div>`}
         </main>

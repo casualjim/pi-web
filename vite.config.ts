@@ -112,6 +112,9 @@ export default defineConfig({
     },
   },
   server: {
+    // Dev browser entrypoint. Keep in sync with PI_WEB_BROWSER_URL in the
+    // `dev:web` script and docker/compose.dev.yml: the API process's dev-mode
+    // pointer and Safe Tunnel's default local target both rely on that wiring.
     port: 8505,
     strictPort: true,
     ...(config.allowedHosts === undefined ? {} : { allowedHosts: config.allowedHosts }),

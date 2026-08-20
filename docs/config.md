@@ -173,6 +173,7 @@ Rows with JSON key `—` are runtime-only environment variables, not config-file
 | Session daemon TCP port | — | `PI_WEB_SESSIOND_PORT` | Session daemon env | Not supported locally | Restart session daemon; set `PI_WEB_SESSIOND_URL` for web/API too |
 | Session daemon TCP host | — | `PI_WEB_SESSIOND_HOST` | Session daemon env | Not supported locally | Restart session daemon |
 | Web-to-daemon URL | — | `PI_WEB_SESSIOND_URL` | Web/API env | Not supported locally | Restart web/API |
+| Local browser entrypoint | — | `PI_WEB_BROWSER_URL` | Web/API env | Not supported locally | Restart web/API; declared only by development stacks (the Vite dev listener), never in packaged/server mode; selects the [Safe Tunnel local target](safe-tunnel.md#local-target-and-the-browser-entrypoint) and disables client serving in the API process |
 | Projects storage file | — | `PI_WEB_PROJECTS_FILE` | Web/API + session daemon env | Not supported locally | Restart services; advanced state override |
 | Remote machines storage file | — | `PI_WEB_MACHINES_FILE` | Web/API env | Not supported locally | Restart web/API; advanced state override |
 | Agent state directory | — | `PI_CODING_AGENT_DIR` | Session daemon env | Not supported locally | Restart session daemon on that machine; affects auth, models, settings, sessions, Pi packages, and Pi-package-backed PI WEB plugins |

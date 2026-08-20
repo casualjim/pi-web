@@ -31,6 +31,8 @@ import {
 
 export interface SafeTunnelProductionOptions {
   readonly serverAddress: () => SafeTunnelServerAddress;
+  /** Development-stack browser entrypoint (the Vite listener); unset in packaged/server mode. */
+  readonly localBrowserEntrypointUrl?: string;
 }
 
 /** Constructs the effectful Safe Tunnel graph only after global opt-in. */
@@ -69,6 +71,9 @@ export function createSafeTunnelProduction(
     createOperationId: randomUUID,
     enableDefaults: createNodeSafeTunnelEnableDefaultsProvider({
       serverAddress: options.serverAddress,
+      ...(options.localBrowserEntrypointUrl === undefined
+        ? {}
+        : { localBrowserEntrypointUrl: options.localBrowserEntrypointUrl }),
     }),
     fileExists: existsSync,
     runtime,

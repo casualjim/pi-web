@@ -53,13 +53,28 @@ After opting in and restarting:
 
 1. Open **Settings → Safe Tunnel**, or run **Manage Safe Tunnel** from the action palette.
 2. Confirm that the selected ingress provides the authentication and access control your deployment requires.
-3. Choose **Enable Safe Tunnel**. The normal flow sends no advanced overrides. PI WEB infers the local target from its active TCP listener, derives a machine name and collision-resistant slug, and uses `https://api.tunnels.pi-web.dev` as the Control API.
+3. Choose **Enable Safe Tunnel**. The normal flow sends no advanced overrides. PI WEB infers the local target from its [local browser entrypoint](#local-target-and-the-browser-entrypoint), derives a machine name and collision-resistant slug, and uses `https://api.tunnels.pi-web.dev` as the Control API.
 4. If registration is needed, open the displayed provider approval page and follow its instructions. The panel polls one operation through preparation, approval, registration, and startup. Private machine credentials stay in web/API and its local state; the browser receives only approval fields and PI WEB-authored progress.
 5. When startup succeeds, the panel shows the public URL and running status.
 
 PI WEB reuses a valid saved registration. If a heartbeat reports that the Control API rejected or revoked its credential, PI WEB marks that registration rejected, stops its owned child, and shows a fixed approval-required status. The next Enable starts a replacement approval flow. If rejection is first discovered while fetching tunnel configuration, Enable fails and the saved registration is marked rejected; choose Enable again to start replacement approval.
 
 Choose **Disable Safe Tunnel** to cancel an in-progress enable operation, persist disabled intent, cancel the periodic heartbeat, and stop only the exact child PI WEB launched. Browser status and operation responses use a small fixed set of PI WEB-authored fields and error categories. They do not include machine tokens, generated TOML, provider response bodies, artifact URLs, or raw child output.
+
+## Local target and the browser entrypoint
+
+Safe Tunnel forwards public traffic to a local PI WEB URL. The normal flow infers it from PI WEB's explicit notion of the local browser entrypoint — the URL a browser on the same machine actually uses — not from the request that triggered Enable:
+
+1. The advanced **Local PI WEB URL** override, when supplied, always wins.
+2. In development stacks, the `PI_WEB_BROWSER_URL` environment variable declares the browser entrypoint. `npm run dev:web` (also used by `npm run dev`) and the Docker `--dev` stack set it to the Vite dev listener (`http://127.0.0.1:8505`), so the tunnel targets the same hot-reloading UI the browser sees instead of the API process.
+3. Otherwise, PI WEB uses its active web/API TCP listener, honoring the configured `host` and `port`. This is the packaged and `npm start` case, where the API process itself serves the built browser client.
+
+If the web/API process listens on a socket instead of TCP, there is no URL to infer: Enable fails with a clear error directing you to the advanced **Local PI WEB URL** override.
+
+What the web/API process serves for non-API browser requests is the same explicit decision, never a probe of the source tree:
+
+- **Packaged/server mode** (`PI_WEB_BROWSER_URL` unset): the API process serves the built client from `dist/client`. Startup fails with an actionable error when the build output is missing; run `npm run build` first (packaged installs ship it). Raw `src/client` sources with unresolved `%BASE_URL%` placeholders are never served.
+- **Development mode** (`PI_WEB_BROWSER_URL` set): the API process serves no client at all. Non-API requests receive a short pointer to the dev server URL.
 
 ## Durable state and restart behavior
 
@@ -115,7 +130,7 @@ Leave every advanced field blank for the normal flow. Overrides are sent only on
 | --- | --- |
 | Control API URL | Uses production by default. A self-hosted URL must satisfy the HTTPS/literal-loopback policy and contain no credentials, query, or fragment. |
 | Machine name / slug | Replaces inferred identity. The slug must be one lowercase DNS label. |
-| Local PI WEB URL | Replaces the listener-derived target. It must be an `http://` origin with an explicit port and no credentials, path, query, or fragment. Point it only at the intended PI WEB listener. |
+| Local PI WEB URL | Replaces the inferred [browser-entrypoint target](#local-target-and-the-browser-entrypoint). It must be an `http://` origin with an explicit port and no credentials, path, query, or fragment. Point it only at the intended PI WEB listener. |
 | `frpc` path | Uses the absolute executable directly instead of managed acquisition. |
 
 A saved self-hosted Control API or `frpc` override remains in effect when its field is left blank. Explicit Control API/name/slug changes request replacement registration; local-target or `frpc`-path changes can reuse a valid registration.

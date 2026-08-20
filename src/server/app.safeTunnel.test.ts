@@ -42,7 +42,7 @@ describe("Safe Tunnel app composition", () => {
   it("keeps disabled API probes and runtime capability signals generic", async () => {
     const clientDist = await createClientDist();
     const app = await buildApp({
-      clientDist,
+      clientServing: { mode: "packaged", clientDist },
       logger: false,
       sessionDaemon: fakeSessionDaemon(),
     });
@@ -99,7 +99,7 @@ describe("Safe Tunnel app composition", () => {
   it("binds enabled API reads and mutations to startup-snapshot trusted hosts", async () => {
     const fixture = fakeBridge();
     const app = await buildApp({
-      clientDist: false,
+      clientServing: false,
       logger: false,
       safeTunnel: fixture.bridge,
       safeTunnelMutationHosts: {
@@ -159,7 +159,7 @@ describe("Safe Tunnel app composition", () => {
   it("starts, routes, advertises, and closes one injected enabled bridge", async () => {
     const fixture = fakeBridge();
     const app = await buildApp({
-      clientDist: false,
+      clientServing: false,
       logger: false,
       safeTunnel: fixture.bridge,
       sessionDaemon: fakeSessionDaemon(),
@@ -221,7 +221,7 @@ describe("web-process lifecycle", () => {
       const fixture = fakeBridge();
       const signalSource = new FakeWebProcessSignalSource();
       const app = await buildApp({
-        clientDist: false,
+        clientServing: false,
         logger: false,
         safeTunnel: fixture.bridge,
         sessionDaemon: fakeSessionDaemon(),

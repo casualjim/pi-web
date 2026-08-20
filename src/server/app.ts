@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerOptions } from "fastify";
 import fastifyCompress from "@fastify/compress";
 import fastifyStatic from "@fastify/static";
@@ -39,6 +36,7 @@ import { registerPluginBackendProxyRoutes } from "./plugins/pluginBackendProxyRo
 import { proxyMachinePluginAsset, registerMachinePluginProxyRoutes } from "./machines/machinePluginProxyRoutes.js";
 import type { Project, WorkspaceEffectiveConfig, WorkspaceProviderResolution } from "./types.js";
 import type { SafeTunnelBridgeService } from "./safeTunnel/safeTunnelBridgeService.js";
+import { devModeClientPointer, requirePackagedClientDist, type ClientServing } from "./clientServing.js";
 
 export interface SafeTunnelMutationHostConfig {
   listenerHost?: string;
@@ -59,7 +57,11 @@ export interface AppDependencies {
   safeTunnel?: SafeTunnelBridgeService;
   /** Startup-snapshot host trust inputs used by Safe Tunnel reads and mutations. */
   safeTunnelMutationHosts?: SafeTunnelMutationHostConfig;
-  clientDist?: string | false;
+  /**
+   * Explicit startup serving-mode decision for non-API browser requests.
+   * `false` builds a minimal API-only app for tests.
+   */
+  clientServing: ClientServing | false;
   logger?: FastifyServerOptions["logger"];
   /** Maximum accepted HTTP request body size in bytes. */
   bodyLimit?: number;
@@ -180,7 +182,7 @@ async function registerSafeTunnelFeature(
   });
 }
 
-export async function buildApp(deps: AppDependencies = {}): Promise<FastifyInstance> {
+export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> {
   const app = Fastify({ logger: deps.logger ?? true, ...(deps.bodyLimit === undefined ? {} : { bodyLimit: deps.bodyLimit }) });
   // Vite proxies development API requests here, while production and machine-scoped
   // API requests already terminate here, so this is the shared browser HTTP edge.
@@ -285,21 +287,44 @@ export async function buildApp(deps: AppDependencies = {}): Promise<FastifyInsta
 
   registerMachineProxyRoutes(app, machines);
 
-  const packagedClientDist = join(dirname(fileURLToPath(import.meta.url)), "..", "client");
-  const clientDist = deps.clientDist ?? (existsSync(packagedClientDist) ? packagedClientDist : join(process.cwd(), "dist", "client"));
-  if (clientDist !== false && existsSync(clientDist)) {
-    await app.register(fastifyStatic, { root: clientDist });
-    app.setNotFoundHandler((request, reply) => {
-      if (request.url === "/api" || request.url.startsWith("/api/")) {
-        return reply.code(404).send({
-          message: `Route ${request.method}:${request.url} not found`,
-          error: "Not Found",
-          statusCode: 404,
-        });
-      }
-      return reply.sendFile("index.html");
-    });
+  if (deps.clientServing !== false) {
+    await registerClientServing(app, deps.clientServing);
   }
 
   return app;
+}
+
+/**
+ * Wires the explicit serving-mode decision. Packaged mode requires the built
+ * client (startup fails loudly otherwise) and falls back to `index.html` for
+ * non-API routes; development mode serves nothing and points browsers at the
+ * dev-server entrypoint instead.
+ */
+async function registerClientServing(app: FastifyInstance, clientServing: ClientServing): Promise<void> {
+  if (clientServing.mode === "packaged") {
+    requirePackagedClientDist(clientServing.clientDist);
+    await app.register(fastifyStatic, { root: clientServing.clientDist });
+    app.setNotFoundHandler((request, reply) => {
+      if (isApiRouteUrl(request.url)) return sendApiNotFound(request.method, request.url, reply);
+      return reply.sendFile("index.html");
+    });
+    return;
+  }
+
+  app.setNotFoundHandler((request, reply) => {
+    if (isApiRouteUrl(request.url)) return sendApiNotFound(request.method, request.url, reply);
+    return reply.code(404).type("text/plain; charset=utf-8").send(devModeClientPointer(clientServing.browserEntrypointUrl));
+  });
+}
+
+function isApiRouteUrl(url: string): boolean {
+  return url === "/api" || url.startsWith("/api/");
+}
+
+function sendApiNotFound(method: string, url: string, reply: FastifyReply): FastifyReply {
+  return reply.code(404).send({
+    message: `Route ${method}:${url} not found`,
+    error: "Not Found",
+    statusCode: 404,
+  });
 }

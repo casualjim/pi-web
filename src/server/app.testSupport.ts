@@ -135,7 +135,7 @@ export function registerAppTestHooks(): void {
         }),
         readAsset: fakePiWebPluginAsset,
       },
-      clientDist: false,
+      clientServing: false,
       logger: false,
     });
   });

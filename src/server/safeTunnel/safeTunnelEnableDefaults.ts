@@ -27,6 +27,12 @@ export type SafeTunnelServerAddress = AddressInfo | string | null;
 
 export interface NodeSafeTunnelEnableDefaultsOptions {
   readonly serverAddress: () => SafeTunnelServerAddress;
+  /**
+   * Local browser entrypoint declared by development startup wiring (the Vite
+   * dev listener via `PI_WEB_BROWSER_URL`). Wins over API-listener inference;
+   * the advanced `localPiWebUrl` override still wins over it.
+   */
+  readonly localBrowserEntrypointUrl?: string;
   readonly hostname?: () => string;
   readonly uniqueId?: () => string;
 }
@@ -46,6 +52,7 @@ export function createNodeSafeTunnelEnableDefaultsProvider(
     return {
       controlApiBaseUrl: defaultSafeTunnelControlApiBaseUrl,
       localPiWebUrl: overrides.localPiWebUrl
+        ?? options.localBrowserEntrypointUrl
         ?? safeTunnelLocalPiWebUrlFromServerAddress(options.serverAddress()),
       machineName,
       machineSlug: collisionResistantMachineSlug(machineName, uniqueId()),
@@ -60,7 +67,9 @@ export function safeTunnelLocalPiWebUrlFromServerAddress(
     throw new Error("PI WEB must be listening before Safe Tunnel can infer its local target.");
   }
   if (typeof address === "string") {
-    throw new Error("Safe Tunnel requires an advanced local target when PI WEB uses a socket listener.");
+    throw new Error(
+      "Safe Tunnel cannot infer a local target from a socket listener; set the advanced Local PI WEB URL override to the intended PI WEB listener.",
+    );
   }
 
   const host = localTargetHost(address.address, address.family);

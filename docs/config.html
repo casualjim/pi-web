@@ -540,6 +540,14 @@ worktree_path="$1"
                       <td>Restart web/API</td>
                     </tr>
                     <tr>
+                      <td>Local browser entrypoint</td>
+                      <td>—</td>
+                      <td><code>PI_WEB_BROWSER_URL</code></td>
+                      <td>Web/API env</td>
+                      <td>Not supported locally</td>
+                      <td>Restart web/API; declared only by development stacks (the Vite dev listener), never in packaged/server mode; selects the Safe Tunnel local target and disables client serving in the API process</td>
+                    </tr>
+                    <tr>
                       <td>Projects storage file</td>
                       <td>—</td>
                       <td><code>PI_WEB_PROJECTS_FILE</code></td>

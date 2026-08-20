@@ -55,7 +55,7 @@ describe("buildApp PI WEB plugin routes", () => {
       roots: [{ path: pluginsRoot, source: "test", scope: "local" }],
       packageProvider: false,
     });
-    const routeApp = await buildApp({ piWebPlugins: service, clientDist: false, logger: false });
+    const routeApp = await buildApp({ piWebPlugins: service, clientServing: false, logger: false });
 
     try {
       const firstManifest = await routeApp.inject({ method: "GET", url: "/pi-web-plugins/manifest.json" });

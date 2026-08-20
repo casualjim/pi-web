@@ -156,6 +156,58 @@ describe("Safe Tunnel app composition", () => {
     }
   });
 
+  it("trusts the persisted registration's provider hostnames without allowedHosts entries", async () => {
+    const fixture = fakeBridge();
+    fixture.registeredPublicOrigin.mockResolvedValue(
+      "https://my-dev-box.internalslice.tunnels.localhost",
+    );
+    const app = await buildApp({
+      clientServing: false,
+      logger: false,
+      safeTunnel: fixture.bridge,
+      safeTunnelMutationHosts: { listenerHost: "127.0.0.1" },
+      sessionDaemon: fakeSessionDaemon(),
+    });
+
+    try {
+      const mutation = await app.inject({
+        method: "POST",
+        url: "/api/safe-tunnel/disable",
+        headers: {
+          [SAFE_TUNNEL_MUTATION_HEADER_NAME]: SAFE_TUNNEL_MUTATION_HEADER_VALUE,
+          "content-type": "application/json",
+          "sec-fetch-site": "same-origin",
+          host: "my-dev-box.internalslice.tunnels.localhost:8788",
+          origin: "http://my-dev-box.internalslice.tunnels.localhost:8788",
+        },
+        payload: {},
+      });
+      const read = await app.inject({
+        method: "GET",
+        url: "/api/safe-tunnel/status",
+        headers: { host: "my-dev-box.internalslice.tunnels.localhost:8788" },
+      });
+      const nonProvider = await app.inject({
+        method: "POST",
+        url: "/api/safe-tunnel/disable",
+        headers: {
+          [SAFE_TUNNEL_MUTATION_HEADER_NAME]: SAFE_TUNNEL_MUTATION_HEADER_VALUE,
+          "content-type": "application/json",
+          "sec-fetch-site": "same-origin",
+          host: "rebind.attacker.example",
+          origin: "https://rebind.attacker.example",
+        },
+        payload: {},
+      });
+
+      expect(mutation.statusCode).toBe(200);
+      expect(read.statusCode).toBe(200);
+      expect(nonProvider.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("starts, routes, advertises, and closes one injected enabled bridge", async () => {
     const fixture = fakeBridge();
     const app = await buildApp({
@@ -392,14 +444,17 @@ function fakeBridge() {
     },
     status: safeTunnelStatus,
   };
+  const registeredPublicOrigin = vi.fn<() => Promise<string | undefined>>(
+    () => Promise.resolve(undefined),
+  );
   const bridge: SafeTunnelBridgeService = {
     disable: vi.fn(() => Promise.resolve(disableResponse)),
     enable: vi.fn(() => Promise.resolve(enableResponse)),
     operation: vi.fn(() => undefined),
-    registeredPublicOrigin: vi.fn(() => Promise.resolve(undefined)),
+    registeredPublicOrigin,
     shutdown,
     startup,
     status,
   };
-  return { bridge, shutdown, startup, status };
+  return { bridge, registeredPublicOrigin, shutdown, startup, status };
 }

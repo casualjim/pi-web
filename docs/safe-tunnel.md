@@ -32,11 +32,13 @@ Any non-empty `PI_WEB_OFFLINE` or `PI_OFFLINE` setting overrides both opt-in mec
 
 Safe Tunnel serves status and operation reads only when the request `Host` is trusted. Enable and Disable additionally require a valid browser `Origin`; the request `Host` and `Origin` must each establish trust independently. These checks contain a gateway-local browser API; they do not replace ingress user authentication.
 
-PI WEB trusts `localhost`, literal IP addresses (including direct loopback and LAN access), the exact configured web listener hostname, exact names in the global `allowedHosts` array, and the public ingress saved by a successful Safe Tunnel registration.
+PI WEB trusts `localhost`, literal IP addresses (including direct loopback and LAN access), the exact configured web listener hostname, exact names in the global `allowedHosts` array, and the provider hostnames derived from a saved Safe Tunnel registration.
 
 For a LAN DNS name or reverse proxy, add each browser-facing DNS name—and any different DNS name to which the proxy rewrites `Host`—as an exact `allowedHosts` entry without a scheme or port. `PI_WEB_ALLOWED_HOSTS` supplies the same exact names as a comma-separated list. Preserve the browser `Origin` and `Host` headers when practical. The Vite-only `allowedHosts: true` mode and leading-dot subdomain patterns do not trust arbitrary DNS names for Safe Tunnel requests. Restart web/API after changing this startup-snapshot list.
 
-A saved registration automatically trusts its public hostname for request `Host` checks. For mutations, `Origin` must equal the normalized registered origin, including its scheme and effective port. Non-loopback registered public origins must use HTTPS; plaintext is accepted only for literal-loopback development origins.
+A saved registration derives trust from the registered tunnel URL, never from request data: the exact registered public hostname is trusted, and when that hostname's parent is a multi-label DNS domain, sibling hostnames beneath that provider base domain are trusted as well. Enable and Disable therefore work from the generated tunnel hostname without adding it to `allowedHosts`, and arbitrary non-provider hostnames stay rejected.
+
+For mutations, the browser `Origin` must establish trust independently of the `Host`. An `Origin` on a provider hostname must use HTTPS, with one development exception: plaintext HTTP is accepted on loopback development names (`localhost`, its subdomains, and literal loopback addresses), so the local tunnel development edge can drive Enable/Disable from its own HTTP origin such as `http://<machine>.<namespace>.tunnels.localhost:8788`. The `Origin` does not need to match the registered origin's exact scheme or port, but provider trust never mixes with configured-host trust: a configured `allowedHosts` Origin cannot stand in for a provider Origin, and a provider Origin does not widen configured-host rules. Registered public origins themselves must still use HTTPS, with plaintext accepted only for literal-loopback development origins.
 
 ## Availability and desired state are separate
 

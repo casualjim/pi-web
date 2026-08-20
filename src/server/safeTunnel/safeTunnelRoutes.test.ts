@@ -213,10 +213,130 @@ describe("registerSafeTunnelRoutes", () => {
     expect(service.status).not.toHaveBeenCalled();
   });
 
+  it("accepts the generated tunnel hostname behind a plaintext development edge without allowedHosts entries", async () => {
+    // The local tunnel development stack registers a production-shaped HTTPS
+    // public URL but serves the same hostname over plaintext HTTP on its own
+    // edge port, so no exact registered-Origin equality can hold there.
+    service.registeredPublicOriginValue =
+      "https://my-dev-box.internalslice.tunnels.localhost";
+
+    const mutation = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "my-dev-box.internalslice.tunnels.localhost:8788",
+        origin: "http://my-dev-box.internalslice.tunnels.localhost:8788",
+      },
+      payload: {},
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/api/safe-tunnel/status",
+      headers: { host: "my-dev-box.internalslice.tunnels.localhost:8788" },
+    });
+
+    expect(mutation.statusCode).toBe(200);
+    expect(read.statusCode).toBe(200);
+    expect(service.disable).toHaveBeenCalledOnce();
+    expect(service.status).toHaveBeenCalledOnce();
+  });
+
+  it("accepts HTTPS Origin port variation and sibling hostnames in the registered provider zone", async () => {
+    service.registeredPublicOriginValue = "https://registered.tunnels.pi-web.dev:9443";
+
+    const portVariation = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "registered.tunnels.pi-web.dev:9443",
+        origin: "https://registered.tunnels.pi-web.dev",
+      },
+      payload: {},
+    });
+    const siblingMutation = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "sibling.tunnels.pi-web.dev",
+        origin: "https://sibling.tunnels.pi-web.dev",
+      },
+      payload: {},
+    });
+    const siblingRead = await app.inject({
+      method: "GET",
+      url: "/api/safe-tunnel/status",
+      headers: { host: "sibling.tunnels.pi-web.dev" },
+    });
+
+    expect(portVariation.statusCode).toBe(200);
+    expect(siblingMutation.statusCode).toBe(200);
+    expect(siblingRead.statusCode).toBe(200);
+    expect(service.disable).toHaveBeenCalledTimes(2);
+    expect(service.status).toHaveBeenCalledOnce();
+  });
+
+  it("rejects provider-shaped hostnames when no registration is persisted", async () => {
+    await replaceRouteApp({ allowedHosts: true });
+
+    const mutation = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "anything.tunnels.pi-web.dev",
+        origin: "https://anything.tunnels.pi-web.dev",
+      },
+      payload: {},
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/api/safe-tunnel/status",
+      headers: { host: "anything.tunnels.pi-web.dev" },
+    });
+
+    expect(mutation.statusCode).toBe(403);
+    expect(read.statusCode).toBe(403);
+    expect(service.disable).not.toHaveBeenCalled();
+    expect(service.status).not.toHaveBeenCalled();
+  });
+
+  it("trusts only the exact registered hostname when the provider zone is not a multi-label domain", async () => {
+    service.registeredPublicOriginValue = "https://tunnel.example";
+
+    const exact = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "tunnel.example",
+        origin: "https://tunnel.example",
+      },
+      payload: {},
+    });
+    const sibling = await app.inject({
+      method: "POST",
+      url: "/api/safe-tunnel/disable",
+      headers: {
+        ...acceptedMutationHeaders,
+        host: "other.tunnel.example",
+        origin: "https://other.tunnel.example",
+      },
+      payload: {},
+    });
+
+    expect(exact.statusCode).toBe(200);
+    expect(sibling.statusCode).toBe(403);
+    expect(service.disable).toHaveBeenCalledOnce();
+  });
+
   it.each([
-    ["an HTTP downgrade", "registered.tunnels.pi-web.dev:9443", "http://registered.tunnels.pi-web.dev:9443"],
-    ["an alternate effective port", "registered.tunnels.pi-web.dev:9443", "https://registered.tunnels.pi-web.dev"],
+    ["an HTTP downgrade on the registered hostname", "registered.tunnels.pi-web.dev:9443", "http://registered.tunnels.pi-web.dev:9443"],
+    ["a plaintext Origin on a non-loopback provider sibling hostname", "sibling.tunnels.pi-web.dev", "http://sibling.tunnels.pi-web.dev"],
     ["an independently untrusted Host", "rebind.attacker.example:8504", "https://registered.tunnels.pi-web.dev:9443"],
+    ["a look-alike domain outside the provider zone", "registered-tunnels.pi-web.dev", "https://registered-tunnels.pi-web.dev"],
   ])("rejects registered-ingress mutation trust with %s", async (
     _label,
     host,

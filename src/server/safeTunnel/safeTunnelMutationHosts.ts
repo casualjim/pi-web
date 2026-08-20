@@ -1,5 +1,8 @@
 import { isIP } from "node:net";
-import { isSafeTunnelPublicIngressTransportAllowed } from "../../shared/safeTunnelUrlPolicy.js";
+import {
+  isSafeTunnelLoopbackDevelopmentHostname,
+  isSafeTunnelPublicIngressTransportAllowed,
+} from "../../shared/safeTunnelUrlPolicy.js";
 
 export interface SafeTunnelMutationHostConfig {
   /** The operator-selected web listener host. */
@@ -26,7 +29,18 @@ export interface SafeTunnelMutationHostBoundary {
 
 interface NormalizedOrigin {
   readonly hostname: string;
-  readonly origin: string;
+  readonly scheme: "http" | "https";
+}
+
+/**
+ * Trust derived from the persisted Safe Tunnel registration, never from
+ * request-controlled data: the exact registered public hostname plus, when the
+ * provider issues multi-label hostnames, the provider zone that hostname lives
+ * in (its parent domain).
+ */
+interface RegisteredProviderTrust {
+  readonly hostname: string;
+  readonly baseDomain?: string;
 }
 
 /**
@@ -34,6 +48,15 @@ interface NormalizedOrigin {
  * DNS names become trusted only through startup configuration or a persisted
  * registration; equality between request-controlled Host and Origin is never
  * itself evidence of trust.
+ *
+ * A persisted registration trusts its exact public hostname and sibling
+ * hostnames beneath its provider base domain, so enable/disable work from the
+ * generated tunnel hostname — including the local development edge, which
+ * serves the same hostname over plaintext HTTP on a dev port — without adding
+ * tunnel hostnames to `allowedHosts`. Mutation Origins on provider hostnames
+ * must use HTTPS, with plaintext accepted only on loopback development names.
+ * The two trust classes never mix: a configured Origin cannot stand in for a
+ * provider one, and a provider Origin does not widen configured-host rules.
  */
 export function createSafeTunnelMutationHostBoundary(
   config: SafeTunnelMutationHostConfig = {},
@@ -58,10 +81,8 @@ export function createSafeTunnelMutationHostBoundary(
       if (host === undefined) return false;
       if (isConfiguredOrIntrinsic(host)) return true;
 
-      const registered = normalizeRegisteredPublicOrigin(
-        await registeredPublicOrigin(),
-      );
-      return registered?.hostname === host;
+      const provider = deriveRegisteredProviderTrust(await registeredPublicOrigin());
+      return provider !== undefined && providerTrustsHostname(provider, host);
     },
     allowsMutation: async (headers, registeredPublicOrigin) => {
       const host = requestAuthorityHostname(headers.host);
@@ -76,13 +97,11 @@ export function createSafeTunnelMutationHostBoundary(
       const originIsConfigured = isConfiguredOrIntrinsic(origin.hostname);
       if (hostIsConfigured && originIsConfigured) return true;
 
-      const registered = normalizeRegisteredPublicOrigin(
-        await registeredPublicOrigin(),
-      );
-      if (registered === undefined) return false;
+      const provider = deriveRegisteredProviderTrust(await registeredPublicOrigin());
+      if (provider === undefined) return false;
 
-      const hostIsTrusted = hostIsConfigured || host === registered.hostname;
-      return hostIsTrusted && origin.origin === registered.origin;
+      const hostIsTrusted = hostIsConfigured || providerTrustsHostname(provider, host);
+      return hostIsTrusted && providerTrustsOrigin(provider, origin);
     },
   };
 }
@@ -115,15 +134,61 @@ function requestOrigin(
       || hostname === undefined) {
       return undefined;
     }
-    return { hostname, origin: origin.origin };
+    return { hostname, scheme: origin.protocol === "https:" ? "https" : "http" };
   } catch {
     return undefined;
   }
 }
 
-function normalizeRegisteredPublicOrigin(
+function deriveRegisteredProviderTrust(
   value: string | undefined,
-): NormalizedOrigin | undefined {
+): RegisteredProviderTrust | undefined {
+  const hostname = normalizeRegisteredPublicHostname(value);
+  if (hostname === undefined) return undefined;
+  const baseDomain = providerBaseDomain(hostname);
+  return baseDomain === undefined ? { hostname } : { hostname, baseDomain };
+}
+
+function providerTrustsHostname(
+  provider: RegisteredProviderTrust,
+  hostname: string,
+): boolean {
+  return hostname === provider.hostname
+    || (provider.baseDomain !== undefined
+      && hostname.endsWith(`.${provider.baseDomain}`));
+}
+
+function providerTrustsOrigin(
+  provider: RegisteredProviderTrust,
+  origin: NormalizedOrigin,
+): boolean {
+  if (!providerTrustsHostname(provider, origin.hostname)) return false;
+  // HTTPS keeps provenance on any provider hostname. Plaintext is a loopback
+  // development exception: the local tunnel dev edge serves the registered
+  // hostname over HTTP on its own port (for example
+  // http://machine.namespace.tunnels.localhost:8788).
+  if (origin.scheme === "https") return true;
+  return isSafeTunnelLoopbackDevelopmentHostname(origin.hostname);
+}
+
+/**
+ * Derives the provider zone from a registered public hostname by stripping its
+ * first label (`machine.namespace.tunnels.example` -> `namespace.tunnels.example`).
+ * The zone must stay a multi-label DNS name so trust can never climb to a
+ * public suffix or a one-label apex; literal IP registrations trust only their
+ * exact address.
+ */
+function providerBaseDomain(hostname: string): string | undefined {
+  if (isIP(hostname) !== 0) return undefined;
+  const firstDot = hostname.indexOf(".");
+  if (firstDot <= 0) return undefined;
+  const candidate = hostname.slice(firstDot + 1);
+  if (!candidate.includes(".")) return undefined;
+  if (candidate.split(".").some((label) => label === "")) return undefined;
+  return candidate;
+}
+
+function normalizeRegisteredPublicHostname(value: string | undefined): string | undefined {
   if (value === undefined || value === "" || value !== value.trim()) return undefined;
 
   try {
@@ -138,7 +203,7 @@ function normalizeRegisteredPublicOrigin(
       || hostname === undefined) {
       return undefined;
     }
-    return { hostname, origin: origin.origin };
+    return hostname;
   } catch {
     return undefined;
   }

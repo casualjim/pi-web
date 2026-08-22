@@ -71,6 +71,9 @@ function parseSafeTunnelConfigStatus(value: unknown): SafeTunnelConfigStatus {
   const record = requireRecord(value);
   const localPiWebUrl = optionalHttpUrl(record, "localPiWebUrl");
   const frpcPathConfigured = optionalBoolean(record, "frpcPathConfigured");
+  const advancedPrefill = record["advancedPrefill"] === undefined
+    ? undefined
+    : parseSafeTunnelAdvancedPrefill(record["advancedPrefill"]);
   const machine = record["machine"] === undefined
     ? undefined
     : parseSafeTunnelConfigMachine(record["machine"]);
@@ -80,8 +83,21 @@ function parseSafeTunnelConfigStatus(value: unknown): SafeTunnelConfigStatus {
     state: requireSafeTunnelConfigState(record, "state"),
     ...(localPiWebUrl === undefined ? {} : { localPiWebUrl }),
     ...(frpcPathConfigured === undefined ? {} : { frpcPathConfigured }),
+    ...(advancedPrefill === undefined ? {} : { advancedPrefill }),
     ...(machine === undefined ? {} : { machine }),
     ...(error === undefined ? {} : { error }),
+  };
+}
+
+function parseSafeTunnelAdvancedPrefill(
+  value: unknown,
+): NonNullable<SafeTunnelConfigStatus["advancedPrefill"]> {
+  const record = requireRecord(value);
+  const controlApiUrl = optionalSafeControlApiUrl(record, "controlApiUrl");
+  const localPiWebUrl = optionalHttpUrl(record, "localPiWebUrl");
+  return {
+    ...(controlApiUrl === undefined ? {} : { controlApiUrl }),
+    ...(localPiWebUrl === undefined ? {} : { localPiWebUrl }),
   };
 }
 

@@ -7,6 +7,7 @@ import {
 } from "./safeTunnelBridgeService.js";
 import {
   createNodeSafeTunnelEnableDefaultsProvider,
+  defaultSafeTunnelControlApiBaseUrl,
   type SafeTunnelEnableDefaults,
 } from "./safeTunnelEnableDefaults.js";
 import type { SafeTunnelReconciledFrpcRuntime } from "./safeTunnelRuntimeReconciler.js";
@@ -63,6 +64,9 @@ describe("DefaultSafeTunnelBridgeService", () => {
         state: "registered",
         localPiWebUrl: defaults.localPiWebUrl,
         frpcPathConfigured: false,
+        advancedPrefill: {
+          controlApiUrl: defaults.controlApiBaseUrl,
+        },
         machine: {
           controlApiBaseUrl: defaults.controlApiBaseUrl,
           machineId: "machine_123",
@@ -132,6 +136,82 @@ describe("DefaultSafeTunnelBridgeService", () => {
     expect(fixture.safeTunnel.enableInputs).toEqual([{
       localPiWebUrl: defaults.localPiWebUrl,
     }]);
+  });
+
+  it("preserves a registration when submitted advanced identity matches saved state", async () => {
+    const fixture = createFixture(registeredState);
+
+    const response = await fixture.bridge.enable({
+      advanced: {
+        controlApiUrl: `${defaults.controlApiBaseUrl}/`,
+        machineSlug: defaults.machineSlug,
+        localPiWebUrl: defaults.localPiWebUrl,
+      },
+    });
+    await waitFor(() => fixture.bridge.operation(response.operation.id)?.status === "succeeded");
+
+    expect(fixture.safeTunnel.loginInputs).toEqual([]);
+    expect(fixture.safeTunnel.enableInputs).toEqual([{
+      localPiWebUrl: defaults.localPiWebUrl,
+    }]);
+  });
+
+  it("still replaces registration for changed or rejected identity", async () => {
+    const changed = createFixture(registeredState);
+    const changedResponse = await changed.bridge.enable({
+      advanced: { controlApiUrl: "https://other-control.example.test" },
+    });
+    await waitFor(() => changed.bridge.operation(changedResponse.operation.id)?.status === "succeeded");
+    expect(changed.safeTunnel.loginInputs).toEqual([
+      expect.objectContaining({ controlApiBaseUrl: "https://other-control.example.test" }),
+    ]);
+
+    const registeredMachine = registeredState.machine;
+    if (registeredMachine === undefined) throw new Error("Expected registered fixture state");
+    const rejected = createFixture({
+      ...registeredState,
+      machine: { ...registeredMachine, credentialStatus: "rejected" },
+    });
+    const rejectedResponse = await rejected.bridge.enable({
+      advanced: {
+        controlApiUrl: defaults.controlApiBaseUrl,
+        machineSlug: defaults.machineSlug,
+      },
+    });
+    await waitFor(() => rejected.bridge.operation(rejectedResponse.operation.id)?.status === "succeeded");
+    expect(rejected.safeTunnel.loginInputs).toHaveLength(1);
+  });
+
+  it("reports saved endpoint and target values only when they differ from defaults", async () => {
+    const fixture = createFixture({
+      ...registeredState,
+      localPiWebUrl: "http://127.0.0.1:9500",
+    });
+
+    await expect(fixture.bridge.status()).resolves.toMatchObject({
+      config: {
+        advancedPrefill: {
+          controlApiUrl: defaults.controlApiBaseUrl,
+          localPiWebUrl: "http://127.0.0.1:9500",
+        },
+      },
+    });
+  });
+
+  it("omits advanced prefills when saved values match current defaults", async () => {
+    const registeredMachine = registeredState.machine;
+    if (registeredMachine === undefined) throw new Error("Expected registered fixture state");
+    const fixture = createFixture({
+      ...registeredState,
+      machine: {
+        ...registeredMachine,
+        controlApiBaseUrl: defaultSafeTunnelControlApiBaseUrl,
+      },
+    });
+
+    const status = await fixture.bridge.status();
+
+    expect(status.config.advancedPrefill).toBeUndefined();
   });
 
   it("lets an advanced local target bypass unavailable listener inference", async () => {

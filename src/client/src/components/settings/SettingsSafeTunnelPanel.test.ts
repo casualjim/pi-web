@@ -8,6 +8,7 @@ import type {
 import { safeTunnelApi, type SafeTunnelApi } from "../../api/safeTunnelClient";
 import {
   createSafeTunnelEnableRequest,
+  safeTunnelAdvancedPrefill,
   safeTunnelAdvancedValidationMessage,
   safeTunnelPresentation,
   safeTunnelRuntimeSummary,
@@ -27,6 +28,23 @@ describe("Safe Tunnel enable request helpers", () => {
 
     expect(safeTunnelAdvancedValidationMessage(fields)).toBeUndefined();
     expect(createSafeTunnelEnableRequest(fields)).toEqual({});
+  });
+
+  it("prefills only saved values identified as non-default by the server", () => {
+    const status = safeTunnelStatus();
+    status.config.advancedPrefill = {
+      controlApiUrl: "http://127.0.0.1:8787",
+      localPiWebUrl: "http://127.0.0.1:9500",
+    };
+
+    expect(safeTunnelAdvancedPrefill(status)).toEqual({
+      controlApiUrl: "http://127.0.0.1:8787",
+      machineName: "",
+      machineSlug: "",
+      localPiWebUrl: "http://127.0.0.1:9500",
+      frpcPath: "",
+    });
+    expect(safeTunnelAdvancedPrefill(safeTunnelStatus())).toEqual(emptyAdvancedFields());
   });
 
   it("validates and normalizes only explicit advanced overrides", () => {
@@ -132,6 +150,74 @@ describe("settings-safe-tunnel-panel", () => {
     expect(root.querySelector("details.advanced-card")?.hasAttribute("open")).toBe(false);
     expect(root.textContent).not.toContain("Start tunnel");
     expect(root.textContent).not.toContain("Start login");
+  });
+
+  it("prefills and preserves saved non-default technical values", async () => {
+    const initial = safeTunnelStatus({ desiredState: "disabled", runtimeState: "stopped" });
+    const machine = initial.config.machine;
+    if (machine === undefined) throw new Error("Expected registered Safe Tunnel fixture");
+    initial.config.localPiWebUrl = "http://127.0.0.1:9500";
+    initial.config.advancedPrefill = {
+      controlApiUrl: "http://127.0.0.1:8787",
+      localPiWebUrl: "http://127.0.0.1:9500",
+    };
+    initial.config.machine = {
+      ...machine,
+      controlApiBaseUrl: "http://127.0.0.1:8787",
+      machineSlug: "saved-dev-box",
+    };
+    const operation = safeTunnelOperation({ phase: "starting" });
+    vi.spyOn(safeTunnelApi, "status").mockResolvedValue(initial);
+    const enableSpy = vi.spyOn(safeTunnelApi, "enable").mockResolvedValue({
+      accepted: true,
+      operation,
+      status: { ...initial, activeOperation: operation },
+    });
+
+    const panel = await renderPanel();
+    const root = requiredShadowRoot(panel);
+
+    expect(inputByLabel(root, "Control API URL").value).toBe("http://127.0.0.1:8787");
+    expect(inputByLabel(root, "Machine name").value).toBe("");
+    expect(inputByLabel(root, "Machine slug").value).toBe("");
+    expect(inputByLabel(root, "Local PI WEB URL").value).toBe("http://127.0.0.1:9500");
+    expect(inputByLabel(root, "frpc path").value).toBe("");
+
+    buttonByText(root, "Enable Safe Tunnel").click();
+    await vi.waitFor(() => {
+      expect(enableSpy).toHaveBeenCalledWith({
+        advanced: {
+          controlApiUrl: "http://127.0.0.1:8787",
+          localPiWebUrl: "http://127.0.0.1:9500",
+        },
+      });
+    });
+  });
+
+  it("does not overwrite an edited advanced draft on refresh", async () => {
+    const initial = safeTunnelStatus();
+    initial.config.advancedPrefill = {
+      controlApiUrl: "http://127.0.0.1:8787",
+      localPiWebUrl: "http://127.0.0.1:9500",
+    };
+    const refreshed = safeTunnelStatus();
+    refreshed.config.advancedPrefill = {
+      controlApiUrl: "http://127.0.0.1:8888",
+      localPiWebUrl: "http://127.0.0.1:9600",
+    };
+    vi.spyOn(safeTunnelApi, "status")
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(refreshed);
+
+    const panel = await renderPanel();
+    const root = requiredShadowRoot(panel);
+    setInput(root, "Control API URL", "http://127.0.0.1:8989");
+
+    await panelPromise(panel, "loadStatus");
+    await panel.updateComplete;
+
+    expect(inputByLabel(root, "Control API URL").value).toBe("http://127.0.0.1:8989");
+    expect(inputByLabel(root, "Local PI WEB URL").value).toBe("http://127.0.0.1:9500");
   });
 
   it("carries approval progress through automatic supervision and public URL", async () => {
@@ -472,11 +558,16 @@ function buttonByText(root: ShadowRoot, text: string): HTMLButtonElement {
   return button;
 }
 
-function setInput(root: ShadowRoot, labelText: string, value: string): void {
+function inputByLabel(root: ShadowRoot, labelText: string): HTMLInputElement {
   const label = [...root.querySelectorAll("label")]
     .find((candidate) => candidate.textContent.includes(labelText));
   const input = label?.querySelector("input");
   if (!(input instanceof HTMLInputElement)) throw new Error(`Missing input: ${labelText}`);
+  return input;
+}
+
+function setInput(root: ShadowRoot, labelText: string, value: string): void {
+  const input = inputByLabel(root, labelText);
   input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
 }

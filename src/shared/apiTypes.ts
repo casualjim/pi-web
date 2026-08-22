@@ -350,6 +350,11 @@ export interface SafeTunnelConfigStatus {
   state: SafeTunnelConfigState;
   localPiWebUrl?: string;
   frpcPathConfigured?: boolean;
+  /** Saved values that differ from the server's current normal enable defaults. */
+  advancedPrefill?: {
+    controlApiUrl?: string;
+    localPiWebUrl?: string;
+  };
   machine?: {
     controlApiBaseUrl: string;
     machineId: string;

@@ -126,7 +126,7 @@ There is no managed fallback to another release. Every other platform/architectu
 
 ## Advanced development and self-hosting overrides
 
-Leave every advanced field blank for the normal flow. Overrides are sent only on the next Enable request:
+The advanced form keeps inferred identity and fixed production defaults blank. When browser-safe saved state is available, it prefills non-default Control API and local-target values shown under **Saved technical state**. Those prefills, plus any edits, become overrides on the next Enable request. A saved `frpc` override remains effective, but its private filesystem path is not returned to the browser, so that field stays blank.
 
 | Field | Behavior |
 | --- | --- |

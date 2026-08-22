@@ -8,9 +8,10 @@ import type {
   SafeTunnelRuntimeStatus,
   SafeTunnelStatusResponse,
 } from "../../shared/apiTypes.js";
-import type {
-  SafeTunnelEnableDefaults,
-  SafeTunnelEnableDefaultsProvider,
+import {
+  defaultSafeTunnelControlApiBaseUrl,
+  type SafeTunnelEnableDefaults,
+  type SafeTunnelEnableDefaultsProvider,
 } from "./safeTunnelEnableDefaults.js";
 import {
   SafeTunnelOperationConflictError,
@@ -24,9 +25,10 @@ import type {
   SafeTunnelLoginOptions,
   SafeTunnelLoginResult,
 } from "./safeTunnelService.js";
-import type {
-  LoadedSafeTunnelState,
-  SafeTunnelPersistedState,
+import {
+  normalizeSafeTunnelControlApiBaseUrl,
+  type LoadedSafeTunnelState,
+  type SafeTunnelPersistedState,
 } from "./safeTunnelState.js";
 import type { SafeTunnelFrpcStartResult } from "./safeTunnelFrpcSupervisor.js";
 
@@ -135,8 +137,15 @@ export class DefaultSafeTunnelBridgeService implements SafeTunnelBridgeService {
           ? undefined
           : { localPiWebUrl: advancedLocalPiWebUrl },
       );
+      const defaultLocalPiWebUrl = advancedLocalPiWebUrl === undefined
+        ? defaults.localPiWebUrl
+        : this.defaultLocalPiWebUrl();
       throwIfEnableCancelled(controller.signal);
-      const initialStatus = statusFromLoadedState(runtime, loadedState);
+      const initialStatus = statusFromLoadedState(
+        runtime,
+        loadedState,
+        defaultLocalPiWebUrl,
+      );
       const operation = this.createOperation();
       const promise = Promise.resolve()
         .then(() => this.runEnableWorkflow(
@@ -320,7 +329,10 @@ export class DefaultSafeTunnelBridgeService implements SafeTunnelBridgeService {
     readonly desiredState: SafeTunnelStatusResponse["desiredState"];
   }> {
     try {
-      return ownedStateStatus(await this.dependencies.safeTunnel.state());
+      return ownedStateStatus(
+        await this.dependencies.safeTunnel.state(),
+        this.defaultLocalPiWebUrl(),
+      );
     } catch {
       return {
         config: {
@@ -330,6 +342,14 @@ export class DefaultSafeTunnelBridgeService implements SafeTunnelBridgeService {
         },
         desiredState: "disabled",
       };
+    }
+  }
+
+  private defaultLocalPiWebUrl(): string | undefined {
+    try {
+      return this.dependencies.enableDefaults().localPiWebUrl;
+    } catch {
+      return undefined;
     }
   }
 
@@ -353,9 +373,19 @@ function shouldRegisterMachine(
     || machine.publicUrl === undefined) return true;
   if (runtime.diagnosticCode === "credentials_rejected") return true;
   const advanced = request.advanced;
-  return advanced?.controlApiUrl !== undefined
-    || advanced?.machineName !== undefined
-    || advanced?.machineSlug !== undefined;
+  return advanced?.machineName !== undefined
+    || (advanced?.controlApiUrl !== undefined
+      && !matchesSavedControlApi(advanced.controlApiUrl, machine.controlApiBaseUrl))
+    || (advanced?.machineSlug !== undefined
+      && advanced.machineSlug !== machine.machineSlug);
+}
+
+function matchesSavedControlApi(requested: string, saved: string): boolean {
+  try {
+    return normalizeSafeTunnelControlApiBaseUrl(requested) === saved;
+  } catch {
+    return false;
+  }
 }
 
 function enableLoginObserver(operation: SafeTunnelOperationState): SafeTunnelLoginObserver {
@@ -393,8 +423,9 @@ function finishEnableOperation(
 function statusFromLoadedState(
   runtime: SafeTunnelRuntimeStatus,
   loaded: LoadedSafeTunnelState,
+  defaultLocalPiWebUrl: string | undefined,
 ): SafeTunnelStatusResponse {
-  const ownedState = ownedStateStatus(loaded);
+  const ownedState = ownedStateStatus(loaded, defaultLocalPiWebUrl);
   return {
     config: ownedState.config,
     desiredState: ownedState.desiredState,
@@ -404,12 +435,14 @@ function statusFromLoadedState(
 
 function ownedStateStatus(
   loaded: LoadedSafeTunnelState,
+  defaultLocalPiWebUrl: string | undefined,
 ): {
   readonly config: SafeTunnelConfigStatus;
   readonly desiredState: SafeTunnelStatusResponse["desiredState"];
 } {
   const state = loaded.state;
   const machine = state.machine;
+  const advancedPrefill = safeTunnelAdvancedPrefill(loaded, defaultLocalPiWebUrl);
   return {
     config: {
       exists: loaded.exists,
@@ -420,6 +453,7 @@ function ownedStateStatus(
           : "registered",
       localPiWebUrl: state.localPiWebUrl,
       frpcPathConfigured: state.frpcPath !== undefined,
+      ...(advancedPrefill === undefined ? {} : { advancedPrefill }),
       ...(machine === undefined
         ? {}
         : {
@@ -438,6 +472,24 @@ function ownedStateStatus(
     },
     desiredState: state.desiredState,
   };
+}
+
+function safeTunnelAdvancedPrefill(
+  loaded: LoadedSafeTunnelState,
+  defaultLocalPiWebUrl: string | undefined,
+): SafeTunnelConfigStatus["advancedPrefill"] {
+  if (!loaded.exists) return undefined;
+  const state = loaded.state;
+  const controlApiUrl = state.machine?.controlApiBaseUrl;
+  const prefill = {
+    ...(controlApiUrl === undefined || controlApiUrl === defaultSafeTunnelControlApiBaseUrl
+      ? {}
+      : { controlApiUrl }),
+    ...(defaultLocalPiWebUrl !== undefined && state.localPiWebUrl === defaultLocalPiWebUrl
+      ? {}
+      : { localPiWebUrl: state.localPiWebUrl }),
+  };
+  return Object.keys(prefill).length === 0 ? undefined : prefill;
 }
 
 function browserRuntimeStatus(runtime: SafeTunnelRuntimeStatus): SafeTunnelRuntimeStatus {

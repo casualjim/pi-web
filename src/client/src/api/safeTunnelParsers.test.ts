@@ -112,6 +112,10 @@ function statusResponse(activeOperation = operationResponse()) {
       state: "registered",
       localPiWebUrl: "http://127.0.0.1:8504",
       frpcPathConfigured: false,
+      advancedPrefill: {
+        controlApiUrl: "https://control.example.test",
+        localPiWebUrl: "http://127.0.0.1:8504",
+      },
       machine: {
         controlApiBaseUrl: "https://control.example.test",
         machineId: "machine_1",

@@ -47,6 +47,8 @@ export class SettingsSafeTunnelPanel extends LitElement {
   @state() private machineSlug = "";
   @state() private localPiWebUrl = "";
   @state() private frpcPath = "";
+  private advancedFieldsInitialized = false;
+  private advancedFieldsEdited = false;
   private connectionGeneration = 0;
   private operationPollTimer: number | undefined;
   private requestSequence = 0;
@@ -210,28 +212,28 @@ export class SettingsSafeTunnelPanel extends LitElement {
     return html`
       <details class="card advanced-card">
         <summary>Advanced development and self-hosting overrides</summary>
-        <p class="help">Leave every field empty for the normal production flow. Overrides are sent only when you next choose Enable Safe Tunnel.</p>
+        <p class="help">Saved non-default Control API and local-target values are prefilled when available. The values shown, plus any edits, are sent when you next choose Enable Safe Tunnel.</p>
         <div class="advanced-grid">
           <label>
             Control API URL
-            <input .value=${this.controlApiUrl} placeholder=${productionControlApiUrl} @input=${(event: Event) => { this.controlApiUrl = inputValue(event); }}>
+            <input .value=${this.controlApiUrl} placeholder=${productionControlApiUrl} @input=${(event: Event) => { this.advancedFieldsEdited = true; this.controlApiUrl = inputValue(event); }}>
             <small>Blank uses production, or the saved endpoint when replacing an existing self-hosted registration.</small>
           </label>
           <label>
             Machine name
-            <input .value=${this.machineName} placeholder="Inferred from the OS hostname" @input=${(event: Event) => { this.machineName = inputValue(event); }}>
+            <input .value=${this.machineName} placeholder="Inferred from the OS hostname" @input=${(event: Event) => { this.advancedFieldsEdited = true; this.machineName = inputValue(event); }}>
           </label>
           <label>
             Machine slug
-            <input .value=${this.machineSlug} spellcheck="false" placeholder="Inferred with a collision-resistant suffix" @input=${(event: Event) => { this.machineSlug = inputValue(event); }}>
+            <input .value=${this.machineSlug} spellcheck="false" placeholder="Inferred with a collision-resistant suffix" @input=${(event: Event) => { this.advancedFieldsEdited = true; this.machineSlug = inputValue(event); }}>
           </label>
           <label>
             Local PI WEB URL
-            <input .value=${this.localPiWebUrl} placeholder="Inferred from the running listener" @input=${(event: Event) => { this.localPiWebUrl = inputValue(event); }}>
+            <input .value=${this.localPiWebUrl} placeholder="Inferred from the running listener" @input=${(event: Event) => { this.advancedFieldsEdited = true; this.localPiWebUrl = inputValue(event); }}>
           </label>
           <label>
             frpc path
-            <input .value=${this.frpcPath} placeholder="Managed and verified by PI WEB" @input=${(event: Event) => { this.frpcPath = inputValue(event); }}>
+            <input .value=${this.frpcPath} placeholder="Managed and verified by PI WEB" @input=${(event: Event) => { this.advancedFieldsEdited = true; this.frpcPath = inputValue(event); }}>
             <small>An explicit path bypasses managed verification. Blank keeps a saved override, or uses managed frpc when none exists.</small>
           </label>
         </div>
@@ -265,6 +267,19 @@ export class SettingsSafeTunnelPanel extends LitElement {
     };
   }
 
+  private initializeAdvancedFields(status: SafeTunnelStatusResponse): void {
+    if (this.advancedFieldsInitialized) return;
+    this.advancedFieldsInitialized = true;
+    if (this.advancedFieldsEdited) return;
+
+    const fields = safeTunnelAdvancedPrefill(status);
+    this.controlApiUrl = fields.controlApiUrl;
+    this.machineName = fields.machineName;
+    this.machineSlug = fields.machineSlug;
+    this.localPiWebUrl = fields.localPiWebUrl;
+    this.frpcPath = fields.frpcPath;
+  }
+
   private async loadStatus(): Promise<void> {
     if (!this.isConnected) return;
     const { connectionGeneration, requestSequence } = this.beginApiRequest();
@@ -284,6 +299,7 @@ export class SettingsSafeTunnelPanel extends LitElement {
   }
 
   private applyStatus(status: SafeTunnelStatusResponse): void {
+    this.initializeAdvancedFields(status);
     this.status = status;
     if (status.activeOperation !== undefined) {
       this.operation = status.activeOperation;
@@ -494,6 +510,18 @@ export class SettingsSafeTunnelPanel extends LitElement {
       .detail-row { grid-template-columns: minmax(0, 1fr); }
     }
   `;
+}
+
+export function safeTunnelAdvancedPrefill(
+  status: SafeTunnelStatusResponse,
+): SafeTunnelAdvancedFields {
+  return {
+    controlApiUrl: status.config.advancedPrefill?.controlApiUrl ?? "",
+    machineName: "",
+    machineSlug: "",
+    localPiWebUrl: status.config.advancedPrefill?.localPiWebUrl ?? "",
+    frpcPath: "",
+  };
 }
 
 export function safeTunnelAdvancedValidationMessage(

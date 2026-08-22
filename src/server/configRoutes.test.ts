@@ -37,6 +37,59 @@ describe("config routes", () => {
     expect(response.json<PiWebConfigResponse>()).toEqual(responseFor(savedConfig, true));
   });
 
+  it("reports managed gateway hosts without persisting or projecting them to selected-machine config", async () => {
+    const managedApp = Fastify({ logger: false });
+    const managedAllowedHosts = [{
+      source: "safe-tunnel" as const,
+      hostname: "machine.namespace.tunnels.example.test",
+    }];
+    registerConfigRoutes(managedApp, service, {
+      managedAllowedHosts: () => managedAllowedHosts,
+    });
+    registerLocalMachineConfigRoutes(managedApp, service);
+    await managedApp.ready();
+
+    try {
+      const gateway = await managedApp.inject({ method: "GET", url: "/api/config" });
+      const selected = await managedApp.inject({ method: "GET", url: "/api/machines/local/config" });
+      const updated = await managedApp.inject({
+        method: "PUT",
+        url: "/api/config",
+        payload: {
+          config: {
+            allowedHosts: ["operator.example.test"],
+            managedAllowedHosts: [{ source: "safe-tunnel", hostname: "attacker.test" }],
+          },
+        },
+      });
+
+      expect(gateway.json<PiWebConfigResponse>().managedAllowedHosts)
+        .toEqual(managedAllowedHosts);
+      expect(selected.json<PiWebConfigResponse>()).not.toHaveProperty("managedAllowedHosts");
+      expect(updated.json<PiWebConfigResponse>().managedAllowedHosts)
+        .toEqual(managedAllowedHosts);
+      expect(savedConfig).toEqual({ allowedHosts: ["operator.example.test"] });
+    } finally {
+      await managedApp.close();
+    }
+  });
+
+  it("keeps config available and fails managed host metadata closed when its provider fails", async () => {
+    const managedApp = Fastify({ logger: false });
+    registerConfigRoutes(managedApp, service, {
+      managedAllowedHosts: () => Promise.reject(new Error("private state parser detail")),
+    });
+    await managedApp.ready();
+
+    try {
+      const response = await managedApp.inject({ method: "GET", url: "/api/config" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json<PiWebConfigResponse>().managedAllowedHosts).toEqual([]);
+    } finally {
+      await managedApp.close();
+    }
+  });
+
   it("updates config through the service", async () => {
     const requestedConfig: PiWebConfigValues = {
       host: "0.0.0.0",
@@ -192,6 +245,25 @@ describe("config routes", () => {
       subsessions: false,
       agent: { command: "alternate-agent", dir: "/srv/alternate-agent" },
     });
+  });
+
+  it("parses optional managed host metadata across federation boundaries", () => {
+    const response = {
+      ...responseFor({}, true),
+      managedAllowedHosts: [{
+        source: "safe-tunnel",
+        hostname: "machine.namespace.tunnels.example.test",
+      }],
+    };
+
+    expect(parsePiWebConfigResponseBody(response).managedAllowedHosts)
+      .toEqual(response.managedAllowedHosts);
+    expect(parsePiWebConfigResponseBody(responseFor({}, true)).managedAllowedHosts)
+      .toBeUndefined();
+    expect(() => parsePiWebConfigResponseBody({
+      ...response,
+      managedAllowedHosts: [{ source: "request", hostname: "attacker.test" }],
+    })).toThrow("managedAllowedHosts source is invalid");
   });
 
   it("keeps foreign-platform agent paths portable at federation transport boundaries", () => {

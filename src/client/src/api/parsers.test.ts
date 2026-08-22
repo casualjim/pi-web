@@ -55,13 +55,31 @@ describe("API parsers", () => {
       config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, maxUploadBytes: 1234, safeTunnel: true, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
       effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, safeTunnel: false, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
       envOverrides: { host: true, port: false, allowedHosts: false, safeTunnel: true, spawnSessions: false, subsessions: false, askUser: false },
+      managedAllowedHosts: [{ source: "safe-tunnel", hostname: "machine.namespace.tunnels.example.test" }],
     })).toEqual({
       path: "/tmp/config.json",
       exists: true,
       config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, maxUploadBytes: 1234, safeTunnel: true, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
       effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, safeTunnel: false, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
       envOverrides: { host: true, port: false, allowedHosts: false, safeTunnel: true, spawnSessions: false, subsessions: false, askUser: false },
+      managedAllowedHosts: [{ source: "safe-tunnel", hostname: "machine.namespace.tunnels.example.test" }],
     });
+  });
+
+  it("accepts missing managed host metadata and rejects malformed entries", () => {
+    const response = {
+      path: "/tmp/config.json",
+      exists: true,
+      config: {},
+      effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, safeTunnel: false, spawnSessions: false, subsessions: false, askUser: false },
+    };
+
+    expect(parsePiWebConfigResponse(response).managedAllowedHosts).toBeUndefined();
+    expect(() => parsePiWebConfigResponse({
+      ...response,
+      managedAllowedHosts: [{ source: "request", hostname: "attacker.test" }],
+    })).toThrow("Invalid PI WEB managedAllowedHosts source");
   });
 
   it("rejects malformed Safe Tunnel config response fields", () => {

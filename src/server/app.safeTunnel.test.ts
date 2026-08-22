@@ -208,6 +208,39 @@ describe("Safe Tunnel app composition", () => {
     }
   });
 
+  it("projects the exact persisted tunnel hostname as read-only gateway config metadata", async () => {
+    const fixture = fakeBridge();
+    fixture.registeredPublicOrigin.mockResolvedValue(
+      "https://machine.namespace.tunnels.example.test",
+    );
+    const app = await buildApp({
+      clientServing: false,
+      logger: false,
+      safeTunnel: fixture.bridge,
+      sessionDaemon: fakeSessionDaemon(),
+    });
+
+    try {
+      const gateway = await app.inject({ method: "GET", url: "/api/config" });
+      const selected = await app.inject({
+        method: "GET",
+        url: "/api/machines/local/config",
+      });
+
+      expect(gateway.statusCode).toBe(200);
+      expect(gateway.json()).toMatchObject({
+        managedAllowedHosts: [{
+          source: "safe-tunnel",
+          hostname: "machine.namespace.tunnels.example.test",
+        }],
+      });
+      expect(selected.statusCode).toBe(200);
+      expect(selected.json()).not.toHaveProperty("managedAllowedHosts");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("starts, routes, advertises, and closes one injected enabled bridge", async () => {
     const fixture = fakeBridge();
     const app = await buildApp({

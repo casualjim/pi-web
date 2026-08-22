@@ -379,12 +379,12 @@ worktree_path="$1"
                       <td>Restart web/API</td>
                     </tr>
                     <tr>
-                      <td>Dev-server and Safe Tunnel API hosts</td>
+                      <td>Additional dev-server and Safe Tunnel API hosts</td>
                       <td><code>allowedHosts</code></td>
                       <td><code>PI_WEB_ALLOWED_HOSTS</code></td>
                       <td>Global</td>
                       <td>Not supported locally</td>
-                      <td>Restart dev web/UI; exact Safe Tunnel read/mutation hosts also require a gateway web/API restart</td>
+                      <td>Restart dev web/UI and gateway web/API after configured entries change; the saved Safe Tunnel hostname is managed automatically in dev</td>
                     </tr>
                     <tr>
                       <td>Experimental Safe Tunnel availability</td>
@@ -656,6 +656,12 @@ worktree_path="$1"
                 Any non-empty <code>PI_WEB_OFFLINE</code> or <code>PI_OFFLINE</code> setting dominates both opt-in
                 mechanisms, including values such as <code>0</code>. In that process Safe Tunnel has no routes, UI, state
                 reads or writes, timers, artifact work, child process, or background network activity.
+              </p>
+              <p>
+                A saved Safe Tunnel registration automatically contributes its exact public hostname to the development
+                server's HTTP and WebSocket host checks. Vite applies registration changes with an automatic restart, and
+                Settings lists that hostname under <strong>Managed hosts — read-only</strong> instead of copying it into
+                the editable <code>allowedHosts</code> config.
               </p>
               <p>
                 When Safe Tunnel is available and used, private state lives at

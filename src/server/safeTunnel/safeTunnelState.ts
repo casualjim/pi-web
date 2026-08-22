@@ -123,6 +123,19 @@ export function defaultSafeTunnelStatePath(
   return join(piWebDataDir(env, cwd), "safe-tunnel", "config.json");
 }
 
+/**
+ * Reads only the persisted public ingress needed by the development browser
+ * host boundary. Unlike FileSafeTunnelStateStorage.load(), this projection is
+ * read-only: Vite must never rewrite or change permissions on private state.
+ */
+export async function readSafeTunnelRegisteredPublicOrigin(
+  filePath = defaultSafeTunnelStatePath(),
+): Promise<string | undefined> {
+  const persisted = await readJsonFile(filePath);
+  if (persisted === undefined) return undefined;
+  return parseSafeTunnelState(persisted).machine?.publicUrl;
+}
+
 export function parseSafeTunnelState(value: unknown): SafeTunnelPersistedState {
   const record = requireRecord(value, "Safe Tunnel state must be a JSON object.");
   if (record["stateVersion"] !== safeTunnelStateVersion) {

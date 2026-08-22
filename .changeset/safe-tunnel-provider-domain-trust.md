@@ -2,4 +2,4 @@
 "@jmfederico/pi-web": patch
 ---
 
-Trust the Safe Tunnel provider domain for browser API reads and mutations: a saved registration now trusts its generated tunnel hostname and sibling hostnames beneath its provider base domain, so Enable/Disable work through the tunnel — including the plaintext local development edge — without adding tunnel hostnames to `allowedHosts`. Mutation Origins on provider hostnames must use HTTPS, with plaintext accepted only on loopback development names; arbitrary non-provider hostnames and `allowedHosts: true` remain non-authoritative.
+Trust saved Safe Tunnel ingress without manual host configuration. Browser API reads and mutations accept the registered provider scope, while the split Vite development server automatically applies the exact saved public hostname to HTTP, HMR, and proxied application-WebSocket host checks. Settings shows that hostname as managed read-only state instead of writing it to `allowedHosts`; arbitrary non-provider hosts remain denied.

@@ -5,9 +5,26 @@ import { extname, join, resolve, sep } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 import { effectivePiWebConfig } from "./src/config";
+import {
+  loadSafeTunnelManagedAllowedHosts,
+  mergeViteAllowedHosts,
+} from "./src/server/safeTunnel/safeTunnelManagedHosts";
+import { defaultSafeTunnelStatePath } from "./src/server/safeTunnel/safeTunnelState";
+import {
+  createSafeTunnelViteHostPlugin,
+  createViteProxyHostBypass,
+} from "./src/server/safeTunnel/safeTunnelVitePlugin";
 
 const { config } = effectivePiWebConfig();
 const apiPort = config.port ?? 8504;
+const safeTunnelStatePath = defaultSafeTunnelStatePath();
+const managedAllowedHosts = config.safeTunnel
+  ? await loadSafeTunnelManagedAllowedHosts(safeTunnelStatePath)
+  : [];
+const viteAllowedHosts = mergeViteAllowedHosts(
+  config.allowedHosts,
+  managedAllowedHosts,
+);
 const docsRoot = resolve("docs");
 const docsPrefix = "/site";
 
@@ -91,7 +108,15 @@ function devDocsPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [devDocsPlugin()],
+  plugins: [
+    devDocsPlugin(),
+    ...(config.safeTunnel && config.allowedHosts !== true
+      ? [createSafeTunnelViteHostPlugin({
+          statePath: safeTunnelStatePath,
+          appliedHosts: managedAllowedHosts,
+        })]
+      : []),
+  ],
   root: "src/client",
   base: "./",
   build: {
@@ -117,9 +142,13 @@ export default defineConfig({
     // pointer and Safe Tunnel's default local target both rely on that wiring.
     port: 8505,
     strictPort: true,
-    ...(config.allowedHosts === undefined ? {} : { allowedHosts: config.allowedHosts }),
+    allowedHosts: viteAllowedHosts,
     proxy: {
-      "/api": { target: `http://localhost:${String(apiPort)}`, ws: true },
+      "/api": {
+        target: `http://localhost:${String(apiPort)}`,
+        ws: true,
+        bypass: createViteProxyHostBypass(viteAllowedHosts),
+      },
       "/pi-web-plugins": { target: `http://localhost:${String(apiPort)}` },
     },
   },

@@ -429,12 +429,19 @@ export interface PiWebConfigEnvOverrides {
   askUser: boolean;
 }
 
+export interface PiWebManagedAllowedHost {
+  readonly source: "safe-tunnel";
+  readonly hostname: string;
+}
+
 export interface PiWebConfigResponse {
   path: string;
   exists: boolean;
   config: PiWebConfigValues;
   effectiveConfig: PiWebConfigValues;
   envOverrides: PiWebConfigEnvOverrides;
+  /** Runtime-derived gateway hosts. They are display-only and never persisted as config. */
+  managedAllowedHosts?: readonly PiWebManagedAllowedHost[];
 }
 
 export interface Project {

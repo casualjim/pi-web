@@ -10,6 +10,7 @@ import {
   normalizeSafeTunnelLocalPiWebUrl,
   normalizeSafeTunnelPublicUrl,
   parseSafeTunnelState,
+  readSafeTunnelRegisteredPublicOrigin,
   safeTunnelStateDirectoryMode,
   safeTunnelStateFileMode,
 } from "./safeTunnelState.js";
@@ -32,6 +33,36 @@ describe("Safe Tunnel state paths", () => {
       .toBe(join(resolve("/workspace", "data"), "safe-tunnel", "config.json"));
   });
 
+});
+
+describe("Safe Tunnel registered public-origin projection", () => {
+  it("reads only the normalized public origin and tolerates missing state", async () => {
+    const filePath = join(tempDirectory, "data", "safe-tunnel", "config.json");
+    await expect(readSafeTunnelRegisteredPublicOrigin(filePath)).resolves.toBeUndefined();
+    await mkdir(join(tempDirectory, "data", "safe-tunnel"), { recursive: true });
+    await writeFile(filePath, JSON.stringify({
+      ...createDefaultSafeTunnelState(),
+      machine: {
+        controlApiBaseUrl: "https://control.example.test",
+        machineId: "machine_123",
+        machineToken: "machine-token",
+        publicUrl: "https://Ingress.Example.Test/",
+      },
+    }));
+
+    await expect(readSafeTunnelRegisteredPublicOrigin(filePath))
+      .resolves.toBe("https://ingress.example.test");
+  });
+
+  it("fails closed through the state parser without rewriting invalid state", async () => {
+    const filePath = join(tempDirectory, "data", "safe-tunnel", "config.json");
+    await mkdir(join(tempDirectory, "data", "safe-tunnel"), { recursive: true });
+    await writeFile(filePath, "not json");
+
+    await expect(readSafeTunnelRegisteredPublicOrigin(filePath))
+      .rejects.toThrow("contains invalid JSON");
+    expect(await readFile(filePath, "utf8")).toBe("not json");
+  });
 });
 
 describe("Safe Tunnel URL policy", () => {

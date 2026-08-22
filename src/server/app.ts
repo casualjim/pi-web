@@ -261,7 +261,14 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   registerPiPackageRoutes(app, piPackages);
   registerPiPackageRoutes(app, piPackages, "/api/machines/local");
   const invalidatingConfigService = invalidatePiWebStatusOnWrite(configService, piWebStatusCache);
-  registerConfigRoutes(app, invalidatingConfigService);
+  registerConfigRoutes(app, invalidatingConfigService, safeTunnel === undefined
+    ? {}
+    : {
+        managedAllowedHosts: async () => {
+          const { safeTunnelManagedAllowedHosts } = await import("./safeTunnel/safeTunnelManagedHosts.js");
+          return safeTunnelManagedAllowedHosts(await safeTunnel.registeredPublicOrigin());
+        },
+      });
   registerLocalMachineConfigRoutes(app, invalidatingConfigService);
 
   registerMachineRoutes(app, machines);

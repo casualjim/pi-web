@@ -281,6 +281,45 @@ describe("HttpSafeTunnelControlPlane", () => {
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
+  it.each([
+    ["payment-required", 402, "account_access_payment_required"],
+    ["suspended", 403, "account_access_suspended"],
+    ["deactivated", 403, "account_access_deactivated"],
+  ] as const)(
+    "requires the nested error wrapper for %s config and heartbeat denials",
+    async (_description, responseStatus, code) => {
+      const terminalBody = {
+        code,
+        message: "Hosted account access blocks this Safe Tunnel.",
+        dashboardUrl: "/dashboard",
+      };
+      const malformedBodies = [
+        terminalBody,
+        { ...terminalBody, error: null },
+      ];
+      const credentials = {
+        controlApiBaseUrl,
+        machineId: "machine_123",
+        machineToken,
+      };
+
+      for (const body of malformedBodies) {
+        const transport = sequencedFetch([
+          jsonResponse(responseStatus, body),
+          jsonResponse(responseStatus, body),
+        ]);
+        const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+
+        await expect(controlPlane.getMachineTunnelConfig(credentials))
+          .rejects.toMatchObject({ code: "invalid_response" });
+        await expect(controlPlane.recordMachineHeartbeat(credentials, {
+          clientVersion: safeTunnelClientVersion,
+          tunnelStatus: "running",
+        })).rejects.toMatchObject({ code: "invalid_response" });
+      }
+    },
+  );
+
   it("rejects account-access guidance that exceeds the URL bound after canonicalization", async () => {
     const expandingRelativeUrl = `/${"é".repeat(400)}`;
     const expandingAbsoluteUrl = `https://accounts.example.test/${"é".repeat(400)}`;

@@ -275,6 +275,31 @@ describe("DefaultSafeTunnelBridgeService", () => {
     expect(fixture.safeTunnel.stateValue.machine?.credentialStatus).toBe("active");
   });
 
+  it("publishes account denial while the owned runtime is still stopping", async () => {
+    const fixture = createFixture({
+      ...registeredState,
+      desiredState: "enabled",
+    });
+    const notice = {
+      status: "account_access_payment_required" as const,
+      message: "Account access is not active. Open the hosted dashboard.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    };
+    fixture.runtime.currentStatus = {
+      state: "running",
+      accountAccess: notice,
+    };
+
+    const status = await fixture.bridge.status();
+
+    expect(status.runtime).toEqual({
+      state: "running",
+      accountAccess: notice,
+    });
+    expect(status.desiredState).toBe("enabled");
+    expect(status.config.state).toBe("registered");
+  });
+
   it("keeps account denial visible when Disable cannot stop the running runtime", async () => {
     const fixture = createFixture({
       ...registeredState,

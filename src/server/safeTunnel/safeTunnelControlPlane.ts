@@ -441,7 +441,7 @@ async function requireExpectedResponse(
   }
 
   if (response.status === 402 || response.status === 403) {
-    const errorRecord = await readApplicationErrorRecord(response);
+    const errorRecord = await readAccountAccessErrorRecord(response, operation);
     const accountAccessError = errorRecord === undefined
       ? undefined
       : parseAccountAccessError(
@@ -541,7 +541,43 @@ async function readApplicationErrorCode(response: Response): Promise<string | un
   return errorRecord === undefined ? undefined : applicationErrorCode(errorRecord);
 }
 
+async function readAccountAccessErrorRecord(
+  response: Response,
+  operation: SafeTunnelControlPlaneOperation,
+): Promise<Readonly<Record<string, unknown>> | undefined> {
+  const body = await readApplicationErrorBody(response);
+
+  if (body === undefined) {
+    return undefined;
+  }
+
+  const envelope = body["error"];
+
+  if (isRecord(envelope)) {
+    return envelope;
+  }
+
+  if (isTerminalAccountAccessCode(applicationErrorCode(body))) {
+    throw new SafeTunnelControlPlaneError("invalid_response", operation);
+  }
+
+  return undefined;
+}
+
 async function readApplicationErrorRecord(
+  response: Response,
+): Promise<Readonly<Record<string, unknown>> | undefined> {
+  const body = await readApplicationErrorBody(response);
+
+  if (body === undefined) {
+    return undefined;
+  }
+
+  const envelope = body["error"];
+  return isRecord(envelope) ? envelope : body;
+}
+
+async function readApplicationErrorBody(
   response: Response,
 ): Promise<Readonly<Record<string, unknown>> | undefined> {
   let body: unknown;
@@ -550,9 +586,13 @@ async function readApplicationErrorRecord(
   } catch {
     return undefined;
   }
-  if (!isRecord(body)) return undefined;
-  const envelope = body["error"];
-  return isRecord(envelope) ? envelope : body;
+  return isRecord(body) ? body : undefined;
+}
+
+function isTerminalAccountAccessCode(code: string | undefined): boolean {
+  return code === accountAccessPaymentRequiredCode
+    || code === accountAccessSuspendedCode
+    || code === accountAccessDeactivatedCode;
 }
 
 function applicationErrorCode(

@@ -328,6 +328,30 @@ describe("settings-safe-tunnel-panel", () => {
     expect(buttonByText(root, "Enable Safe Tunnel")).toBeDefined();
   });
 
+  it("shows account denial and Disable while owned runtime cleanup is pending", async () => {
+    const accountAccess = {
+      status: "account_access_payment_required" as const,
+      message: "Account access is not active. Open the hosted dashboard.",
+      dashboardUrl: "https://api.tunnels.pi-web.dev/dashboard",
+    };
+    vi.spyOn(safeTunnelApi, "status").mockResolvedValue(safeTunnelStatus({
+      accountAccess,
+      desiredState: "enabled",
+      runtimeState: "running",
+    }));
+
+    const panel = await renderPanel();
+    const root = requiredShadowRoot(panel);
+
+    expect(root.querySelector(".hero-card .status-pill")?.textContent.trim())
+      .toBe("Payment required");
+    expect(root.textContent).toContain(accountAccess.message);
+    expect(root.textContent).toContain("runtime is still running");
+    expect(root.textContent).not.toContain("enabled and supervised");
+    expect(root.textContent).not.toContain("runtime is unavailable");
+    expect(buttonByText(root, "Disable Safe Tunnel")).toBeDefined();
+  });
+
   it.each(terminalAccountAccessCases)(
     "keeps %s primary and offers Disable when the denied runtime is still running",
     async (_description, accountAccessStatus, expectedLabel) => {

@@ -275,7 +275,31 @@ describe("SafeTunnelRuntimeReconciler", () => {
     },
   );
 
-  it("keeps account denial and runtime failure authoritative when automatic and manual stops reject", async () => {
+  it("publishes account denial while runtime cleanup is pending and retains it after success", async () => {
+    const fixture = createFixture();
+    const accessError = accountAccessCases[0][1];
+    const pendingStop = createDeferred<undefined>();
+    fixture.runtime.stopResult = pendingStop.promise;
+    fixture.safeTunnel.heartbeatResults = [() => Promise.reject(accessError)];
+
+    await fixture.reconciler.start({});
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.runtime.stopCalls === 1);
+
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "running",
+      accountAccess: accessError.notice,
+    });
+
+    pendingStop.resolve(undefined);
+    await waitForCondition(() => fixture.runtime.statusValue.state === "stopped");
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "stopped",
+      accountAccess: accessError.notice,
+    });
+  });
+
+  it("keeps account denial and runtime failure authoritative across manual stop retries", async () => {
     const fixture = createFixture();
     const accessError = accountAccessCases[0][1];
     const stopError = new Error("private child stop failure");
@@ -297,6 +321,14 @@ describe("SafeTunnelRuntimeReconciler", () => {
     await expect(fixture.reconciler.stop()).rejects.toBe(stopError);
     expect(fixture.runtime.stopCalls).toBe(2);
     await expect(fixture.reconciler.status()).resolves.toEqual(failedStopStatus);
+
+    fixture.runtime.stopError = undefined;
+    await fixture.reconciler.stop();
+    expect(fixture.runtime.stopCalls).toBe(3);
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "stopped",
+      accountAccess: accessError.notice,
+    });
   });
 
   it.each([
@@ -466,6 +498,7 @@ class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
   startResult: Promise<SafeTunnelFrpcStartResult> | undefined;
   shutdownCalls = 0;
   stopError: Error | undefined;
+  stopResult: Promise<void> | undefined;
   statusValue: SafeTunnelRuntimeStatus = runtimeStatus();
   stopCalls = 0;
 
@@ -499,8 +532,9 @@ class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
     this.order.push("runtime:stop");
     this.stopCalls += 1;
     if (this.stopError !== undefined) return Promise.reject(this.stopError);
-    this.statusValue = runtimeStatus();
-    return Promise.resolve();
+    return (this.stopResult ?? Promise.resolve()).then(() => {
+      this.statusValue = runtimeStatus();
+    });
   }
 }
 

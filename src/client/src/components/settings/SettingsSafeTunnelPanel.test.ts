@@ -15,6 +15,12 @@ import {
   SettingsSafeTunnelPanel,
 } from "./SettingsSafeTunnelPanel";
 
+const terminalAccountAccessCases = [
+  ["payment-required access", "account_access_payment_required", "Payment required"],
+  ["suspended access", "account_access_suspended", "Suspended"],
+  ["permanently deactivated access", "account_access_deactivated", "Account deactivated"],
+] as const;
+
 afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
@@ -322,6 +328,38 @@ describe("settings-safe-tunnel-panel", () => {
     expect(buttonByText(root, "Enable Safe Tunnel")).toBeDefined();
   });
 
+  it.each(terminalAccountAccessCases)(
+    "keeps %s primary and offers Disable when the denied runtime is still running",
+    async (_description, accountAccessStatus, expectedLabel) => {
+      const accountAccess = {
+        status: accountAccessStatus,
+        message: "Hosted account access currently blocks this Safe Tunnel.",
+        dashboardUrl: "https://api.tunnels.pi-web.dev/dashboard",
+      };
+      vi.spyOn(safeTunnelApi, "status").mockResolvedValue(safeTunnelStatus({
+        accountAccess,
+        desiredState: "enabled",
+        runtimeDiagnosticCode: "runtime_failed",
+        runtimeError: "Safe Tunnel runtime is unavailable.",
+        runtimeState: "running",
+      }));
+
+      const panel = await renderPanel();
+      const root = requiredShadowRoot(panel);
+
+      expect(root.querySelector(".hero-card .status-pill")?.textContent.trim()).toBe(
+        expectedLabel,
+      );
+      expect(root.querySelector("#safe-tunnel-state-heading")?.textContent).not.toContain(
+        "enabled and supervised",
+      );
+      expect(root.textContent).toContain(accountAccess.message);
+      expect(root.textContent).toContain("Safe Tunnel runtime is unavailable");
+      expect(buttonByText(root, "Disable Safe Tunnel")).toBeDefined();
+      expect(root.textContent).not.toContain("approval is no longer valid");
+    },
+  );
+
   it("renders suspended access guidance and an actionable hosted-dashboard link", async () => {
     const accountAccess = {
       status: "account_access_suspended" as const,
@@ -549,6 +587,8 @@ interface SafeTunnelStatusOptions {
   desiredState?: SafeTunnelStatusResponse["desiredState"];
   registered?: boolean;
   rejected?: boolean;
+  runtimeDiagnosticCode?: SafeTunnelStatusResponse["runtime"]["diagnosticCode"];
+  runtimeError?: string;
   runtimeState?: SafeTunnelStatusResponse["runtime"]["state"];
 }
 
@@ -577,6 +617,10 @@ function safeTunnelStatus(options: SafeTunnelStatusOptions = {}): SafeTunnelStat
         diagnosticCode: "credentials_rejected",
         error: "Safe Tunnel access for this PI WEB was rejected or revoked.",
       } : {}),
+      ...(options.runtimeDiagnosticCode === undefined
+        ? {}
+        : { diagnosticCode: options.runtimeDiagnosticCode }),
+      ...(options.runtimeError === undefined ? {} : { error: options.runtimeError }),
       ...(options.accountAccess === undefined
         ? {}
         : { accountAccess: options.accountAccess }),

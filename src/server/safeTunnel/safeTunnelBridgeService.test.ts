@@ -275,6 +275,40 @@ describe("DefaultSafeTunnelBridgeService", () => {
     expect(fixture.safeTunnel.stateValue.machine?.credentialStatus).toBe("active");
   });
 
+  it("keeps account denial visible when Disable cannot stop the running runtime", async () => {
+    const fixture = createFixture({
+      ...registeredState,
+      desiredState: "enabled",
+    });
+    const notice = {
+      status: "account_access_suspended" as const,
+      message: "Account access is suspended pending administrator review.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    };
+    const stopError = new Error("private child stop failure");
+    fixture.runtime.currentStatus = {
+      state: "running",
+      accountAccess: notice,
+      diagnosticCode: "runtime_failed",
+      error: "private child stop failure",
+    };
+    fixture.runtime.stopError = stopError;
+
+    await expect(fixture.bridge.disable()).rejects.toBe(stopError);
+
+    expect(fixture.safeTunnel.stateValue.desiredState).toBe("disabled");
+    expect(fixture.safeTunnel.stateValue.machine?.credentialStatus).toBe("active");
+    await expect(fixture.bridge.status()).resolves.toMatchObject({
+      desiredState: "disabled",
+      runtime: {
+        state: "running",
+        accountAccess: notice,
+        diagnosticCode: "runtime_failed",
+        error: "Safe Tunnel runtime is unavailable.",
+      },
+    });
+  });
+
   it("exposes a fixed failure instead of an internal provider or child error", async () => {
     const fixture = createFixture(registeredState);
     fixture.runtime.startError = new Error(`provider body and ${machineToken}`);
@@ -483,6 +517,7 @@ class FakeRuntime implements SafeTunnelReconciledFrpcRuntime {
   readonly startInputs: SafeTunnelFrpcStartInput[] = [];
   startupCalls = 0;
   stopCalls = 0;
+  stopError: Error | undefined;
 
   constructor(
     private readonly currentMachine: () => SafeTunnelPersistedState["machine"],
@@ -514,6 +549,7 @@ class FakeRuntime implements SafeTunnelReconciledFrpcRuntime {
 
   stop(): Promise<void> {
     this.stopCalls += 1;
+    if (this.stopError !== undefined) return Promise.reject(this.stopError);
     this.currentStatus = { state: "stopped" };
     this.runningMachineId = undefined;
     return Promise.resolve();

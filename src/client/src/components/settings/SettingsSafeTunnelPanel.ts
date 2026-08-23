@@ -596,6 +596,20 @@ export function safeTunnelPresentation(
   status: SafeTunnelStatusResponse,
   operation?: SafeTunnelOperationResponse,
 ): SafeTunnelPresentation {
+  if (status.runtime.accountAccess !== undefined) {
+    const accountAccess = status.runtime.accountAccess;
+    const deactivated = accountAccess.status === "account_access_deactivated";
+    const runtimeStillRunning = status.runtime.state === "running";
+    const enablementStillRunning = operation?.status === "running";
+    return {
+      action: runtimeStillRunning || enablementStillRunning || deactivated
+        ? "disable"
+        : "enable",
+      description: accountAccessDescription(deactivated, runtimeStillRunning),
+      label: accountAccessLabel(accountAccess),
+      tone: "bad",
+    };
+  }
   if (operation?.status === "running") {
     return {
       action: "disable",
@@ -610,18 +624,6 @@ export function safeTunnelPresentation(
       description: "Safe Tunnel is enabled and supervised by PI WEB.",
       label: "Enabled",
       tone: "good",
-    };
-  }
-  if (status.runtime.accountAccess !== undefined) {
-    const accountAccess = status.runtime.accountAccess;
-    const deactivated = accountAccess.status === "account_access_deactivated";
-    return {
-      action: deactivated ? "disable" : "enable",
-      description: deactivated
-        ? "This hosted account is permanently deactivated. Open the hosted dashboard for details."
-        : "Restore account access in the hosted dashboard, then retry Safe Tunnel.",
-      label: accountAccessLabel(accountAccess),
-      tone: "bad",
     };
   }
   if (safeTunnelRegistrationRejected(status)) {
@@ -685,6 +687,20 @@ function renderAccountAccessNotice(
       >Open hosted dashboard</a>
     </div>
   `;
+}
+
+function accountAccessDescription(
+  deactivated: boolean,
+  runtimeStillRunning: boolean,
+): string {
+  if (runtimeStillRunning) {
+    return deactivated
+      ? "This hosted account is permanently deactivated, but the Safe Tunnel runtime is still running. Retry Disable and open the hosted dashboard for details."
+      : "Hosted account access is blocked, but the Safe Tunnel runtime is still running. Retry Disable and use the hosted dashboard to restore access.";
+  }
+  return deactivated
+    ? "This hosted account is permanently deactivated. Open the hosted dashboard for details."
+    : "Restore account access in the hosted dashboard, then retry Safe Tunnel.";
 }
 
 function accountAccessHeading(notice: SafeTunnelAccountAccessNotice): string {

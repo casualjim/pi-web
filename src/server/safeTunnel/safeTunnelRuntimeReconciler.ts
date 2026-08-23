@@ -144,8 +144,18 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
   async stop(): Promise<void> {
     this.beginHeartbeatSession(false);
     await this.waitForHeartbeat();
-    this.lifecycleDiagnostic = undefined;
-    await this.dependencies.runtime.stop();
+    try {
+      await this.dependencies.runtime.stop();
+      this.lifecycleDiagnostic = undefined;
+    } catch (error: unknown) {
+      const diagnostic = this.lifecycleDiagnostic;
+      if (diagnostic?.kind === "account_access") {
+        this.setAccountAccessNotice(diagnostic.notice, true);
+      } else {
+        this.setLifecycleDiagnostic("runtime_failed", runtimeFailedMessage);
+      }
+      throw error;
+    }
   }
 
   shutdown(): Promise<void> {

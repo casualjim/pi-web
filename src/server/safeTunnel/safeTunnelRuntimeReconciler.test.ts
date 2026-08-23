@@ -275,6 +275,30 @@ describe("SafeTunnelRuntimeReconciler", () => {
     },
   );
 
+  it("keeps account denial and runtime failure authoritative when automatic and manual stops reject", async () => {
+    const fixture = createFixture();
+    const accessError = accountAccessCases[0][1];
+    const stopError = new Error("private child stop failure");
+    fixture.runtime.stopError = stopError;
+    fixture.safeTunnel.heartbeatResults = [() => Promise.reject(accessError)];
+
+    await fixture.reconciler.start({});
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.runtime.stopCalls === 1);
+
+    const failedStopStatus = {
+      state: "running" as const,
+      accountAccess: accessError.notice,
+      diagnosticCode: "runtime_failed" as const,
+      error: "PI WEB could not start or stop the Safe Tunnel runtime.",
+    };
+    await expect(fixture.reconciler.status()).resolves.toEqual(failedStopStatus);
+
+    await expect(fixture.reconciler.stop()).rejects.toBe(stopError);
+    expect(fixture.runtime.stopCalls).toBe(2);
+    await expect(fixture.reconciler.status()).resolves.toEqual(failedStopStatus);
+  });
+
   it.each([
     new SafeTunnelControlPlaneError("authentication_failed", "record_heartbeat"),
     new SafeTunnelServiceError("credentials_rejected"),
@@ -441,6 +465,7 @@ class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
   startError: Error | undefined;
   startResult: Promise<SafeTunnelFrpcStartResult> | undefined;
   shutdownCalls = 0;
+  stopError: Error | undefined;
   statusValue: SafeTunnelRuntimeStatus = runtimeStatus();
   stopCalls = 0;
 
@@ -473,6 +498,7 @@ class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
   stop(): Promise<void> {
     this.order.push("runtime:stop");
     this.stopCalls += 1;
+    if (this.stopError !== undefined) return Promise.reject(this.stopError);
     this.statusValue = runtimeStatus();
     return Promise.resolve();
   }

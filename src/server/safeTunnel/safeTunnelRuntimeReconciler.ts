@@ -1,4 +1,6 @@
 import type { SafeTunnelRuntimeStatus } from "../../shared/apiTypes.js";
+import type { SafeTunnelAccountAccessNotice } from "../../shared/safeTunnelTypes.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   SafeTunnelControlPlaneError,
   type SafeTunnelHeartbeatTunnelStatus,
@@ -56,10 +58,17 @@ interface NormalizedSafeTunnelRuntimeReconcilerPolicy {
   readonly minimumHeartbeatIntervalMs: number;
 }
 
-interface SafeTunnelLifecycleDiagnostic {
-  readonly code: NonNullable<SafeTunnelRuntimeStatus["diagnosticCode"]>;
-  readonly message: string;
-}
+type SafeTunnelLifecycleDiagnostic =
+  | {
+    readonly kind: "diagnostic";
+    readonly code: NonNullable<SafeTunnelRuntimeStatus["diagnosticCode"]>;
+    readonly message: string;
+  }
+  | {
+    readonly kind: "account_access";
+    readonly notice: SafeTunnelAccountAccessNotice;
+    readonly runtimeStopFailed: boolean;
+  };
 
 /** Restores durable intent and owns the single periodic heartbeat schedule. */
 export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRuntime {
@@ -99,7 +108,13 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
       return await starting;
     } catch (error: unknown) {
       if (this.isHeartbeatCurrent(generation)) {
-        this.setLifecycleDiagnostic("runtime_failed", runtimeFailedMessage);
+        if (error instanceof SafeTunnelAccountAccessError) {
+          this.beginHeartbeatSession(false);
+          await this.waitForHeartbeat();
+          this.setAccountAccessNotice(error.notice);
+        } else {
+          this.setLifecycleDiagnostic("runtime_failed", runtimeFailedMessage);
+        }
       }
       throw error;
     }
@@ -125,6 +140,18 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
     const status = await this.dependencies.runtime.status();
     const diagnostic = this.lifecycleDiagnostic;
     if (diagnostic === undefined) return status;
+    if (diagnostic.kind === "account_access") {
+      return {
+        state: status.state,
+        accountAccess: diagnostic.notice,
+        ...(diagnostic.runtimeStopFailed
+          ? {
+              diagnosticCode: "runtime_failed" as const,
+              error: runtimeFailedMessage,
+            }
+          : {}),
+      };
+    }
     return {
       state: status.state,
       diagnosticCode: diagnostic.code,
@@ -190,7 +217,8 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
     try {
       const heartbeat = await this.sendHeartbeat(controller.signal);
       if (!this.isHeartbeatCurrent(generation)) return;
-      if (this.lifecycleDiagnostic?.code === "heartbeat_failed") {
+      if (this.lifecycleDiagnostic?.kind === "diagnostic"
+        && this.lifecycleDiagnostic.code === "heartbeat_failed") {
         this.lifecycleDiagnostic = undefined;
       }
       this.scheduleHeartbeat(
@@ -199,6 +227,17 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
       );
     } catch (error: unknown) {
       if (!this.isHeartbeatCurrent(generation)) return;
+      if (error instanceof SafeTunnelAccountAccessError) {
+        this.active = false;
+        this.cancelHeartbeatTask();
+        try {
+          await this.dependencies.runtime.stop();
+          this.setAccountAccessNotice(error.notice);
+        } catch {
+          this.setAccountAccessNotice(error.notice, true);
+        }
+        return;
+      }
       if (isAuthenticationFailure(error)) {
         this.active = false;
         this.cancelHeartbeatTask();
@@ -249,7 +288,18 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
     code: NonNullable<SafeTunnelRuntimeStatus["diagnosticCode"]>,
     message: string,
   ): void {
-    this.lifecycleDiagnostic = { code, message };
+    this.lifecycleDiagnostic = { kind: "diagnostic", code, message };
+  }
+
+  private setAccountAccessNotice(
+    notice: SafeTunnelAccountAccessNotice,
+    runtimeStopFailed = false,
+  ): void {
+    this.lifecycleDiagnostic = {
+      kind: "account_access",
+      notice,
+      runtimeStopFailed,
+    };
   }
 }
 

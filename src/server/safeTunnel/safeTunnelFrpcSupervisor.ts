@@ -1,4 +1,5 @@
 import type { SafeTunnelRuntimeStatus } from "../../shared/apiTypes.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import { validateSafeTunnelFrpcConfig } from "./safeTunnelFrpcConfig.js";
 import {
   SafeTunnelFrpcAcquisitionError,
@@ -192,8 +193,13 @@ export class SafeTunnelFrpcSupervisor implements SafeTunnelFrpcRuntime {
         this.dependencies.configProvider.getTunnelConfig({ signal: controller.signal }),
         controller.signal,
       );
-    } catch {
+    } catch (error: unknown) {
       if (controller.signal.aborted) throw new SafeTunnelFrpcSupervisorError("start_cancelled");
+      if (error instanceof SafeTunnelAccountAccessError) {
+        if (!this.disposed) this.phase = "stopped";
+        this.lastError = undefined;
+        throw error;
+      }
       throw this.failStart(new SafeTunnelFrpcSupervisorError("tunnel_config_failed"));
     }
     this.assertStartActive(controller);

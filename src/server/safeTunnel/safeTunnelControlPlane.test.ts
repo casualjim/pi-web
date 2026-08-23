@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   HttpSafeTunnelControlPlane,
   SafeTunnelControlPlaneError,
@@ -193,6 +194,92 @@ describe("HttpSafeTunnelControlPlane", () => {
     }));
   });
 
+  it("normalizes provider-neutral payment-required and suspended responses", async () => {
+    const transport = sequencedFetch([
+      jsonResponse(402, {
+        error: {
+          code: "account_access_payment_required",
+          message: "Account access is not active. Open the hosted dashboard.",
+          dashboardUrl: "/dashboard",
+        },
+      }),
+      jsonResponse(403, {
+        error: {
+          code: "account_access_suspended",
+          message: "Account access is suspended pending administrator review.",
+          dashboardUrl: "https://accounts.example.test/dashboard",
+        },
+      }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const credentials = {
+      controlApiBaseUrl,
+      machineId: "machine_123",
+      machineToken,
+    };
+
+    const paymentRequired = await rejectedValue(
+      controlPlane.getMachineTunnelConfig(credentials),
+    );
+    expect(paymentRequired).toBeInstanceOf(SafeTunnelAccountAccessError);
+    expect(paymentRequired).toMatchObject({
+      notice: {
+        status: "account_access_payment_required",
+        message: "Account access is not active. Open the hosted dashboard.",
+        dashboardUrl: `${controlApiBaseUrl}/dashboard`,
+      },
+    });
+
+    const suspended = await rejectedValue(controlPlane.recordMachineHeartbeat(
+      credentials,
+      {
+        clientVersion: safeTunnelClientVersion,
+        tunnelStatus: "running",
+      },
+    ));
+    expect(suspended).toBeInstanceOf(SafeTunnelAccountAccessError);
+    expect(suspended).toMatchObject({
+      notice: {
+        status: "account_access_suspended",
+        message: "Account access is suspended pending administrator review.",
+        dashboardUrl: "https://accounts.example.test/dashboard",
+      },
+    });
+  });
+
+  it("rejects malformed account-access guidance as an invalid response", async () => {
+    const transport = sequencedFetch([
+      jsonResponse(402, {
+        error: {
+          code: "account_access_payment_required",
+          message: "x".repeat(2_001),
+          dashboardUrl: "/dashboard",
+        },
+      }),
+      jsonResponse(403, {
+        error: {
+          code: "account_access_suspended",
+          message: "Account access is suspended.",
+          dashboardUrl: "javascript:alert(1)",
+        },
+      }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const credentials = {
+      controlApiBaseUrl,
+      machineId: "machine_123",
+      machineToken,
+    };
+
+    await expect(controlPlane.getMachineTunnelConfig(credentials)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    await expect(controlPlane.recordMachineHeartbeat(credentials, {
+      clientVersion: safeTunnelClientVersion,
+      tunnelStatus: "running",
+    })).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("rejects malformed response shape, insecure public URLs, and oversized bodies", async () => {
     const malformed = new HttpSafeTunnelControlPlane({
       fetch: () => Promise.resolve(jsonResponse(202, {
@@ -259,6 +346,7 @@ describe("HttpSafeTunnelControlPlane", () => {
 
   it.each([
     [401, "authentication_failed"],
+    [403, "authentication_failed"],
     [409, "conflict"],
     [429, "rate_limited"],
     [503, "service_unavailable"],
@@ -382,6 +470,15 @@ function heartbeatResponse() {
     },
     nextHeartbeatSeconds: 30,
   };
+}
+
+async function rejectedValue(operation: Promise<unknown>): Promise<unknown> {
+  try {
+    await operation;
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error("Expected operation to reject");
 }
 
 function jsonResponse(

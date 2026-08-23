@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SafeTunnelRuntimeStatus } from "../../shared/apiTypes.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   DefaultSafeTunnelBridgeService,
   type SafeTunnelApplicationService,
@@ -244,6 +245,34 @@ describe("DefaultSafeTunnelBridgeService", () => {
     expect(fixture.runtime.startupCalls).toBe(1);
     expect(fixture.safeTunnel.loginInputs).toEqual([]);
     expect(fixture.safeTunnel.enableInputs).toEqual([]);
+  });
+
+  it("passes only bounded provider-neutral account-access guidance to the browser", async () => {
+    const fixture = createFixture(registeredState);
+    const notice = {
+      status: "account_access_payment_required" as const,
+      message: "Account access is not active. Open the hosted dashboard.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    };
+    fixture.runtime.currentStatus = { state: "stopped", accountAccess: notice };
+
+    await expect(fixture.bridge.status()).resolves.toMatchObject({
+      config: { state: "registered" },
+      runtime: { state: "stopped", accountAccess: notice },
+    });
+
+    fixture.runtime.startError = new SafeTunnelAccountAccessError(notice);
+    const response = await fixture.bridge.enable({});
+    await waitFor(() => fixture.bridge.operation(response.operation.id)?.status === "failed");
+
+    expect(fixture.bridge.operation(response.operation.id)).toEqual({
+      id: response.operation.id,
+      kind: "enable",
+      phase: "starting",
+      status: "failed",
+      accountAccess: notice,
+    });
+    expect(fixture.safeTunnel.stateValue.machine?.credentialStatus).toBe("active");
   });
 
   it("exposes a fixed failure instead of an internal provider or child error", async () => {

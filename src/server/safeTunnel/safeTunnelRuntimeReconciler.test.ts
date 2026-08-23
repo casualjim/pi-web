@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SafeTunnelRuntimeStatus } from "../../shared/apiTypes.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   SafeTunnelControlPlaneError,
   type SafeTunnelHeartbeatTunnelStatus,
@@ -118,6 +119,49 @@ describe("SafeTunnelRuntimeReconciler", () => {
     expect(fixture.safeTunnel.heartbeatCalls).toHaveLength(2);
     expect(fixture.runtime.stopCalls).toBe(0);
     await expect(fixture.reconciler.status()).resolves.toEqual({ state: "running" });
+  });
+
+  it("keeps the runtime stopped when tunnel preparation requires account access", async () => {
+    const fixture = createFixture();
+    const paymentRequired = new SafeTunnelAccountAccessError({
+      status: "account_access_payment_required",
+      message: "Account access is not active. Open the hosted dashboard.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    });
+    fixture.runtime.startError = paymentRequired;
+
+    await expect(fixture.reconciler.start({})).rejects.toBe(paymentRequired);
+    fixture.clock.advance(100_000);
+
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
+    expect(fixture.runtime.stopCalls).toBe(0);
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "stopped",
+      accountAccess: paymentRequired.notice,
+    });
+  });
+
+  it("stops a running tunnel when a heartbeat reports suspended access", async () => {
+    const fixture = createFixture();
+    const suspended = new SafeTunnelAccountAccessError({
+      status: "account_access_suspended",
+      message: "Account access is suspended pending administrator review.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    });
+    fixture.safeTunnel.heartbeatResults = [() => Promise.reject(suspended)];
+
+    await fixture.reconciler.start({});
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.runtime.stopCalls === 1);
+    fixture.clock.advance(100_000);
+
+    expect(fixture.runtime.stopCalls).toBe(1);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "stopped",
+      accountAccess: suspended.notice,
+    });
   });
 
   it.each([

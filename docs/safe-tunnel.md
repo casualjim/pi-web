@@ -63,7 +63,9 @@ After opting in and restarting:
 
 PI WEB reuses a valid saved registration. If a heartbeat reports that the Control API rejected or revoked its credential, PI WEB marks that registration rejected, stops its owned child, and shows a fixed approval-required status. The next Enable starts a replacement approval flow. If rejection is first discovered while fetching tunnel configuration, Enable fails and the saved registration is marked rejected; choose Enable again to start replacement approval.
 
-Choose **Disable Safe Tunnel** to cancel an in-progress enable operation, persist disabled intent, cancel the periodic heartbeat, and stop only the exact child PI WEB launched. Browser status and operation responses use a small fixed set of PI WEB-authored fields and error categories. They do not include machine tokens, generated TOML, provider response bodies, artifact URLs, or raw child output.
+A payment-required or suspended account response is different from a rejected machine credential. PI WEB preserves the registration, stops or does not start its owned tunnel, and displays the Control API's bounded provider-neutral explanation with a link to the hosted dashboard. Resolve the account state there, then choose **Enable Safe Tunnel** to retry with the existing registration; no replacement device approval is required.
+
+Choose **Disable Safe Tunnel** to cancel an in-progress enable operation, persist disabled intent, cancel the periodic heartbeat, and stop only the exact child PI WEB launched. Browser status and operation responses use a small fixed set of PI WEB-authored fields and error categories, plus validated provider-neutral account-access guidance when tunnel operation is blocked. They do not include machine tokens, generated TOML, provider response bodies, artifact URLs, or raw child output.
 
 ## Local target and the browser entrypoint
 
@@ -92,7 +94,7 @@ $PI_WEB_DATA_DIR/safe-tunnel/config.json
 
 While the child is running, PI WEB generates `frpc.toml` and `frps-roots.pem` in the same private directory. It discards child output rather than maintaining a tunnel log. A graceful web/API shutdown stops the exact owned child and removes those generated files without changing enabled intent.
 
-If availability remains on, the next web/API start reads enabled intent and makes one tunnel start attempt. Periodic heartbeats continue at a bounded provider-directed interval and do not add history to durable state. An unexpected child exit remains stopped; a failed start is reported with the fixed `runtime_failed` category. PI WEB does not run an automatic child-restart loop. After correcting the cause, use **Disable Safe Tunnel** and then **Enable Safe Tunnel**, or restart web/API for another intent-restore attempt.
+If availability remains on, the next web/API start reads enabled intent and makes one tunnel start attempt. Periodic heartbeats continue at a bounded provider-directed interval and do not add history to durable state. An unexpected child exit remains stopped; a failed start is reported with the fixed `runtime_failed` category. A payment-required or suspended response leaves enabled intent and the active machine credential intact while keeping the runtime stopped. PI WEB does not run an automatic child-restart loop. After correcting an ordinary runtime cause, use **Disable Safe Tunnel** and then **Enable Safe Tunnel**, or restart web/API for another intent-restore attempt; after resolving account access in the linked hosted dashboard, **Enable Safe Tunnel** directly retries the preserved registration.
 
 To make the feature dormant, turn availability off and gracefully restart web/API. The old process stops its child; the new process performs no Safe Tunnel state, timer, network, artifact, or child work. Re-enabling availability later preserves the prior intent and makes one restore attempt.
 
@@ -145,7 +147,7 @@ These gateway-local routes exist only while Safe Tunnel availability is active. 
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/safe-tunnel/status` | Read redacted desired state, registration/runtime status, and the active operation. |
+| `GET /api/safe-tunnel/status` | Read redacted desired state, registration/runtime status, validated provider-neutral account-access guidance when present, and the active operation. |
 | `POST /api/safe-tunnel/enable` | Start one approval-through-child-start operation. The normal body is `{}`; optional overrides are under `advanced`. |
 | `POST /api/safe-tunnel/disable` | Cancel enablement, persist disabled intent, cancel heartbeat work, and stop the owned child. |
 | `GET /api/safe-tunnel/operations/:operationId` | Poll PI WEB-authored approval/startup progress and terminal outcome. |

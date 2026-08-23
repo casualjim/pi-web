@@ -1,5 +1,8 @@
 import type { MachineStatusUiEvent } from "./machineStatus.js";
-import type { SafeTunnelDesiredState } from "./safeTunnelTypes.js";
+import type {
+  SafeTunnelAccountAccessNotice,
+  SafeTunnelDesiredState,
+} from "./safeTunnelTypes.js";
 import type {
   DeleteWorkspaceFileResponse,
   FileContentMediaType,
@@ -371,6 +374,8 @@ export interface SafeTunnelRuntimeStatus {
   diagnosticCode?: SafeTunnelRuntimeDiagnosticCode;
   /** PI WEB-authored summary only; provider and child diagnostics stay server-side. */
   error?: string;
+  /** Bounded provider-neutral guidance for a preserved registration whose account cannot operate tunnels. */
+  accountAccess?: SafeTunnelAccountAccessNotice;
 }
 
 export interface SafeTunnelOperationResponse {
@@ -382,6 +387,8 @@ export interface SafeTunnelOperationResponse {
   publicUrl?: string;
   userCode?: string;
   verificationUriComplete?: string;
+  /** Present when enablement stopped at a provider-neutral account-access boundary. */
+  accountAccess?: SafeTunnelAccountAccessNotice;
 }
 
 export interface SafeTunnelStatusResponse {

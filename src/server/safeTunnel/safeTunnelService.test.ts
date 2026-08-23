@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   SafeTunnelControlPlaneError,
   type SafeTunnelApprovedDeviceAuthorization,
@@ -376,6 +377,34 @@ describe("SafeTunnelService", () => {
     });
   });
 
+  it("preserves active machine credentials across payment-required and suspended access", async () => {
+    const controlPlane = new FakeControlPlane();
+    const storage = new MemoryStateStorage({ ...createDefaultSafeTunnelState(), machine });
+    const service = createService(controlPlane, storage);
+    const paymentRequired = new SafeTunnelAccountAccessError({
+      status: "account_access_payment_required",
+      message: "Account access is not active.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    });
+    controlPlane.tunnelConfigError = paymentRequired;
+
+    await expect(service.getTunnelConfig()).rejects.toBe(paymentRequired);
+    expect(storage.state.machine?.credentialStatus).toBe("active");
+    expect(storage.saves).toEqual([]);
+
+    const suspended = new SafeTunnelAccountAccessError({
+      status: "account_access_suspended",
+      message: "Account access is suspended.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    });
+    controlPlane.heartbeatError = suspended;
+    await expect(service.recordHeartbeat({ tunnelStatus: "running" })).rejects.toBe(
+      suspended,
+    );
+    expect(storage.state.machine?.credentialStatus).toBe("active");
+    expect(storage.saves).toEqual([]);
+  });
+
   it("durably marks a registration rejected when the Control API rejects its credential", async () => {
     const controlPlane = new FakeControlPlane();
     const storage = new MemoryStateStorage({ ...createDefaultSafeTunnelState(), machine });
@@ -521,6 +550,7 @@ class FakeControlPlane implements SafeTunnelControlPlane {
   completions: (SafeTunnelDeviceAuthorizationCompletion | Error)[] = [];
   readonly events: string[] = [];
   heartbeatError: Error | undefined;
+  tunnelConfigError: Error | undefined;
   readonly heartbeatInputs: {
     readonly clientVersion: string;
     readonly tunnelStatus: string;
@@ -553,7 +583,9 @@ class FakeControlPlane implements SafeTunnelControlPlane {
   }
 
   getMachineTunnelConfig(): Promise<SafeTunnelMachineTunnelConfig> {
-    return Promise.resolve(this.tunnelConfig);
+    return this.tunnelConfigError === undefined
+      ? Promise.resolve(this.tunnelConfig)
+      : Promise.reject(this.tunnelConfigError);
   }
 
   recordMachineHeartbeat(

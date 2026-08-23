@@ -28,6 +28,25 @@ describe("Safe Tunnel API parsers", () => {
     expect(parseSafeTunnelDisableResponse({ status })).toEqual({ status });
   });
 
+  it("parses bounded provider-neutral account-access guidance", () => {
+    const accountAccess = {
+      status: "account_access_suspended",
+      message: "Account access is suspended pending administrator review.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    };
+    const status = statusResponse();
+
+    expect(parseSafeTunnelStatusResponse({
+      ...status,
+      runtime: { state: "stopped", accountAccess },
+    }).runtime.accountAccess).toEqual(accountAccess);
+    expect(parseSafeTunnelOperationResponse({
+      ...operationResponse(),
+      status: "failed",
+      accountAccess,
+    }).accountAccess).toEqual(accountAccess);
+  });
+
   it("rejects malformed state, operation, and diagnostic enums", () => {
     expect(() => parseSafeTunnelStatusResponse({
       config: { exists: false, state: "missing" },
@@ -47,6 +66,17 @@ describe("Safe Tunnel API parsers", () => {
       ...statusResponse(),
       runtime: { state: "stopped", diagnosticCode: "provider_secret" },
     })).toThrow("Expected Safe Tunnel runtime diagnostic field: diagnosticCode");
+    expect(() => parseSafeTunnelStatusResponse({
+      ...statusResponse(),
+      runtime: {
+        state: "stopped",
+        accountAccess: {
+          status: "future_state",
+          message: "Account access is unavailable.",
+          dashboardUrl: "https://control.example.test/dashboard",
+        },
+      },
+    })).toThrow("Expected Safe Tunnel account access status field: status");
   });
 
   it("bounds authored diagnostics, identifiers, and browser URLs", () => {
@@ -72,6 +102,28 @@ describe("Safe Tunnel API parsers", () => {
       ...operationResponse(),
       verificationUriComplete: "http://approval.example.test/device",
     })).toThrow("secure Control API URL field");
+    expect(() => parseSafeTunnelStatusResponse({
+      ...statusResponse(),
+      runtime: {
+        state: "stopped",
+        accountAccess: {
+          status: "account_access_payment_required",
+          message: "x".repeat(2_001),
+          dashboardUrl: "https://control.example.test/dashboard",
+        },
+      },
+    })).toThrow("bounded string field: message");
+    expect(() => parseSafeTunnelStatusResponse({
+      ...statusResponse(),
+      runtime: {
+        state: "stopped",
+        accountAccess: {
+          status: "account_access_suspended",
+          message: "Account access is suspended.",
+          dashboardUrl: "http://control.example.test/dashboard",
+        },
+      },
+    })).toThrow("secure Control API URL field: dashboardUrl");
   });
 
   it("requires accepted responses and typed optional fields", () => {

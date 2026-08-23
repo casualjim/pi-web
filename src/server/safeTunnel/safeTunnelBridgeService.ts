@@ -8,6 +8,7 @@ import type {
   SafeTunnelRuntimeStatus,
   SafeTunnelStatusResponse,
 } from "../../shared/apiTypes.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   defaultSafeTunnelControlApiBaseUrl,
   type SafeTunnelEnableDefaults,
@@ -72,6 +73,7 @@ interface SafeTunnelOperationState {
   publicUrl?: string;
   userCode?: string;
   verificationUriComplete?: string;
+  accountAccess?: SafeTunnelOperationResponse["accountAccess"];
 }
 
 interface ActiveEnableWorkflow {
@@ -157,7 +159,9 @@ export class DefaultSafeTunnelBridgeService implements SafeTunnelBridgeService {
           controller.signal,
         ))
         .then((result) => { finishEnableOperation(operation, result); })
-        .catch(() => { this.failOperation(operation, controller.signal); })
+        .catch((error: unknown) => {
+          this.failOperation(operation, controller.signal, error);
+        })
         .finally(() => {
           const active = this.activeWorkflow;
           if (active?.operation.id === operation.id) this.activeWorkflow = undefined;
@@ -312,10 +316,18 @@ export class DefaultSafeTunnelBridgeService implements SafeTunnelBridgeService {
   private failOperation(
     operation: SafeTunnelOperationState,
     signal: AbortSignal,
+    error: unknown,
   ): void {
     if (operation.status === "cancelled") return;
     operation.status = signal.aborted ? "cancelled" : "failed";
-    operation.error = signal.aborted ? enableCancelledMessage : enableFailedMessage;
+    if (signal.aborted) {
+      operation.error = enableCancelledMessage;
+    } else if (error instanceof SafeTunnelAccountAccessError) {
+      operation.accountAccess = error.notice;
+      delete operation.error;
+    } else {
+      operation.error = enableFailedMessage;
+    }
     delete operation.userCode;
     delete operation.verificationUriComplete;
   }
@@ -418,6 +430,7 @@ function finishEnableOperation(
   operation.status = "succeeded";
   delete operation.userCode;
   delete operation.verificationUriComplete;
+  delete operation.accountAccess;
 }
 
 function statusFromLoadedState(
@@ -503,6 +516,9 @@ function browserRuntimeStatus(runtime: SafeTunnelRuntimeStatus): SafeTunnelRunti
           diagnosticCode,
           error: runtimeDiagnosticMessage(diagnosticCode),
         }),
+    ...(runtime.accountAccess === undefined
+      ? {}
+      : { accountAccess: runtime.accountAccess }),
   };
 }
 
@@ -533,6 +549,9 @@ function snapshotOperation(operation: SafeTunnelOperationState): SafeTunnelOpera
     ...(operation.verificationUriComplete === undefined
       ? {}
       : { verificationUriComplete: operation.verificationUriComplete }),
+    ...(operation.accountAccess === undefined
+      ? {}
+      : { accountAccess: operation.accountAccess }),
   };
 }
 

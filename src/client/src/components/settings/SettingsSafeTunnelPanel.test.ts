@@ -123,6 +123,17 @@ describe("Safe Tunnel enable request helpers", () => {
       label: "Approval required",
     });
     expect(safeTunnelPresentation(safeTunnelStatus({
+      accountAccess: {
+        status: "account_access_payment_required",
+        message: "Account access is not active.",
+        dashboardUrl: "https://api.tunnels.pi-web.dev/dashboard",
+      },
+      desiredState: "enabled",
+    }))).toMatchObject({
+      action: "enable",
+      label: "Payment required",
+    });
+    expect(safeTunnelPresentation(safeTunnelStatus({
       desiredState: "disabled",
       rejected: true,
       runtimeState: "running",
@@ -311,6 +322,31 @@ describe("settings-safe-tunnel-panel", () => {
     expect(buttonByText(root, "Enable Safe Tunnel")).toBeDefined();
   });
 
+  it("renders suspended access guidance and an actionable hosted-dashboard link", async () => {
+    const accountAccess = {
+      status: "account_access_suspended" as const,
+      message: "Account access is suspended pending administrator review.",
+      dashboardUrl: "https://api.tunnels.pi-web.dev/dashboard",
+    };
+    vi.spyOn(safeTunnelApi, "status").mockResolvedValue(safeTunnelStatus({
+      accountAccess,
+      desiredState: "enabled",
+      runtimeState: "stopped",
+    }));
+
+    const panel = await renderPanel();
+    const root = requiredShadowRoot(panel);
+    const dashboardLink = [...root.querySelectorAll("a")]
+      .find((link) => link.textContent.trim() === "Open hosted dashboard");
+
+    expect(root.textContent).toContain("Account access is suspended");
+    expect(root.textContent).toContain(accountAccess.message);
+    expect(dashboardLink?.href).toBe(accountAccess.dashboardUrl);
+    expect(dashboardLink?.target).toBe("_blank");
+    expect(buttonByText(root, "Enable Safe Tunnel")).toBeDefined();
+    expect(root.textContent).not.toContain("approval is no longer valid");
+  });
+
   it("does not schedule progress polling after capability gating unmounts the panel", async () => {
     const status = deferred<SafeTunnelStatusResponse>();
     const statusRequest = vi.fn(() => status.promise);
@@ -479,6 +515,7 @@ function emptyAdvancedFields() {
 }
 
 interface SafeTunnelStatusOptions {
+  accountAccess?: NonNullable<SafeTunnelStatusResponse["runtime"]["accountAccess"]>;
   activeOperation?: SafeTunnelOperationResponse;
   desiredState?: SafeTunnelStatusResponse["desiredState"];
   registered?: boolean;
@@ -511,6 +548,9 @@ function safeTunnelStatus(options: SafeTunnelStatusOptions = {}): SafeTunnelStat
         diagnosticCode: "credentials_rejected",
         error: "Safe Tunnel access for this PI WEB was rejected or revoked.",
       } : {}),
+      ...(options.accountAccess === undefined
+        ? {}
+        : { accountAccess: options.accountAccess }),
     },
     ...(options.activeOperation === undefined
       ? {}

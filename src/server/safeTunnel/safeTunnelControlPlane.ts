@@ -1,4 +1,9 @@
+import type {
+  SafeTunnelAccountAccessNotice,
+  SafeTunnelAccountAccessStatus,
+} from "../../shared/safeTunnelTypes.js";
 import { isSafeTunnelControlApiTransportAllowed } from "../../shared/safeTunnelUrlPolicy.js";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import {
   normalizeSafeTunnelControlApiBaseUrl,
   normalizeSafeTunnelLocalPiWebUrl,
@@ -16,6 +21,9 @@ const maximumNameCharacters = 256;
 const maximumOpaqueTokenCharacters = 4_096;
 const maximumUrlCharacters = 2_048;
 const maximumFrpcConfigCharacters = 32_000;
+const maximumDiagnosticCharacters = 2_000;
+const accountAccessPaymentRequiredCode = "account_access_payment_required";
+const accountAccessSuspendedCode = "account_access_suspended";
 
 export type SafeTunnelControlPlaneErrorCode =
   | "authentication_failed"
@@ -180,7 +188,12 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       },
       operation,
       async (response) => {
-        requireExpectedResponse(response, 202, operation);
+        await requireExpectedResponse(
+          response,
+          202,
+          operation,
+          input.controlApiBaseUrl,
+        );
         return parseControlPlaneResponse(
           await readSuccessJson(response, operation),
           operation,
@@ -264,7 +277,12 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       },
       operation,
       async (response) => {
-        requireExpectedResponse(response, 201, operation);
+        await requireExpectedResponse(
+          response,
+          201,
+          operation,
+          input.controlApiBaseUrl,
+        );
         return parseControlPlaneResponse(
           await readSuccessJson(response, operation),
           operation,
@@ -295,7 +313,12 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       },
       operation,
       async (response) => {
-        requireExpectedResponse(response, 200, operation);
+        await requireExpectedResponse(
+          response,
+          200,
+          operation,
+          credentials.controlApiBaseUrl,
+        );
         return parseControlPlaneResponse(
           await readSuccessJson(response, operation),
           operation,
@@ -330,7 +353,12 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       },
       operation,
       async (response) => {
-        requireExpectedResponse(response, 202, operation);
+        await requireExpectedResponse(
+          response,
+          202,
+          operation,
+          credentials.controlApiBaseUrl,
+        );
         return parseControlPlaneResponse(
           await readSuccessJson(response, operation),
           operation,
@@ -363,7 +391,8 @@ export class HttpSafeTunnelControlPlane implements SafeTunnelControlPlane {
       );
       return await abortable(consume(response), controller.signal);
     } catch (error: unknown) {
-      if (error instanceof SafeTunnelControlPlaneError) throw error;
+      if (error instanceof SafeTunnelControlPlaneError
+        || error instanceof SafeTunnelAccountAccessError) throw error;
       throw new SafeTunnelControlPlaneError("transport_failed", operation);
     } finally {
       timeout.cancel();
@@ -398,15 +427,75 @@ function endpoint(baseUrl: string, path: string): string {
   return `${normalizeSafeTunnelControlApiBaseUrl(baseUrl)}${path}`;
 }
 
-function requireExpectedResponse(
+async function requireExpectedResponse(
   response: Response,
   expectedStatus: number,
   operation: SafeTunnelControlPlaneOperation,
-): void {
+  controlApiBaseUrl: string,
+): Promise<void> {
   if (response.status === expectedStatus) return;
-  void response.body?.cancel().catch(() => undefined);
-  if (response.ok) throw new SafeTunnelControlPlaneError("invalid_response", operation);
+  if (response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new SafeTunnelControlPlaneError("invalid_response", operation);
+  }
+
+  if (response.status === 402 || response.status === 403) {
+    const errorRecord = await readApplicationErrorRecord(response);
+    const accountAccessError = errorRecord === undefined
+      ? undefined
+      : parseAccountAccessError(
+          errorRecord,
+          response.status,
+          controlApiBaseUrl,
+          operation,
+        );
+    if (accountAccessError !== undefined) throw accountAccessError;
+  } else {
+    await response.body?.cancel().catch(() => undefined);
+  }
+
   throw mappedHttpError(response.status, operation);
+}
+
+function parseAccountAccessError(
+  errorRecord: Readonly<Record<string, unknown>>,
+  responseStatus: number,
+  controlApiBaseUrl: string,
+  operation: SafeTunnelControlPlaneOperation,
+): SafeTunnelAccountAccessError | undefined {
+  const code = applicationErrorCode(errorRecord);
+  let status: SafeTunnelAccountAccessStatus;
+
+  if (code === accountAccessPaymentRequiredCode) {
+    if (responseStatus !== 402) {
+      throw new SafeTunnelControlPlaneError("invalid_response", operation);
+    }
+    status = accountAccessPaymentRequiredCode;
+  } else if (code === accountAccessSuspendedCode) {
+    if (responseStatus !== 403) {
+      throw new SafeTunnelControlPlaneError("invalid_response", operation);
+    }
+    status = accountAccessSuspendedCode;
+  } else {
+    return undefined;
+  }
+
+  const notice = parseControlPlaneResponse(
+    errorRecord,
+    operation,
+    (value): SafeTunnelAccountAccessNotice => {
+      const record = requireResponseRecord(value);
+      return {
+        status,
+        message: requireResponseString(record["message"], maximumDiagnosticCharacters),
+        dashboardUrl: requireHostedDashboardUrl(
+          record["dashboardUrl"],
+          controlApiBaseUrl,
+        ),
+      };
+    },
+  );
+  return new SafeTunnelAccountAccessError(notice);
 }
 
 function mappedHttpError(
@@ -442,6 +531,13 @@ async function readSuccessJson(
 }
 
 async function readApplicationErrorCode(response: Response): Promise<string | undefined> {
+  const errorRecord = await readApplicationErrorRecord(response);
+  return errorRecord === undefined ? undefined : applicationErrorCode(errorRecord);
+}
+
+async function readApplicationErrorRecord(
+  response: Response,
+): Promise<Readonly<Record<string, unknown>> | undefined> {
   let body: unknown;
   try {
     body = await readBoundedJson(response);
@@ -450,7 +546,12 @@ async function readApplicationErrorCode(response: Response): Promise<string | un
   }
   if (!isRecord(body)) return undefined;
   const envelope = body["error"];
-  const errorRecord = isRecord(envelope) ? envelope : body;
+  return isRecord(envelope) ? envelope : body;
+}
+
+function applicationErrorCode(
+  errorRecord: Readonly<Record<string, unknown>>,
+): string | undefined {
   const code = errorRecord["code"];
   return typeof code === "string"
     && code.length <= maximumIdentifierCharacters
@@ -620,6 +721,26 @@ function normalizeResponseLocalPiWebUrl(value: unknown): string {
 
 function requireMatchingPublicHostname(publicHostname: string, publicUrl: string): void {
   if (new URL(publicUrl).hostname !== publicHostname) throw invalidResponse();
+}
+
+function requireHostedDashboardUrl(
+  value: unknown,
+  controlApiBaseUrl: string,
+): string {
+  const source = requireResponseString(value, maximumUrlCharacters).trim();
+  try {
+    const url = source.startsWith("/") && !source.startsWith("//")
+      ? new URL(source, `${normalizeSafeTunnelControlApiBaseUrl(controlApiBaseUrl)}/`)
+      : new URL(source);
+    if (!isSafeTunnelControlApiTransportAllowed(url)
+      || url.username !== ""
+      || url.password !== ""
+      || url.hash !== "") throw invalidResponse();
+    return url.toString();
+  } catch (error: unknown) {
+    if (error instanceof InvalidSafeTunnelControlPlaneResponseError) throw error;
+    throw invalidResponse();
+  }
 }
 
 function requireExternalHttpUrl(value: unknown): string {

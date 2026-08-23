@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SafeTunnelAccountAccessError } from "./safeTunnelAccountAccess.js";
 import type { SafeTunnelManagedFrpcProvider } from "./safeTunnelFrpcManager.js";
 import type {
   SafeTunnelFrpcProcessExit,
@@ -130,6 +131,23 @@ describe("SafeTunnelFrpcSupervisor", () => {
       state: "stopped",
       error: "PI WEB could not prepare Safe Tunnel configuration.",
     });
+  });
+
+  it("does not launch frpc when account access blocks tunnel configuration", async () => {
+    const fixture = createFixture();
+    const paymentRequired = new SafeTunnelAccountAccessError({
+      status: "account_access_payment_required",
+      message: "Account access is not active.",
+      dashboardUrl: "https://control.example.test/dashboard",
+    });
+    fixture.configProvider.error = paymentRequired;
+
+    await expect(fixture.supervisor.start({})).rejects.toBe(paymentRequired);
+
+    expect(fixture.files.writes).toEqual([]);
+    expect(fixture.managed.calls).toBe(0);
+    expect(fixture.launcher.requests).toEqual([]);
+    await expect(fixture.supervisor.status()).resolves.toEqual({ state: "stopped" });
   });
 
   it("rejects a prepared config that lost its machine identity before launch", async () => {

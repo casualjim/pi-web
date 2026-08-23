@@ -88,6 +88,42 @@ describe("registerSafeTunnelRoutes", () => {
     expect(service.status).toHaveBeenCalledOnce();
   });
 
+  it("serves provider-neutral account-access guidance without credential state changes", async () => {
+    const accessStatus: SafeTunnelStatusResponse = {
+      ...service.statusResponse,
+      config: {
+        ...service.statusResponse.config,
+        exists: true,
+        state: "registered",
+        machine: {
+          controlApiBaseUrl: "https://control.example.test",
+          machineId: "machine_1",
+        },
+      },
+      desiredState: "enabled",
+      runtime: {
+        state: "stopped",
+        accountAccess: {
+          status: "account_access_payment_required",
+          message: "Account access is not active. Open the hosted dashboard.",
+          dashboardUrl: "https://control.example.test/dashboard",
+        },
+      },
+    };
+    service.status.mockResolvedValueOnce(accessStatus);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/safe-tunnel/status",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(accessStatus);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).not.toContain("machineToken");
+    expect(response.body).not.toContain("rejected");
+  });
+
   it("accepts the marked same-origin JSON enable contract", async () => {
     const response = await app.inject({
       method: "POST",

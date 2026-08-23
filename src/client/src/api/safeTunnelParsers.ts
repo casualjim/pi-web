@@ -11,7 +11,11 @@ import type {
   SafeTunnelRuntimeStatus,
   SafeTunnelStatusResponse,
 } from "../../../shared/apiTypes";
-import type { SafeTunnelDesiredState } from "../../../shared/safeTunnelTypes";
+import type {
+  SafeTunnelAccountAccessNotice,
+  SafeTunnelAccountAccessStatus,
+  SafeTunnelDesiredState,
+} from "../../../shared/safeTunnelTypes";
 import { isSafeTunnelControlApiTransportAllowed } from "../../../shared/safeTunnelUrlPolicy";
 
 const maximumDiagnosticCharacters = 2_000;
@@ -50,6 +54,9 @@ export function parseSafeTunnelOperationResponse(value: unknown): SafeTunnelOper
     record,
     "verificationUriComplete",
   );
+  const accountAccess = record["accountAccess"] === undefined
+    ? undefined
+    : parseSafeTunnelAccountAccessNotice(record["accountAccess"]);
   return {
     id: requireString(record, "id", maximumIdentifierCharacters),
     kind: requireSafeTunnelOperationKind(record, "kind"),
@@ -59,6 +66,7 @@ export function parseSafeTunnelOperationResponse(value: unknown): SafeTunnelOper
     ...(publicUrl === undefined ? {} : { publicUrl }),
     ...(userCode === undefined ? {} : { userCode }),
     ...(verificationUriComplete === undefined ? {} : { verificationUriComplete }),
+    ...(accountAccess === undefined ? {} : { accountAccess }),
   };
 }
 
@@ -119,11 +127,42 @@ function parseSafeTunnelRuntimeStatus(value: unknown): SafeTunnelRuntimeStatus {
   const record = requireRecord(value);
   const diagnosticCode = optionalSafeTunnelRuntimeDiagnosticCode(record, "diagnosticCode");
   const error = optionalString(record, "error", maximumDiagnosticCharacters);
+  const accountAccess = record["accountAccess"] === undefined
+    ? undefined
+    : parseSafeTunnelAccountAccessNotice(record["accountAccess"]);
   return {
     state: requireSafeTunnelRuntimeState(record, "state"),
     ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
     ...(error === undefined ? {} : { error }),
+    ...(accountAccess === undefined ? {} : { accountAccess }),
   };
+}
+
+function parseSafeTunnelAccountAccessNotice(
+  value: unknown,
+): SafeTunnelAccountAccessNotice {
+  const record = requireRecord(value);
+  const message = requireString(record, "message", maximumDiagnosticCharacters);
+  if (message.trim() === "") {
+    throw new Error("Expected non-empty Safe Tunnel account access message");
+  }
+  return {
+    status: requireSafeTunnelAccountAccessStatus(record, "status"),
+    message,
+    dashboardUrl: requireSafeControlApiUrl(record, "dashboardUrl"),
+  };
+}
+
+function requireSafeTunnelAccountAccessStatus(
+  record: Record<string, unknown>,
+  key: string,
+): SafeTunnelAccountAccessStatus {
+  const value = requireString(record, key);
+  if (value !== "account_access_payment_required"
+    && value !== "account_access_suspended") {
+    throw new Error(`Expected Safe Tunnel account access status field: ${key}`);
+  }
+  return value;
 }
 
 function requireSafeTunnelConfigState(record: Record<string, unknown>, key: string): SafeTunnelConfigState {

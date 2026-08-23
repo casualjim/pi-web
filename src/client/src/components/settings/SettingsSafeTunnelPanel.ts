@@ -6,6 +6,7 @@ import type {
   SafeTunnelRuntimeStatus,
   SafeTunnelStatusResponse,
 } from "../../../../shared/apiTypes";
+import type { SafeTunnelAccountAccessNotice } from "../../../../shared/safeTunnelTypes";
 import {
   hasExplicitSafeTunnelHttpPort,
   isSafeTunnelControlApiTransportAllowed,
@@ -153,6 +154,9 @@ export class SettingsSafeTunnelPanel extends LitElement {
     const operation = this.operation ?? this.status?.activeOperation;
     if (operation === undefined) return null;
     const approvalUrl = operation.verificationUriComplete;
+    const operationAccountAccess = this.status?.runtime.accountAccess === undefined
+      ? operation.accountAccess
+      : undefined;
     return html`
       <section class="card operation-card" aria-labelledby="safe-tunnel-progress-heading">
         <div class="section-heading">
@@ -180,6 +184,9 @@ export class SettingsSafeTunnelPanel extends LitElement {
           </div>
         `}
 
+        ${operationAccountAccess === undefined
+          ? null
+          : renderAccountAccessNotice(operationAccountAccess)}
         ${operation.error === undefined ? null : html`<p class="bad" role="alert">${operation.error}</p>`}
       </section>
     `;
@@ -190,6 +197,14 @@ export class SettingsSafeTunnelPanel extends LitElement {
     if (status === undefined) return null;
     const rejected = safeTunnelRegistrationRejected(status);
     const runtime = status.runtime;
+    if (runtime.accountAccess !== undefined) {
+      return html`
+        <section class="card diagnostics-card account-access-card">
+          ${renderAccountAccessNotice(runtime.accountAccess)}
+          ${runtime.error === undefined ? null : html`<p class="bad">${runtime.error}</p>`}
+        </section>
+      `;
+    }
     if (!rejected && runtime.error === undefined && status.config.error === undefined) return null;
 
     return html`
@@ -482,9 +497,12 @@ export class SettingsSafeTunnelPanel extends LitElement {
     .card { min-width: 0; display: grid; gap: 12px; border: 1px solid var(--pi-border); border-radius: 12px; background: var(--pi-surface); padding: 14px; }
     .hero-card { gap: 14px; }
     .status-pill { display: inline-block; border: 1px solid var(--pi-border); border-radius: 999px; background: var(--pi-bg); padding: 3px 8px; font-size: 12px; font-weight: 700; }
-    .public-url, .approval-callout { display: grid; gap: 6px; border: 1px solid var(--pi-success-border); border-radius: 10px; background: var(--pi-success-bg); padding: 11px; }
+    .public-url, .approval-callout, .account-access-notice { display: grid; gap: 6px; border: 1px solid var(--pi-success-border); border-radius: 10px; background: var(--pi-success-bg); padding: 11px; }
     .public-url > span { color: var(--pi-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
     .approval-callout { border-color: var(--pi-accent-border); background: var(--pi-selection-bg); }
+    .account-access-notice { border-color: var(--pi-warning-border, var(--pi-border)); background: var(--pi-warning-bg, var(--pi-bg)); }
+    .account-access-notice strong { color: var(--pi-warning, var(--pi-text)); }
+    .dashboard-action { width: fit-content; font-weight: 700; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .actions.compact { margin-top: 3px; }
     .user-code { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--pi-text); }
@@ -594,6 +612,14 @@ export function safeTunnelPresentation(
       tone: "good",
     };
   }
+  if (status.runtime.accountAccess !== undefined) {
+    return {
+      action: "enable",
+      description: "Restore account access in the hosted dashboard, then retry Safe Tunnel.",
+      label: accountAccessLabel(status.runtime.accountAccess),
+      tone: "bad",
+    };
+  }
   if (safeTunnelRegistrationRejected(status)) {
     return {
       action: "enable",
@@ -630,12 +656,43 @@ export function safeTunnelPresentation(
 }
 
 export function safeTunnelRuntimeSummary(runtime: SafeTunnelRuntimeStatus): string {
-  return runtimeStateLabel(runtime.state);
+  return runtime.accountAccess === undefined
+    ? runtimeStateLabel(runtime.state)
+    : `${runtimeStateLabel(runtime.state)} — ${accountAccessLabel(runtime.accountAccess)}`;
 }
 
 function safeTunnelRegistrationRejected(status: SafeTunnelStatusResponse): boolean {
   return status.config.state === "rejected"
     || status.runtime.diagnosticCode === "credentials_rejected";
+}
+
+function renderAccountAccessNotice(
+  notice: SafeTunnelAccountAccessNotice,
+): TemplateResult {
+  return html`
+    <div class="account-access-notice" role="alert">
+      <strong>${accountAccessHeading(notice)}</strong>
+      <p>${notice.message}</p>
+      <a
+        class="dashboard-action"
+        href=${notice.dashboardUrl}
+        target="_blank"
+        rel="noreferrer"
+      >Open hosted dashboard</a>
+    </div>
+  `;
+}
+
+function accountAccessHeading(notice: SafeTunnelAccountAccessNotice): string {
+  return notice.status === "account_access_payment_required"
+    ? "Account access is required"
+    : "Account access is suspended";
+}
+
+function accountAccessLabel(notice: SafeTunnelAccountAccessNotice): string {
+  return notice.status === "account_access_payment_required"
+    ? "Payment required"
+    : "Suspended";
 }
 
 function operationPhaseLabel(phase: SafeTunnelOperationResponse["phase"]): string {

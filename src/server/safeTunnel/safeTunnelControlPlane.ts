@@ -732,11 +732,13 @@ function requireHostedDashboardUrl(
     const url = source.startsWith("/") && !source.startsWith("//")
       ? new URL(source, `${normalizeSafeTunnelControlApiBaseUrl(controlApiBaseUrl)}/`)
       : new URL(source);
+    const canonicalUrl = url.toString();
     if (!isSafeTunnelControlApiTransportAllowed(url)
       || url.username !== ""
       || url.password !== ""
-      || url.hash !== "") throw invalidResponse();
-    return url.toString();
+      || url.hash !== ""
+      || canonicalUrl.length > maximumUrlCharacters) throw invalidResponse();
+    return canonicalUrl;
   } catch (error: unknown) {
     if (error instanceof InvalidSafeTunnelControlPlaneResponseError) throw error;
     throw invalidResponse();

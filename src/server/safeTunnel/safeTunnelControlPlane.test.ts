@@ -247,6 +247,62 @@ describe("HttpSafeTunnelControlPlane", () => {
     });
   });
 
+  it("rejects account-access guidance that exceeds the URL bound after canonicalization", async () => {
+    const expandingRelativeUrl = `/${"é".repeat(400)}`;
+    const expandingAbsoluteUrl = `https://accounts.example.test/${"é".repeat(400)}`;
+    expect(expandingRelativeUrl.length).toBeLessThan(2_048);
+    expect(expandingAbsoluteUrl.length).toBeLessThan(2_048);
+    expect(new URL(expandingRelativeUrl, `${controlApiBaseUrl}/`).toString().length)
+      .toBeGreaterThan(2_048);
+    expect(new URL(expandingAbsoluteUrl).toString().length).toBeGreaterThan(2_048);
+
+    const response = (dashboardUrl: string): Response => jsonResponse(402, {
+      error: {
+        code: "account_access_payment_required",
+        message: "Account access is not active.",
+        dashboardUrl,
+      },
+    });
+    const transport = sequencedFetch([
+      response(expandingRelativeUrl),
+      response(expandingAbsoluteUrl),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const credentials = {
+      controlApiBaseUrl,
+      machineId: "machine_123",
+      machineToken,
+    };
+
+    await expect(controlPlane.getMachineTunnelConfig(credentials))
+      .rejects.toMatchObject({ code: "invalid_response" });
+    await expect(controlPlane.getMachineTunnelConfig(credentials))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("accepts an account-access dashboard URL at the exact canonical bound", async () => {
+    const prefix = "https://accounts.example.test/";
+    const dashboardUrl = `${prefix}${"a".repeat(2_048 - prefix.length)}`;
+    const transport = sequencedFetch([
+      jsonResponse(402, {
+        error: {
+          code: "account_access_payment_required",
+          message: "Account access is not active.",
+          dashboardUrl,
+        },
+      }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+
+    const error = await rejectedValue(controlPlane.getMachineTunnelConfig({
+      controlApiBaseUrl,
+      machineId: "machine_123",
+      machineToken,
+    }));
+    expect(error).toBeInstanceOf(SafeTunnelAccountAccessError);
+    expect(error).toMatchObject({ notice: { dashboardUrl } });
+  });
+
   it("rejects malformed account-access guidance as an invalid response", async () => {
     const transport = sequencedFetch([
       jsonResponse(402, {

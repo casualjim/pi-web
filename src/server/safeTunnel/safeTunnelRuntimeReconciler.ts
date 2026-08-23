@@ -102,10 +102,12 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
     }
 
     this.lifecycleDiagnostic = undefined;
-    const starting = this.dependencies.runtime.start(input);
-    this.scheduleHeartbeat(generation, 0);
     try {
-      return await starting;
+      const result = await this.dependencies.runtime.start(input);
+      if (this.isHeartbeatCurrent(generation)) {
+        this.scheduleHeartbeat(generation, 0);
+      }
+      return result;
     } catch (error: unknown) {
       if (this.isHeartbeatCurrent(generation)) {
         if (error instanceof SafeTunnelAccountAccessError) {

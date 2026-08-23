@@ -51,7 +51,7 @@ describe("SafeTunnelRuntimeReconciler", () => {
     ];
 
     await fixture.reconciler.startup();
-    await waitForCondition(() => fixture.runtime.startCalls.length === 1);
+    await waitForCondition(() => fixture.clock.scheduledDelays.at(-1) === 0);
 
     expect(fixture.runtime.startCalls).toEqual([{ advancedFrpcPath: "/advanced/frpc" }]);
     fixture.clock.advance(0);
@@ -62,6 +62,44 @@ describe("SafeTunnelRuntimeReconciler", () => {
     await waitForCondition(() => fixture.clock.scheduledDelays.at(-1) === 100_000);
     expect(fixture.safeTunnel.heartbeatCalls).toHaveLength(2);
     expect(fixture.runtime.stopCalls).toBe(0);
+  });
+
+  it("waits for tunnel-config startup before scheduling the first heartbeat", async () => {
+    const fixture = createFixture();
+    const deferredStart = createDeferred<SafeTunnelFrpcStartResult>();
+    fixture.runtime.startResult = deferredStart.promise;
+
+    const starting = fixture.reconciler.start({});
+    await waitForCondition(() => fixture.runtime.startCalls.length === 1);
+    fixture.clock.advance(0);
+    await flushAsyncWork();
+
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
+
+    deferredStart.resolve({ publicUrl: "https://dev-box.ns.tunnels.pi-web.dev" });
+    await starting;
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.safeTunnel.heartbeatCalls.length === 1);
+
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([{ tunnelStatus: "running" }]);
+  });
+
+  it("does not rearm a heartbeat when stop supersedes pending startup", async () => {
+    const fixture = createFixture();
+    const deferredStart = createDeferred<SafeTunnelFrpcStartResult>();
+    fixture.runtime.startResult = deferredStart.promise;
+
+    const starting = fixture.reconciler.start({});
+    await waitForCondition(() => fixture.runtime.startCalls.length === 1);
+    await fixture.reconciler.stop();
+    deferredStart.resolve({ publicUrl: "https://dev-box.ns.tunnels.pi-web.dev" });
+    await starting;
+    fixture.clock.advance(100_000);
+    await flushAsyncWork();
+
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
   });
 
   it("leaves disabled intent dormant without child or timer work", async () => {
@@ -218,6 +256,8 @@ describe("SafeTunnelRuntimeReconciler", () => {
     await flushAsyncWork();
 
     expect(fixture.runtime.startCalls).toEqual([{}]);
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
     await expect(fixture.reconciler.status()).resolves.toMatchObject({
       diagnosticCode: "runtime_failed",
     });
@@ -335,6 +375,7 @@ class FakeReconciliationService implements SafeTunnelRuntimeReconciliationServic
 class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
   readonly startCalls: SafeTunnelFrpcStartInput[] = [];
   startError: Error | undefined;
+  startResult: Promise<SafeTunnelFrpcStartResult> | undefined;
   shutdownCalls = 0;
   statusValue: SafeTunnelRuntimeStatus = runtimeStatus();
   stopCalls = 0;
@@ -352,9 +393,12 @@ class FakeFrpcRuntime implements SafeTunnelFrpcRuntime {
     this.order.push("runtime:start");
     this.startCalls.push(input);
     if (this.startError !== undefined) return Promise.reject(this.startError);
-    this.statusValue = runtimeStatus({ state: "running" });
-    return Promise.resolve({
+    const result = this.startResult ?? Promise.resolve({
       publicUrl: "https://dev-box.ns.tunnels.pi-web.dev",
+    });
+    return result.then((started) => {
+      this.statusValue = runtimeStatus({ state: "running" });
+      return started;
     });
   }
 
@@ -467,6 +511,23 @@ function abortableFake<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
       },
     );
   });
+}
+
+function createDeferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolvePromise: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: (value) => {
+      if (resolvePromise === undefined) throw new Error("Deferred promise is not initialized.");
+      resolvePromise(value);
+    },
+  };
 }
 
 async function flushAsyncWork(): Promise<void> {

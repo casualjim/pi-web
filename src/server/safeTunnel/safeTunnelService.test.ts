@@ -51,6 +51,19 @@ const machine = {
   publicUrl,
 };
 
+const accountAccessCases = [
+  ["payment-required access", new SafeTunnelAccountAccessError({
+    status: "account_access_payment_required",
+    message: "Account access is not active.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
+  ["suspended access", new SafeTunnelAccountAccessError({
+    status: "account_access_suspended",
+    message: "Account access is suspended.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
+] as const;
+
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
@@ -377,33 +390,27 @@ describe("SafeTunnelService", () => {
     });
   });
 
-  it("preserves active machine credentials across payment-required and suspended access", async () => {
-    const controlPlane = new FakeControlPlane();
-    const storage = new MemoryStateStorage({ ...createDefaultSafeTunnelState(), machine });
-    const service = createService(controlPlane, storage);
-    const paymentRequired = new SafeTunnelAccountAccessError({
-      status: "account_access_payment_required",
-      message: "Account access is not active.",
-      dashboardUrl: "https://control.example.test/dashboard",
-    });
-    controlPlane.tunnelConfigError = paymentRequired;
+  it.each(accountAccessCases)(
+    "preserves active machine credentials when config and heartbeat report %s",
+    async (_description, accessError) => {
+      const controlPlane = new FakeControlPlane();
+      const storage = new MemoryStateStorage({ ...createDefaultSafeTunnelState(), machine });
+      const service = createService(controlPlane, storage);
+      controlPlane.tunnelConfigError = accessError;
 
-    await expect(service.getTunnelConfig()).rejects.toBe(paymentRequired);
-    expect(storage.state.machine?.credentialStatus).toBe("active");
-    expect(storage.saves).toEqual([]);
+      await expect(service.getTunnelConfig()).rejects.toBe(accessError);
+      expect(storage.state.machine?.credentialStatus).toBe("active");
+      expect(storage.saves).toEqual([]);
 
-    const suspended = new SafeTunnelAccountAccessError({
-      status: "account_access_suspended",
-      message: "Account access is suspended.",
-      dashboardUrl: "https://control.example.test/dashboard",
-    });
-    controlPlane.heartbeatError = suspended;
-    await expect(service.recordHeartbeat({ tunnelStatus: "running" })).rejects.toBe(
-      suspended,
-    );
-    expect(storage.state.machine?.credentialStatus).toBe("active");
-    expect(storage.saves).toEqual([]);
-  });
+      controlPlane.tunnelConfigError = undefined;
+      controlPlane.heartbeatError = accessError;
+      await expect(service.recordHeartbeat({ tunnelStatus: "running" })).rejects.toBe(
+        accessError,
+      );
+      expect(storage.state.machine?.credentialStatus).toBe("active");
+      expect(storage.saves).toEqual([]);
+    },
+  );
 
   it("durably marks a registration rejected when the Control API rejects its credential", async () => {
     const controlPlane = new FakeControlPlane();

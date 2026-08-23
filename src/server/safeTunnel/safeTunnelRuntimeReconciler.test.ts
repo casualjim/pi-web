@@ -28,6 +28,19 @@ const policy = {
   minimumHeartbeatIntervalMs: 20_000,
 } as const;
 
+const accountAccessCases = [
+  ["payment-required access", new SafeTunnelAccountAccessError({
+    status: "account_access_payment_required",
+    message: "Account access is not active. Open the hosted dashboard.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
+  ["suspended access", new SafeTunnelAccountAccessError({
+    status: "account_access_suspended",
+    message: "Account access is suspended pending administrator review.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
+] as const;
+
 describe("SafeTunnelRuntimeReconciler", () => {
   it("restores enabled intent and clamps hosted heartbeat intervals", async () => {
     const fixture = createFixture();
@@ -121,48 +134,44 @@ describe("SafeTunnelRuntimeReconciler", () => {
     await expect(fixture.reconciler.status()).resolves.toEqual({ state: "running" });
   });
 
-  it("keeps the runtime stopped when tunnel preparation requires account access", async () => {
-    const fixture = createFixture();
-    const paymentRequired = new SafeTunnelAccountAccessError({
-      status: "account_access_payment_required",
-      message: "Account access is not active. Open the hosted dashboard.",
-      dashboardUrl: "https://control.example.test/dashboard",
-    });
-    fixture.runtime.startError = paymentRequired;
+  it.each(accountAccessCases)(
+    "keeps the runtime stopped when tunnel preparation reports %s",
+    async (_description, accessError) => {
+      const fixture = createFixture();
+      fixture.runtime.startError = accessError;
 
-    await expect(fixture.reconciler.start({})).rejects.toBe(paymentRequired);
-    fixture.clock.advance(100_000);
+      await expect(fixture.reconciler.start({})).rejects.toBe(accessError);
+      fixture.clock.advance(100_000);
 
-    expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
-    expect(fixture.clock.activeTaskCount()).toBe(0);
-    expect(fixture.runtime.stopCalls).toBe(0);
-    await expect(fixture.reconciler.status()).resolves.toEqual({
-      state: "stopped",
-      accountAccess: paymentRequired.notice,
-    });
-  });
+      expect(fixture.safeTunnel.heartbeatCalls).toEqual([]);
+      expect(fixture.clock.activeTaskCount()).toBe(0);
+      expect(fixture.runtime.stopCalls).toBe(0);
+      await expect(fixture.reconciler.status()).resolves.toEqual({
+        state: "stopped",
+        accountAccess: accessError.notice,
+      });
+    },
+  );
 
-  it("stops a running tunnel when a heartbeat reports suspended access", async () => {
-    const fixture = createFixture();
-    const suspended = new SafeTunnelAccountAccessError({
-      status: "account_access_suspended",
-      message: "Account access is suspended pending administrator review.",
-      dashboardUrl: "https://control.example.test/dashboard",
-    });
-    fixture.safeTunnel.heartbeatResults = [() => Promise.reject(suspended)];
+  it.each(accountAccessCases)(
+    "stops a running tunnel when a heartbeat reports %s",
+    async (_description, accessError) => {
+      const fixture = createFixture();
+      fixture.safeTunnel.heartbeatResults = [() => Promise.reject(accessError)];
 
-    await fixture.reconciler.start({});
-    fixture.clock.advance(0);
-    await waitForCondition(() => fixture.runtime.stopCalls === 1);
-    fixture.clock.advance(100_000);
+      await fixture.reconciler.start({});
+      fixture.clock.advance(0);
+      await waitForCondition(() => fixture.runtime.stopCalls === 1);
+      fixture.clock.advance(100_000);
 
-    expect(fixture.runtime.stopCalls).toBe(1);
-    expect(fixture.clock.activeTaskCount()).toBe(0);
-    await expect(fixture.reconciler.status()).resolves.toEqual({
-      state: "stopped",
-      accountAccess: suspended.notice,
-    });
-  });
+      expect(fixture.runtime.stopCalls).toBe(1);
+      expect(fixture.clock.activeTaskCount()).toBe(0);
+      await expect(fixture.reconciler.status()).resolves.toEqual({
+        state: "stopped",
+        accountAccess: accessError.notice,
+      });
+    },
+  );
 
   it.each([
     new SafeTunnelControlPlaneError("authentication_failed", "record_heartbeat"),

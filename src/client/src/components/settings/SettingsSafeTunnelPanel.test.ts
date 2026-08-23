@@ -347,6 +347,35 @@ describe("settings-safe-tunnel-panel", () => {
     expect(root.textContent).not.toContain("approval is no longer valid");
   });
 
+  it("renders permanent deactivation without credential re-approval guidance", async () => {
+    const accountAccess = {
+      status: "account_access_deactivated" as const,
+      message: "Account access is permanently deactivated by the hosted service.",
+      dashboardUrl: "https://api.tunnels.pi-web.dev/dashboard",
+    };
+    vi.spyOn(safeTunnelApi, "status").mockResolvedValue(safeTunnelStatus({
+      accountAccess,
+      desiredState: "enabled",
+      runtimeState: "stopped",
+    }));
+
+    const panel = await renderPanel();
+    const root = requiredShadowRoot(panel);
+    const dashboardLink = [...root.querySelectorAll("a")]
+      .find((link) => link.textContent.trim() === "Open hosted dashboard");
+
+    expect(root.textContent).toContain("Account is permanently deactivated");
+    expect(root.textContent).toContain("This hosted account is permanently deactivated");
+    expect(root.textContent).toContain(accountAccess.message);
+    expect(dashboardLink?.href).toBe(accountAccess.dashboardUrl);
+    expect(buttonByText(root, "Disable Safe Tunnel")).toBeDefined();
+    expect([...root.querySelectorAll("button")].some(
+      (button) => button.textContent.trim() === "Enable Safe Tunnel",
+    )).toBe(false);
+    expect(root.textContent).not.toContain("approval is no longer valid");
+    expect(root.textContent).not.toContain("approve a replacement registration");
+  });
+
   it("does not schedule progress polling after capability gating unmounts the panel", async () => {
     const status = deferred<SafeTunnelStatusResponse>();
     const statusRequest = vi.fn(() => status.promise);

@@ -613,10 +613,14 @@ export function safeTunnelPresentation(
     };
   }
   if (status.runtime.accountAccess !== undefined) {
+    const accountAccess = status.runtime.accountAccess;
+    const deactivated = accountAccess.status === "account_access_deactivated";
     return {
-      action: "enable",
-      description: "Restore account access in the hosted dashboard, then retry Safe Tunnel.",
-      label: accountAccessLabel(status.runtime.accountAccess),
+      action: deactivated ? "disable" : "enable",
+      description: deactivated
+        ? "This hosted account is permanently deactivated. Open the hosted dashboard for details."
+        : "Restore account access in the hosted dashboard, then retry Safe Tunnel.",
+      label: accountAccessLabel(accountAccess),
       tone: "bad",
     };
   }
@@ -684,15 +688,25 @@ function renderAccountAccessNotice(
 }
 
 function accountAccessHeading(notice: SafeTunnelAccountAccessNotice): string {
-  return notice.status === "account_access_payment_required"
-    ? "Account access is required"
-    : "Account access is suspended";
+  switch (notice.status) {
+    case "account_access_payment_required":
+      return "Account access is required";
+    case "account_access_suspended":
+      return "Account access is suspended";
+    case "account_access_deactivated":
+      return "Account is permanently deactivated";
+  }
 }
 
 function accountAccessLabel(notice: SafeTunnelAccountAccessNotice): string {
-  return notice.status === "account_access_payment_required"
-    ? "Payment required"
-    : "Suspended";
+  switch (notice.status) {
+    case "account_access_payment_required":
+      return "Payment required";
+    case "account_access_suspended":
+      return "Suspended";
+    case "account_access_deactivated":
+      return "Account deactivated";
+  }
 }
 
 function operationPhaseLabel(phase: SafeTunnelOperationResponse["phase"]): string {

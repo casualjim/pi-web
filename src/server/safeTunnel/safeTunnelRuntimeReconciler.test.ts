@@ -39,6 +39,11 @@ const accountAccessCases = [
     message: "Account access is suspended pending administrator review.",
     dashboardUrl: "https://control.example.test/dashboard",
   })],
+  ["permanently deactivated access", new SafeTunnelAccountAccessError({
+    status: "account_access_deactivated",
+    message: "Account access is permanently deactivated.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
 ] as const;
 
 describe("SafeTunnelRuntimeReconciler", () => {
@@ -83,6 +88,65 @@ describe("SafeTunnelRuntimeReconciler", () => {
     await waitForCondition(() => fixture.safeTunnel.heartbeatCalls.length === 1);
 
     expect(fixture.safeTunnel.heartbeatCalls).toEqual([{ tunnelStatus: "running" }]);
+  });
+
+  it("rejects an overlapping start before it can supersede the successful heartbeat", async () => {
+    const fixture = createFixture();
+    const deferredStart = createDeferred<SafeTunnelFrpcStartResult>();
+    fixture.runtime.startResult = deferredStart.promise;
+
+    const startupRestoration = fixture.reconciler.start({});
+    await waitForCondition(() => fixture.runtime.startCalls.length === 1);
+    await expect(fixture.reconciler.start({ advancedFrpcPath: "/new/frpc" }))
+      .rejects.toMatchObject({ code: "already_running" });
+
+    deferredStart.resolve({ publicUrl: "https://dev-box.ns.tunnels.pi-web.dev" });
+    await startupRestoration;
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.clock.activeTaskCount() === 1);
+
+    expect(fixture.runtime.startCalls).toEqual([{}]);
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([{ tunnelStatus: "running" }]);
+    expect(fixture.clock.activeTaskCount()).toBe(1);
+    await expect(fixture.reconciler.status()).resolves.toEqual({ state: "running" });
+  });
+
+  it("rejects a late Enable before it can replace restored startup heartbeat ownership", async () => {
+    const fixture = createFixture();
+    fixture.safeTunnel.loaded = registeredEnabledState();
+
+    await fixture.reconciler.startup();
+    await waitForCondition(() => fixture.clock.scheduledDelays.at(-1) === 0);
+    await expect(fixture.reconciler.start({ advancedFrpcPath: "/new/frpc" }))
+      .rejects.toMatchObject({ code: "already_running" });
+
+    fixture.clock.advance(0);
+    await waitForCondition(() => fixture.clock.activeTaskCount() === 1);
+    expect(fixture.runtime.startCalls).toEqual([{}]);
+    expect(fixture.safeTunnel.heartbeatCalls).toEqual([{ tunnelStatus: "running" }]);
+    await expect(fixture.reconciler.status()).resolves.toEqual({ state: "running" });
+  });
+
+  it("keeps the active start's account-access notice after rejecting an overlap", async () => {
+    const fixture = createFixture();
+    const deferredStart = createDeferred<SafeTunnelFrpcStartResult>();
+    const accessError = accountAccessCases[0][1];
+    fixture.runtime.startResult = deferredStart.promise;
+
+    const startupRestoration = fixture.reconciler.start({});
+    const startupRejection = startupRestoration.catch((error: unknown) => error);
+    await waitForCondition(() => fixture.runtime.startCalls.length === 1);
+    await expect(fixture.reconciler.start({}))
+      .rejects.toMatchObject({ code: "already_running" });
+    deferredStart.reject(accessError);
+    expect(await startupRejection).toBe(accessError);
+
+    expect(fixture.runtime.startCalls).toEqual([{}]);
+    expect(fixture.clock.activeTaskCount()).toBe(0);
+    await expect(fixture.reconciler.status()).resolves.toEqual({
+      state: "stopped",
+      accountAccess: accessError.notice,
+    });
   });
 
   it("does not rearm a heartbeat when stop supersedes pending startup", async () => {
@@ -515,14 +579,21 @@ function abortableFake<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
 
 function createDeferred<T>(): {
   readonly promise: Promise<T>;
+  readonly reject: (error: Error) => void;
   readonly resolve: (value: T) => void;
 } {
+  let rejectPromise: ((error: Error) => void) | undefined;
   let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolve) => {
+  const promise = new Promise<T>((resolve, reject) => {
     resolvePromise = resolve;
+    rejectPromise = reject;
   });
   return {
     promise,
+    reject: (error) => {
+      if (rejectPromise === undefined) throw new Error("Deferred promise is not initialized.");
+      rejectPromise(error);
+    },
     resolve: (value) => {
       if (resolvePromise === undefined) throw new Error("Deferred promise is not initialized.");
       resolvePromise(value);

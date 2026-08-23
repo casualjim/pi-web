@@ -104,8 +104,8 @@ describe("registerSafeTunnelRoutes", () => {
       runtime: {
         state: "stopped",
         accountAccess: {
-          status: "account_access_payment_required",
-          message: "Account access is not active. Open the hosted dashboard.",
+          status: "account_access_deactivated",
+          message: "Account access is permanently deactivated. Open the hosted dashboard.",
           dashboardUrl: "https://control.example.test/dashboard",
         },
       },

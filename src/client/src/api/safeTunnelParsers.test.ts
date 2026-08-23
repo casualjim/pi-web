@@ -30,8 +30,8 @@ describe("Safe Tunnel API parsers", () => {
 
   it("parses bounded provider-neutral account-access guidance", () => {
     const accountAccess = {
-      status: "account_access_suspended",
-      message: "Account access is suspended pending administrator review.",
+      status: "account_access_deactivated",
+      message: "Account access is permanently deactivated.",
       dashboardUrl: "https://control.example.test/dashboard",
     };
     const status = statusResponse();

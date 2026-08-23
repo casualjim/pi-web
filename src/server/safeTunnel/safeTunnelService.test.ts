@@ -62,6 +62,11 @@ const accountAccessCases = [
     message: "Account access is suspended.",
     dashboardUrl: "https://control.example.test/dashboard",
   })],
+  ["permanently deactivated access", new SafeTunnelAccountAccessError({
+    status: "account_access_deactivated",
+    message: "Account access is permanently deactivated.",
+    dashboardUrl: "https://control.example.test/dashboard",
+  })],
 ] as const;
 
 const tempDirectories: string[] = [];
@@ -394,11 +399,16 @@ describe("SafeTunnelService", () => {
     "preserves active machine credentials when config and heartbeat report %s",
     async (_description, accessError) => {
       const controlPlane = new FakeControlPlane();
-      const storage = new MemoryStateStorage({ ...createDefaultSafeTunnelState(), machine });
+      const storage = new MemoryStateStorage({
+        ...createDefaultSafeTunnelState(),
+        desiredState: "enabled",
+        machine,
+      });
       const service = createService(controlPlane, storage);
       controlPlane.tunnelConfigError = accessError;
 
       await expect(service.getTunnelConfig()).rejects.toBe(accessError);
+      expect(storage.state.desiredState).toBe("enabled");
       expect(storage.state.machine?.credentialStatus).toBe("active");
       expect(storage.saves).toEqual([]);
 
@@ -407,6 +417,7 @@ describe("SafeTunnelService", () => {
       await expect(service.recordHeartbeat({ tunnelStatus: "running" })).rejects.toBe(
         accessError,
       );
+      expect(storage.state.desiredState).toBe("enabled");
       expect(storage.state.machine?.credentialStatus).toBe("active");
       expect(storage.saves).toEqual([]);
     },

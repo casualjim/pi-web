@@ -24,6 +24,7 @@ const maximumFrpcConfigCharacters = 32_000;
 const maximumDiagnosticCharacters = 2_000;
 const accountAccessPaymentRequiredCode = "account_access_payment_required";
 const accountAccessSuspendedCode = "account_access_suspended";
+const accountAccessDeactivatedCode = "account_access_deactivated";
 
 export type SafeTunnelControlPlaneErrorCode =
   | "authentication_failed"
@@ -476,6 +477,11 @@ function parseAccountAccessError(
       throw new SafeTunnelControlPlaneError("invalid_response", operation);
     }
     status = accountAccessSuspendedCode;
+  } else if (code === accountAccessDeactivatedCode) {
+    if (responseStatus !== 403) {
+      throw new SafeTunnelControlPlaneError("invalid_response", operation);
+    }
+    status = accountAccessDeactivatedCode;
   } else {
     return undefined;
   }

@@ -247,6 +247,40 @@ describe("HttpSafeTunnelControlPlane", () => {
     });
   });
 
+  it("accepts permanent deactivation only as a strict provider-neutral 403", async () => {
+    const notice = {
+      code: "account_access_deactivated",
+      message: "Account access is permanently deactivated.",
+      dashboardUrl: "/dashboard",
+    };
+    const transport = sequencedFetch([
+      jsonResponse(403, { error: notice }),
+      jsonResponse(403, { error: notice }),
+      jsonResponse(402, { error: notice }),
+    ]);
+    const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
+    const credentials = {
+      controlApiBaseUrl,
+      machineId: "machine_123",
+      machineToken,
+    };
+    const expectedNotice = {
+      status: "account_access_deactivated",
+      message: notice.message,
+      dashboardUrl: `${controlApiBaseUrl}/dashboard`,
+    };
+
+    await expect(controlPlane.getMachineTunnelConfig(credentials)).rejects.toMatchObject({
+      notice: expectedNotice,
+    });
+    await expect(controlPlane.recordMachineHeartbeat(credentials, {
+      clientVersion: safeTunnelClientVersion,
+      tunnelStatus: "running",
+    })).rejects.toMatchObject({ notice: expectedNotice });
+    await expect(controlPlane.getMachineTunnelConfig(credentials))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("rejects account-access guidance that exceeds the URL bound after canonicalization", async () => {
     const expandingRelativeUrl = `/${"é".repeat(400)}`;
     const expandingAbsoluteUrl = `https://accounts.example.test/${"é".repeat(400)}`;
@@ -319,6 +353,13 @@ describe("HttpSafeTunnelControlPlane", () => {
           dashboardUrl: "javascript:alert(1)",
         },
       }),
+      jsonResponse(403, {
+        error: {
+          code: "account_access_deactivated",
+          message: " ",
+          dashboardUrl: "/dashboard",
+        },
+      }),
     ]);
     const controlPlane = new HttpSafeTunnelControlPlane({ fetch: transport.fetch });
     const credentials = {
@@ -334,6 +375,8 @@ describe("HttpSafeTunnelControlPlane", () => {
       clientVersion: safeTunnelClientVersion,
       tunnelStatus: "running",
     })).rejects.toMatchObject({ code: "invalid_response" });
+    await expect(controlPlane.getMachineTunnelConfig(credentials))
+      .rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("rejects malformed response shape, insecure public URLs, and oversized bodies", async () => {

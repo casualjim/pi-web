@@ -81,6 +81,7 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
   private lifecycleDiagnostic: SafeTunnelLifecycleDiagnostic | undefined;
   private readonly policy: NormalizedSafeTunnelRuntimeReconcilerPolicy;
   private shutdownInFlight: Promise<void> | undefined;
+  private startInFlight: Promise<SafeTunnelFrpcStartResult> | undefined;
   private startupInFlight: Promise<void> | undefined;
 
   constructor(private readonly dependencies: SafeTunnelRuntimeReconcilerDependencies) {
@@ -93,8 +94,26 @@ export class SafeTunnelRuntimeReconciler implements SafeTunnelReconciledFrpcRunt
     return this.startupInFlight;
   }
 
-  async start(input: SafeTunnelFrpcStartInput): Promise<SafeTunnelFrpcStartResult> {
-    if (this.disposed) throw new SafeTunnelFrpcSupervisorError("supervisor_shutdown");
+  start(input: SafeTunnelFrpcStartInput): Promise<SafeTunnelFrpcStartResult> {
+    if (this.disposed) {
+      return Promise.reject(new SafeTunnelFrpcSupervisorError("supervisor_shutdown"));
+    }
+    if (this.startInFlight !== undefined || this.active) {
+      return Promise.reject(new SafeTunnelFrpcSupervisorError("already_running"));
+    }
+
+    const start = this.startRuntime(input);
+    this.startInFlight = start;
+    const clear = (): void => {
+      if (this.startInFlight === start) this.startInFlight = undefined;
+    };
+    void start.then(clear, clear);
+    return start;
+  }
+
+  private async startRuntime(
+    input: SafeTunnelFrpcStartInput,
+  ): Promise<SafeTunnelFrpcStartResult> {
     const generation = this.beginHeartbeatSession(true);
     await this.waitForHeartbeat();
     if (!this.isHeartbeatCurrent(generation)) {

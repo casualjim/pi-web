@@ -159,7 +159,8 @@ function requireSafeTunnelAccountAccessStatus(
 ): SafeTunnelAccountAccessStatus {
   const value = requireString(record, key);
   if (value !== "account_access_payment_required"
-    && value !== "account_access_suspended") {
+    && value !== "account_access_suspended"
+    && value !== "account_access_deactivated") {
     throw new Error(`Expected Safe Tunnel account access status field: ${key}`);
   }
   return value;

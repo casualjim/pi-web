@@ -250,8 +250,8 @@ describe("DefaultSafeTunnelBridgeService", () => {
   it("passes only bounded provider-neutral account-access guidance to the browser", async () => {
     const fixture = createFixture(registeredState);
     const notice = {
-      status: "account_access_payment_required" as const,
-      message: "Account access is not active. Open the hosted dashboard.",
+      status: "account_access_deactivated" as const,
+      message: "Account access is permanently deactivated. Open the hosted dashboard.",
       dashboardUrl: "https://control.example.test/dashboard",
     };
     fixture.runtime.currentStatus = { state: "stopped", accountAccess: notice };

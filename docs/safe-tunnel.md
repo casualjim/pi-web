@@ -61,6 +61,10 @@ After opting in and restarting:
 4. If registration is needed, open the displayed provider approval page and follow its instructions. The panel polls one operation through preparation, approval, registration, and startup. Private machine credentials stay in web/API and its local state; the browser receives only approval fields and PI WEB-authored progress.
 5. When startup succeeds, the panel shows the public URL and running status.
 
+Hosted relay compatibility is intentionally fail closed. PI WEB accepts only a provider configuration that selects a DNS relay hostname, secure WebSocket (`wss`) on port `443`, relay TLS, one exact HTTP proxy and hostname, the empty frp user, and the saved machine credential metadata. PI WEB preserves WSS while adding its own public-root bundle, relay certificate name, and private local target. It rejects an omitted protocol, direct TCP, plaintext WebSocket, alternate ports, provider-selected trust settings, and extra routes instead of falling back to a direct relay.
+
+This tightens the earlier public-beta contract. When upgrading an existing beta installation, update the hosted or self-hosted Control API and PI WEB together, restart the web/API process, and choose **Enable Safe Tunnel** again if needed. An old client rejects the new WSS field; an updated client rejects old raw-TCP or protocol-omitting configuration. Temporary unavailability is expected during a mismatched rollout, and no `sessiond` restart is required.
+
 PI WEB reuses a valid saved registration. If a heartbeat reports that the Control API rejected or revoked its credential, PI WEB marks that registration rejected, stops its owned child, and shows a fixed approval-required status. The next Enable starts a replacement approval flow. If rejection is first discovered while fetching tunnel configuration, Enable fails and the saved registration is marked rejected; choose Enable again to start replacement approval.
 
 A payment-required, suspended, or permanently deactivated account response is different from a rejected machine credential. At tunnel configuration or heartbeat for an existing registration, PI WEB preserves that registration and credential, stops or does not start its owned tunnel, and displays the Control API's bounded provider-neutral explanation with a link to the hosted dashboard. For payment-required or suspended access, resolve the account state there and then choose **Enable Safe Tunnel** to retry with the existing registration. Permanent deactivation is shown explicitly and does not offer re-approval or imply that Enable can restore the account. An account denial during initial machine registration occurs before a machine credential exists; after recoverable access is restored, a new Enable attempt may require fresh owner approval.
@@ -105,7 +109,7 @@ PI WEB owns these boundaries:
 - **Ingress authentication remains an operator requirement.** Tunnel transport is not evidence that the public endpoint authenticates users.
 - **Browser routes are gateway-local and host-bound.** Reads require a trusted `Host`; mutations also require the explicit JSON marker and an independently trusted `Origin`.
 - **Control API credentials use protected transport.** Production and self-hosted Control API URLs must use HTTPS. Plain HTTP is accepted only for literal loopback development endpoints in `127.0.0.0/8` or `[::1]`; names such as `localhost` are not exceptions.
-- **The tunnel is structurally constrained.** PI WEB accepts one expected HTTP proxy, requires the saved public origin and hostname, regenerates the local target from PI WEB-owned desired state, requires relay TLS, and rejects extra proxies or provider-selected local targets.
+- **The tunnel is structurally constrained.** PI WEB accepts one expected HTTP proxy and canonical hostname, requires a DNS relay hostname with WSS and TLS on port `443`, preserves the empty frp user and exact saved-machine metadata, regenerates the local target from PI WEB-owned desired state, and rejects extra routes or provider-selected local targets, relay identity, and trust roots.
 - **External requests are bounded and cancellable.** Control API and managed-artifact requests have response-size limits and timeouts. Disable and shutdown cancel work at their owned boundaries.
 - **Known credentials stay private.** PI WEB omits the credential fields it holds from browser responses and stores durable credentials in its private data directory.
 
@@ -134,7 +138,7 @@ The advanced form keeps inferred identity and fixed production defaults blank. W
 
 | Field | Behavior |
 | --- | --- |
-| Control API URL | Uses production by default. A self-hosted URL must satisfy the HTTPS/literal-loopback policy and contain no credentials, query, or fragment. |
+| Control API URL | Uses production by default. A self-hosted URL must satisfy the HTTPS/literal-loopback policy and contain no credentials, query, or fragment. Its tunnel response must still provide the exact WSS-on-`443` relay contract; raw TCP and plaintext WebSocket are not self-hosted fallbacks. |
 | Machine name / slug | Replaces inferred identity. The slug must be one lowercase DNS label. |
 | Local PI WEB URL | Replaces the inferred [browser-entrypoint target](#local-target-and-the-browser-entrypoint). It must be an `http://` origin with an explicit port and no credentials, path, query, or fragment. Point it only at the intended PI WEB listener. |
 | `frpc` path | Uses the absolute executable directly instead of managed acquisition. |

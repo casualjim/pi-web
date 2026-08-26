@@ -41,6 +41,8 @@ describe("SafeTunnelFrpcSupervisor", () => {
 
     expect(result).toEqual({ publicUrl });
     expect(fixture.files.writes).toEqual([fixture.configProvider.config.frpcConfigToml]);
+    expect(fixture.files.writes[0]).toContain("serverPort = 443");
+    expect(fixture.files.writes[0]).toContain('protocol = "wss"');
     expect(fixture.launcher.requests).toEqual([{ configPath, frpcPath: managedPath }]);
     expect(await fixture.supervisor.status()).toEqual({ state: "running" });
   });

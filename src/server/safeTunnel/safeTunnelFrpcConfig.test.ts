@@ -14,6 +14,7 @@ import {
   hostedRelayAuthToken,
   hostedRelayServerAddr,
   hostedRelayServerPort,
+  hostedRelayTransportProtocol,
 } from "./safeTunnelHostedFixtures.testSupport.js";
 
 const frpcToken = hostedRelayAuthToken;
@@ -55,8 +56,15 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
   {
     field: "serverPort",
     frpcConfigToml: providerConfig.replace(
-      "serverPort = 7000",
+      `serverPort = ${hostedRelayServerPort.toString()}`,
       `serverPort = ${JSON.stringify(templateAction)}`,
+    ),
+  },
+  {
+    field: "transport.protocol",
+    frpcConfigToml: providerConfig.replace(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+      `transport.protocol = ${JSON.stringify(templateAction)}`,
     ),
   },
   {
@@ -122,11 +130,15 @@ const templateFieldCases: readonly TemplateFieldCase[] = [
 describe("hosted provider fixture", () => {
   it("keeps the exact hosted serialization shape", () => {
     // Drift guard for safeTunnelHostedFixtures.testSupport.ts: the hosted
-    // serializer emits root keys first (including the dotted machine-token
-    // metadata and transport.tls.enable), then the [auth] table, then the
-    // single [[proxies]] element, with one trailing newline.
+    // serializer emits root keys first (including the dotted WSS transport,
+    // machine-token metadata, and transport.tls.enable), then the [auth]
+    // table, then the single [[proxies]] element, with one trailing newline.
     const [rootSection] = providerConfig.split("\n[", 1);
     expect(rootSection).toContain(`serverAddr = ${JSON.stringify(hostedRelayServerAddr)}`);
+    expect(rootSection).toContain(`serverPort = ${hostedRelayServerPort.toString()}`);
+    expect(rootSection).toContain(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+    );
     expect(rootSection).toContain('user = ""');
     expect(rootSection).toContain(
       `metadatas.pi_web_machine_token = ${JSON.stringify(machineToken)}`,
@@ -154,6 +166,7 @@ describe("prepareSafeTunnelFrpcConfig", () => {
       metadatas: { pi_web_machine_token: machineToken },
       auth: { method: "token", token: frpcToken },
       transport: {
+        protocol: hostedRelayTransportProtocol,
         tls: {
           enable: true,
           serverName: hostedRelayServerAddr,
@@ -308,7 +321,35 @@ describe("prepareSafeTunnelFrpcConfig", () => {
       `customDomains = [${JSON.stringify(hostedPublicHostname)}]`,
       `customDomains = [${JSON.stringify(hostedPublicHostname)}, "admin.example.test"]`,
     )],
-    ["plaintext relay transport", providerConfig.replace(
+    ["direct relay IP", providerConfig.replace(
+      JSON.stringify(hostedRelayServerAddr),
+      '"203.0.113.20"',
+    )],
+    ["alternate relay port", providerConfig.replace(
+      `serverPort = ${hostedRelayServerPort.toString()}`,
+      "serverPort = 7000",
+    )],
+    ["missing relay protocol", providerConfig.replace(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}\n`,
+      "",
+    )],
+    ["direct TCP relay protocol", providerConfig.replace(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+      'transport.protocol = "tcp"',
+    )],
+    ["plaintext WebSocket relay protocol", providerConfig.replace(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+      'transport.protocol = "websocket"',
+    )],
+    ["extra transport field", providerConfig.replace(
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+      `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}\ntransport.dialServerTimeout = 10`,
+    )],
+    ["missing relay TLS requirement", providerConfig.replace(
+      "transport.tls.enable = true\n",
+      "",
+    )],
+    ["plaintext relay TLS", providerConfig.replace(
       "transport.tls.enable = true",
       "transport.tls.enable = false",
     )],
@@ -365,6 +406,13 @@ describe("prepareSafeTunnelFrpcConfig", () => {
         'serverName = "attacker.example"',
       ),
       generated.replace(`trustedCaFile = ${JSON.stringify(trustedCaFile)}\n`, ""),
+      generated.replace(`serverPort = ${hostedRelayServerPort.toString()}`, "serverPort = 7000"),
+      generated.replace(
+        `protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
+        'protocol = "tcp"',
+      ),
+      generated.replace(`protocol = ${JSON.stringify(hostedRelayTransportProtocol)}\n`, ""),
+      generated.replace('enable = true\n', ""),
       generated.replace('user = ""\n', ""),
       generated.replace(machineToken, "piwt_mtok_v1_other_machine"),
     ]) {

@@ -4,6 +4,8 @@ import { parse, stringify, type TomlTable } from "smol-toml";
 import { normalizeSafeTunnelLocalPiWebUrl } from "./safeTunnelState.js";
 
 const maximumFrpcConfigCharacters = 32_000;
+const hostedRelayServerPort = 443;
+const hostedRelayTransportProtocol = "wss";
 const minimumFrpcSecretCharacters = 32;
 const maximumFrpcSecretCharacters = 4_096;
 const maximumFrpcNameCharacters = 253;
@@ -24,7 +26,7 @@ const rootKeys = new Set([
 ]);
 const authKeys = new Set(["method", "token"]);
 const machineMetadataKeys = new Set([frpcMachineTokenMetadataKey]);
-const transportKeys = new Set(["tls"]);
+const transportKeys = new Set(["protocol", "tls"]);
 const providerTlsKeys = new Set(["enable"]);
 const preparedTlsKeys = new Set(["enable", "serverName", "trustedCaFile"]);
 const proxyKeys = new Set([
@@ -78,8 +80,8 @@ export function prepareSafeTunnelFrpcConfig(
   }
 
   assertOnlyKeys(parsed, rootKeys);
-  const serverAddr = requireServerAddress(parsed["serverAddr"]);
-  const serverPort = requirePort(parsed["serverPort"]);
+  const serverAddr = requireHostname(parsed["serverAddr"]);
+  const serverPort = requireHostedRelayPort(parsed["serverPort"]);
   requireHostedMachineIdentity(parsed, trust.machineToken);
   const auth = requireTable(parsed["auth"]);
   assertOnlyKeys(auth, authKeys);
@@ -89,20 +91,15 @@ export function prepareSafeTunnelFrpcConfig(
   if (authMethod !== "token") throw invalidConfig();
   const authToken = requireFrpcCredential(auth["token"]);
 
-  const transport = parsed["transport"] === undefined
-    ? undefined
-    : requireTable(parsed["transport"]);
-  if (transport !== undefined) {
-    assertOnlyKeys(transport, transportKeys);
-    const tls = transport["tls"] === undefined ? undefined : requireTable(transport["tls"]);
-    if (tls !== undefined) {
-      // The provider can require TLS but cannot choose a local trust path or a
-      // certificate identity. PI WEB binds those below to its own CA bundle
-      // and the validated relay endpoint.
-      assertOnlyKeys(tls, providerTlsKeys);
-      if (tls["enable"] !== undefined && tls["enable"] !== true) throw invalidConfig();
-    }
-  }
+  const transport = requireTable(parsed["transport"]);
+  assertOnlyKeys(transport, transportKeys);
+  const transportProtocol = requireHostedRelayProtocol(transport["protocol"]);
+  const tls = requireTable(transport["tls"]);
+  // The provider must require TLS but cannot choose a local trust path or a
+  // certificate identity. PI WEB binds those below to its own CA bundle and
+  // the validated relay endpoint.
+  assertOnlyKeys(tls, providerTlsKeys);
+  if (tls["enable"] !== true) throw invalidConfig();
 
   const proxies = parsed["proxies"];
   if (!Array.isArray(proxies) || proxies.length !== 1) throw invalidConfig();
@@ -132,6 +129,7 @@ export function prepareSafeTunnelFrpcConfig(
       token: authToken,
     },
     transport: {
+      protocol: transportProtocol,
       tls: {
         enable: true,
         serverName: serverAddr,
@@ -169,8 +167,8 @@ export function validateSafeTunnelFrpcConfig(
   }
 
   assertOnlyKeys(parsed, rootKeys);
-  const serverAddr = requireServerAddress(parsed["serverAddr"]);
-  requirePort(parsed["serverPort"]);
+  const serverAddr = requireHostname(parsed["serverAddr"]);
+  requireHostedRelayPort(parsed["serverPort"]);
   // Re-run the hosted machine-identity checks on the exact pre-launch TOML.
   requireHostedMachineIdentity(parsed, trust.machineToken);
 
@@ -181,6 +179,7 @@ export function validateSafeTunnelFrpcConfig(
 
   const transport = requireTable(parsed["transport"]);
   assertOnlyKeys(transport, transportKeys);
+  requireHostedRelayProtocol(transport["protocol"]);
   const tls = requireTable(transport["tls"]);
   assertOnlyKeys(tls, preparedTlsKeys);
   const serverName = requireServerAddress(tls["serverName"]);
@@ -249,7 +248,7 @@ function requireServerAddress(value: unknown): string {
 
 function requireHostname(value: unknown): string {
   const source = requireBoundedString(value, maximumFrpcNameCharacters);
-  if (!isDnsHostname(source)) throw invalidConfig();
+  if (isIP(source) !== 0 || !isDnsHostname(source)) throw invalidConfig();
   return source;
 }
 
@@ -267,6 +266,16 @@ function requirePort(value: unknown): number {
     || value < 1
     || value > 65_535) throw invalidConfig();
   return value;
+}
+
+function requireHostedRelayPort(value: unknown): typeof hostedRelayServerPort {
+  if (requirePort(value) !== hostedRelayServerPort) throw invalidConfig();
+  return hostedRelayServerPort;
+}
+
+function requireHostedRelayProtocol(value: unknown): typeof hostedRelayTransportProtocol {
+  if (value !== hostedRelayTransportProtocol) throw invalidConfig();
+  return hostedRelayTransportProtocol;
 }
 
 function requireBoundedString(value: unknown, maximumCharacters: number): string {

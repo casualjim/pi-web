@@ -361,6 +361,8 @@ describe("SafeTunnelService", () => {
       localPiWebUrl,
       publicUrl,
     });
+    expect(config.frpcConfigToml).toContain("serverPort = 443");
+    expect(config.frpcConfigToml).toContain('protocol = "wss"');
     expect(config.frpcConfigToml).toContain(`trustedCaFile = "${trustedCaPath}"`);
     expect(config.frpcConfigToml).toContain("localIP = \"127.0.0.1\"");
     expect(config.frpcConfigToml).toContain("localPort = 8504");
@@ -479,6 +481,8 @@ describe("applySafeTunnelLocalTarget", () => {
       machineToken,
     );
 
+    expect(prepared.frpcConfigToml).toContain("serverPort = 443");
+    expect(prepared.frpcConfigToml).toContain('protocol = "wss"');
     expect(prepared.frpcConfigToml).toContain("localPort = 8600");
     expect(prepared.frpcConfigToml).toContain(`trustedCaFile = "${trustedCaPath}"`);
     expect(prepared.frpcConfigToml).not.toContain("localPort = 8504");

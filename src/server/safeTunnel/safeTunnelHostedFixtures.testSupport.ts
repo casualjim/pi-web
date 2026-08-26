@@ -4,8 +4,9 @@
  * `hostedFrpcConfigToml` mirrors the hosted Control API serializer
  * `serializeFrpcConfigToml` (pi-web-tunnels
  * `apps/control-api/src/domain/frp-tunnel-config.ts`) byte-for-byte: key
- * order, the dotted `metadatas.pi_web_machine_token` and
- * `transport.tls.enable` root keys, the `[auth]` table, blank lines, and
+ * order, the dotted `transport.protocol`,
+ * `metadatas.pi_web_machine_token`, and `transport.tls.enable` root keys,
+ * the `[auth]` table, blank lines, and
  * JSON string quoting all come from that serializer, as does the
  * `pi-web-<namespace>-<slug>` proxy name and the
  * `<slug>.<namespace>.<base-domain>` custom domain. Keep this fixture in sync
@@ -26,12 +27,14 @@ export const hostedPublicHostname = "my-dev-box.userns01.tunnels.pi-web.dev";
 export const hostedPublicUrl = `https://${hostedPublicHostname}`;
 export const hostedLocalPiWebUrl = "http://127.0.0.1:8504";
 export const hostedRelayServerAddr = "frps.staging.tunnels.pi-web.dev";
-export const hostedRelayServerPort = 7000;
+export const hostedRelayServerPort = 443;
+export const hostedRelayTransportProtocol = "wss";
 
 /** Exact `serializeFrpcConfigToml` output for the fixture identities above. */
 export const hostedFrpcConfigToml = [
   `serverAddr = ${JSON.stringify(hostedRelayServerAddr)}`,
   `serverPort = ${hostedRelayServerPort.toString()}`,
+  `transport.protocol = ${JSON.stringify(hostedRelayTransportProtocol)}`,
   'user = ""',
   `metadatas.pi_web_machine_token = ${JSON.stringify(hostedMachineToken)}`,
   "transport.tls.enable = true",

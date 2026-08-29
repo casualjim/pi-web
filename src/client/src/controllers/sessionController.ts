@@ -1,11 +1,13 @@
-import { api as defaultApi, type AskUserCloseResponse, type AskUserSubmission, type CommandResult, type ExtensionDialogAnswer, type ExtensionDialogCloseReason, type ExtensionDialogCloseResponse, type ExtensionDialogOutcome, type PendingAskUser, type PendingExtensionDialog, type PromptAttachment, type QueuedSessionMessage, type SessionActivity, type SessionBulkFailure, type SessionCleanupExecuteResponse, type SessionInfo, type SessionModelCatalogEntry, type SessionRef, type SessionStatus, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type Workspace } from "../api";
+import { api as defaultApi, type AskUserCloseResponse, type AskUserSubmission, type CommandResult, type ExtensionDialogAnswer, type ExtensionDialogCloseReason, type ExtensionDialogCloseResponse, type ExtensionDialogOutcome, type MessagePage, type PendingAskUser, type PendingExtensionDialog, type PromptAttachment, type QueuedSessionMessage, type SessionActivity, type SessionBulkFailure, type SessionCleanupExecuteResponse, type SessionInfo, type SessionModelCatalogEntry, type SessionModelScopeMode, type SessionRef, type SessionStatus, type SessionStreamSnapshot, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type Workspace } from "../api";
 import type { AppState, ClosedExtensionDialog } from "../appState";
 import { forgetCachedNewSession, isCachedNewSessionInfo, markCachedNewSessionInfo, mergeCachedNewSessions, rememberCachedNewSession, stripCachedNewSessionMarker } from "../cachedNewSessions";
 import { textMessage } from "../chatMessages";
 import { machineSessionKey } from "../machineKeys";
 import { clearDraft, moveDraft, saveDraft } from "../promptDraftStorage";
+import { clearStagedAttachments, moveStagedAttachments } from "../promptAttachmentStaging";
 import { clearAskDraft } from "../askDrafts";
 import { ChatTranscriptStore } from "../chatTranscriptStore";
+import { isHistoryTailSlice } from "../chatHistoryCache";
 import { isShellInput } from "../inputModes";
 import { fileCompletionInsertText } from "../promptCompletions";
 import { SessionSocket, type GlobalSessionEvent, type SessionUiEvent } from "../sessionSocket";
@@ -55,6 +57,7 @@ export interface SessionControllerDependencies {
   notifications?: SessionNotificationSessionBridge;
   replacePromptEditorText?: (replacement: PromptEditorTextReplacement) => void | Promise<void>;
   onSelectedSessionReady?: (selection: SelectedSessionReady) => void;
+  onModelScopeChanged?: (revision: number) => void;
 }
 
 interface BulkSessionMutationResult {
@@ -107,6 +110,7 @@ export class SessionController {
   private readonly notifications: SessionNotificationSessionBridge | undefined;
   private readonly replacePromptEditorText: SessionControllerDependencies["replacePromptEditorText"];
   private readonly onSelectedSessionReady: SessionControllerDependencies["onSelectedSessionReady"];
+  private readonly onModelScopeChanged: SessionControllerDependencies["onModelScopeChanged"];
   private selectionSeq = 0;
   private disposed = false;
   // Join-time stream watermark for the selected session. `seq` is the
@@ -115,6 +119,13 @@ export class SessionController {
   // in the committed history + seeded partial and must be dropped, so every event
   // applies exactly once. Reset whenever the selection changes.
   private streamWatermark: { sessionId: string; seq: number } | undefined;
+  // Fingerprint of the last applied selected-session refresh, bound to that
+  // selection: a poll whose page, status, and partial all match what is already
+  // held skips the redundant merge, sessionStorage rewrite, and render. The
+  // `selectionSeq` check retires it on any (re)selection, so a join always runs
+  // the full path — it must re-seed the partial and the stream watermark onto
+  // the fresh state baseline.
+  private lastAppliedSelectedRefresh: { selectionSeq: number; partialJson: string } | undefined;
   private pendingTranscriptEvents: SessionUiEvent[] = [];
   private pendingStatusBySession = new Map<string, SessionStatus>();
   private pendingActivityBySession = new Map<string, SessionActivity>();
@@ -138,6 +149,7 @@ export class SessionController {
     this.notifications = deps.notifications;
     this.replacePromptEditorText = deps.replacePromptEditorText;
     this.onSelectedSessionReady = deps.onSelectedSessionReady;
+    this.onModelScopeChanged = deps.onModelScopeChanged;
   }
 
   applyGlobalEvent(event: GlobalSessionEvent): void {
@@ -145,6 +157,7 @@ export class SessionController {
     else if (event.type === "activity.update") this.queueActivityUpdate(event.activity);
     else if (event.type === "session.created") this.applyCreatedSession(event.session);
     else if (event.type === "session.name") this.applySessionName(event.sessionId, event.name);
+    else if (event.type === "models.changed") this.onModelScopeChanged?.(event.revision);
     else if (event.type === "session.startup") this.queueStartupProgress(event);
   }
 
@@ -737,6 +750,7 @@ export class SessionController {
     }
     forgetCachedNewSession(session.id, selectedMachineId(this.getState()));
     clearDraft(this.sessionCacheKey(session.id));
+    clearStagedAttachments(this.sessionCacheKey(session.id));
     const state = this.getState();
     const sessions = state.sessions.filter((candidate) => candidate.id !== session.id);
     this.setState({
@@ -827,6 +841,19 @@ export class SessionController {
     if (!session || session.archived === true) return undefined;
     try {
       return (await this.api.setModelEnabled(session, provider, modelId, enabled, selectedMachineId(this.getState()))).models;
+    } catch (error) {
+      this.setState({ error: String(error) });
+      return undefined;
+    }
+  }
+
+  /** Atomically switch between an unrestricted catalog and the current model alone. */
+  async setModelScope(mode: SessionModelScopeMode): Promise<SessionModelCatalogEntry[] | undefined> {
+    const state = this.getState();
+    const session = state.selectedSession;
+    if (!session || session.archived === true) return undefined;
+    try {
+      return (await this.api.setModelScope(session, mode, selectedMachineId(state))).models;
     } catch (error) {
       this.setState({ error: String(error) });
       return undefined;
@@ -1035,7 +1062,13 @@ export class SessionController {
     }
   }
 
-  refreshSelectedSession(sessionId = this.getState().selectedSession?.id): Promise<void> {
+  /**
+   * Refresh the selected session's transcript, status, and in-flight partial.
+   * `options.silent` marks a best-effort background trigger (the poll timer):
+   * a failure is logged instead of churning the global error state every tick.
+   * User- and selection-triggered refreshes keep reporting errors.
+   */
+  refreshSelectedSession(sessionId = this.getState().selectedSession?.id, options?: { silent?: boolean }): Promise<void> {
     const session = this.getState().selectedSession;
     if (sessionId === undefined || session?.id !== sessionId || session.archived === true || isClientPendingStartSessionInfo(session)) return Promise.resolve();
     const target: SelectedSessionRefreshTarget = {
@@ -1044,6 +1077,10 @@ export class SessionController {
       selectionSeq: this.selectionSeq,
     };
     return this.requestSelectedSessionRefresh(target).catch((error: unknown) => {
+      if (options?.silent === true) {
+        console.warn("Selected session background refresh failed", error);
+        return;
+      }
       if (this.isCurrentRefreshTarget(target)) this.setState({ error: String(error) });
     });
   }
@@ -1060,6 +1097,7 @@ export class SessionController {
         this.notifications?.refreshSelectedSession(target.session, target.machineId) ?? Promise.resolve(),
       ]);
       if (!this.isCurrentRefreshTarget(target)) return;
+      if (this.isUnchangedSelectedRefresh(target, key, page, status, streamSnapshot)) return;
       // Seed the in-flight partial assistant message on top of committed history
       // and record the snapshot's sequence as the watermark. Buffered/live events
       // with `seq <= watermark` are already reflected here and are dropped by
@@ -1076,7 +1114,28 @@ export class SessionController {
         activity: this.getState().sessionActivities[target.session.id],
       });
       this.applyStatus(status);
+      this.lastAppliedSelectedRefresh = { selectionSeq: target.selectionSeq, partialJson: selectedRefreshPartialJson(streamSnapshot) };
     });
+  }
+
+  /**
+   * A selected-session refresh is redundant when everything it would apply is
+   * already held: the page is exactly the cached history tail, the status
+   * matches the applied status, and the in-flight partial is unchanged since
+   * the last applied refresh of this selection. The stream watermark is
+   * deliberately not advanced on a skip: the gate says nothing about frames
+   * outside page/status/partial (e.g. activity), so those events must remain
+   * applicable, never droppable as "already reflected".
+   */
+  private isUnchangedSelectedRefresh(target: SelectedSessionRefreshTarget, key: string, page: MessagePage, status: SessionStatus, streamSnapshot: SessionStreamSnapshot): boolean {
+    const last = this.lastAppliedSelectedRefresh;
+    if (last?.selectionSeq !== target.selectionSeq) return false;
+    if (selectedRefreshPartialJson(streamSnapshot) !== last.partialJson) return false;
+    if (!isHistoryTailSlice(this.transcripts.rawHistoryPage(key), page)) return false;
+    if (JSON.stringify(status) !== JSON.stringify(this.getState().status)) return false;
+    // applyStatus has one effect even for identical input: it clears a stale
+    // active activity. A tick that would clear is not redundant.
+    return this.getState().sessionActivities[status.sessionId]?.phase !== "active" || isSessionActive(status);
   }
 
   private isCurrentRefreshTarget(target: SelectedSessionRefreshTarget): boolean {
@@ -1194,6 +1253,7 @@ export class SessionController {
     const releasedCreatedSessions = this.takeSuppressedCreatedSessionsFor(pending.cwd, pending.machineId, session.id);
     if (pending.discarded) {
       clearDraft(machineSessionKey(pending.machineId, tempId));
+      clearStagedAttachments(machineSessionKey(pending.machineId, tempId));
       this.setState({ clientQueuedSessionMessages: omitKey(this.getState().clientQueuedSessionMessages, tempId) });
       this.applyReleasedCreatedSessions(releasedCreatedSessions, pending.machineId);
       void this.api.stop(session, pending.machineId).catch(() => {
@@ -1204,6 +1264,7 @@ export class SessionController {
 
     rememberCachedNewSession(session, pending.machineId);
     moveDraft(machineSessionKey(pending.machineId, tempId), machineSessionKey(pending.machineId, session.id));
+    moveStagedAttachments(machineSessionKey(pending.machineId, tempId), machineSessionKey(pending.machineId, session.id));
     const cachedSession = markCachedNewSessionInfo(session, pending.machineId);
     if (!this.isCurrentPendingStart(pending)) {
       this.setState({ clientQueuedSessionMessages: omitKey(this.getState().clientQueuedSessionMessages, tempId) });
@@ -1310,6 +1371,7 @@ export class SessionController {
       const replacement = await this.api.startSession(session.cwd, machineId);
       rememberCachedNewSession(replacement, machineId);
       moveDraft(this.sessionCacheKey(session.id), this.sessionCacheKey(replacement.id));
+      moveStagedAttachments(this.sessionCacheKey(session.id), this.sessionCacheKey(replacement.id));
       forgetCachedNewSession(session.id, machineId);
       const cachedReplacement = markCachedNewSessionInfo(replacement, machineId);
       this.setState({ sessions: [cachedReplacement, ...this.getState().sessions.filter((candidate) => candidate.id !== session.id)], error: "" });
@@ -1695,6 +1757,10 @@ export class SessionController {
     if (watermark === undefined || watermark.sessionId !== this.getState().selectedSession?.id) return false;
     return event.seq !== undefined && event.seq <= watermark.seq;
   }
+}
+
+function selectedRefreshPartialJson(snapshot: SessionStreamSnapshot): string {
+  return JSON.stringify(snapshot.partial ?? null);
 }
 
 function omitSessionActivity(activities: Record<string, SessionActivity>, sessionId: string): Record<string, SessionActivity> {

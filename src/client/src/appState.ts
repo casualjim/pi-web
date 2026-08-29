@@ -64,7 +64,7 @@ export interface AppState {
   workspaceDeletionRuns: Record<string, TerminalCommandRun>;
   commandDialog: Extract<CommandResult, { type: "select" }> | undefined;
   treeDialog: SessionTreeSnapshot | undefined;
-  modelDialog: { title: string; options: CommandOption[]; catalog: SessionModelCatalogEntry[]; selectedValue?: string } | undefined;
+  modelDialog: { instanceId: number; origin: ModelDialogOrigin; title: string; options: CommandOption[]; catalog: SessionModelCatalogEntry[]; selectedValue?: string } | undefined;
   thinkingDialog: { title: string; options: CommandOption[]; selectedValue?: string } | undefined;
   themeDialog: { title: string; options: CommandOption[]; selectedValue?: string } | undefined;
   authDialog: AuthDialogState | undefined;
@@ -88,6 +88,12 @@ export interface AppState {
 }
 
 /** A closed extension dialog paired with the record the browser rendered while it was open. */
+export interface ModelDialogOrigin {
+  machineId: string;
+  sessionId: string;
+  cwd: string;
+}
+
 export interface ClosedExtensionDialog {
   dialog: PendingExtensionDialog;
   reason: ExtensionDialogCloseReason;

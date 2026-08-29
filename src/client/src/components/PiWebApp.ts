@@ -1,8 +1,8 @@
 import { LitElement, html } from "lit";
 import { customElement, query, state } from "lit/decorators.js";
-import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type CommandOption, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionModel, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
+import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type CommandOption, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionModel, type SessionModelCatalogEntry, type SessionModelScopeMode, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
 import type { AppAction } from "../actions";
-import { initialAppState, type AppState } from "../appState";
+import { initialAppState, type AppState, type ModelDialogOrigin } from "../appState";
 import { isSessionActive } from "../../../shared/activity";
 import { PI_WEB_CAPABILITIES, supportsPiWebCapability } from "../../../shared/capabilities";
 import { machineScopedPluginId } from "../../../shared/machinePluginIds";
@@ -80,6 +80,7 @@ import { appStyles } from "./shared";
 
 
 const PI_WEB_STATUS_REFRESH_MS = 15 * 60 * 1000;
+const SELECTED_SESSION_REFRESH_MS = 5_000;
 const PI_WEB_STATUS_DEFER_MS = 750;
 const REMOTE_ROUTE_RESTORE_RETRY_DELAYS_MS = [1_000, 3_000, 8_000, 15_000, 30_000] as const;
 const GLOBAL_SHORTCUT_LISTENER_OPTIONS = { capture: true } as const;
@@ -124,6 +125,10 @@ export class PiWebApp extends LitElement {
   private unreadConnected = false;
   private committedChatIdentity: string | undefined;
   private readyChatIdentity: string | undefined;
+  /** Prevent a global scope invalidation from racing the picker’s own mutation response. */
+  private modelDialogMutationInFlight = 0;
+  private modelDialogRefreshPending = false;
+  private modelDialogScopeInvalidation = 0;
 
   private readonly notifications = new SessionNotificationController(
     () => this.state,
@@ -139,6 +144,10 @@ export class PiWebApp extends LitElement {
       notifications: this.notifications,
       onSelectedSessionReady: ({ machineId, session }) => {
         void this.commitReadyChatAfterRender(machineId, session);
+      },
+      onModelScopeChanged: () => {
+        this.modelDialogScopeInvalidation += 1;
+        void this.refreshOpenModelDialog();
       },
       replacePromptEditorText: async ({ machineId, sessionId, text }) => {
         await this.updateComplete;
@@ -206,6 +215,7 @@ export class PiWebApp extends LitElement {
   private readonly systemLightThemeMedia = typeof window !== "undefined" && "matchMedia" in window ? window.matchMedia("(prefers-color-scheme: light)") : undefined;
   private terminalAutoStartWorkspaceId: string | undefined;
   private piWebStatusTimer: number | undefined;
+  private selectedSessionRefreshTimer: number | undefined;
   private piWebStatusDeferredTimer: number | undefined;
   private workspaceDeletionPollTimer: number | undefined;
   private refreshingWorkspaceDeletionRuns = false;
@@ -213,6 +223,7 @@ export class PiWebApp extends LitElement {
   private readonly terminalCommandRunRuntimes = new Map<string, TerminalCommandRunsInternalRuntime>();
   private machineNavigationRestoreSeq = 0;
   private navigationSelectionSeq = 0;
+  private modelDialogInstanceId = 0;
   private routeRestoreSeq = 0;
   private routeRestoreDepth = 0;
   private restoringRouteTerminalId: string | undefined;
@@ -336,6 +347,7 @@ export class PiWebApp extends LitElement {
     this.connectRealtime();
     this.syncSessionUnreadMachines();
     this.piWebStatusTimer = window.setInterval(() => { this.schedulePiWebStatusRefresh(); }, PI_WEB_STATUS_REFRESH_MS);
+    this.scheduleSelectedSessionRefresh();
     void this.loadClientConfig();
     void this.ensureGatewayPluginsLoaded();
     void this.loadProjectsAndRestoreRoute().finally(() => { this.schedulePiWebStatusRefresh(); });
@@ -359,6 +371,8 @@ export class PiWebApp extends LitElement {
     this.closeMachineActivitySockets();
     if (this.piWebStatusTimer !== undefined) window.clearInterval(this.piWebStatusTimer);
     this.piWebStatusTimer = undefined;
+    if (this.selectedSessionRefreshTimer !== undefined) window.clearTimeout(this.selectedSessionRefreshTimer);
+    this.selectedSessionRefreshTimer = undefined;
     this.clearScheduledPiWebStatusRefresh();
     if (this.workspaceDeletionPollTimer !== undefined) window.clearInterval(this.workspaceDeletionPollTimer);
     this.workspaceDeletionPollTimer = undefined;
@@ -370,6 +384,9 @@ export class PiWebApp extends LitElement {
     if (!patchChangesState(this.state, patch)) return;
     const previous = this.state;
     this.state = { ...this.state, ...patch };
+    if (modelValueFromStatus(previous.status) !== modelValueFromStatus(this.state.status) && this.state.modelDialog !== undefined) {
+      this.state = { ...this.state, modelDialog: undefined };
+    }
     if (selectedChatIdentity(previous) !== selectedChatIdentity(this.state)) {
       this.committedChatIdentity = undefined;
       this.readyChatIdentity = undefined;
@@ -415,6 +432,23 @@ export class PiWebApp extends LitElement {
       this.refreshCurrentWorkspaceSurface(),
       this.workspaces.refreshSelectedProjectTopology(),
     ]);
+  }
+
+  /** Poll idle external sessions without overlapping work or waking hidden tabs. */
+  private scheduleSelectedSessionRefresh(): void {
+    if (this.selectedSessionRefreshTimer !== undefined) window.clearTimeout(this.selectedSessionRefreshTimer);
+    this.selectedSessionRefreshTimer = window.setTimeout(() => {
+      this.selectedSessionRefreshTimer = undefined;
+      void this.refreshSelectedTranscript().finally(() => { this.scheduleSelectedSessionRefresh(); });
+    }, SELECTED_SESSION_REFRESH_MS);
+  }
+
+  private async refreshSelectedTranscript(): Promise<void> {
+    const session = this.state.selectedSession;
+    const status = this.state.status;
+    if (session === undefined || session.archived === true || document.visibilityState !== "visible") return;
+    if (status?.isStreaming === true || status?.isCompacting === true || status?.isBashRunning === true || (status?.pendingMessageCount ?? 0) > 0) return;
+    await this.sessions.refreshSelectedSession(session.id, { silent: true });
   }
 
   private schedulePiWebStatusRefresh(delayMs = PI_WEB_STATUS_DEFER_MS): void {
@@ -1862,10 +1896,16 @@ export class PiWebApp extends LitElement {
   }
 
   private async openModelDialog() {
-    const [models, catalog] = await Promise.all([this.sessions.listModels(), this.sessions.listModelCatalog()]);
+    const session = this.state.selectedSession;
+    if (session === undefined) return;
+    const origin: ModelDialogOrigin = { machineId: selectedMachineId(this.state), sessionId: session.id, cwd: session.cwd };
+    const { models, catalog } = await this.loadModelDialogData();
+    if (!this.modelDialogOriginIsCurrent(origin)) return;
     const selectedValue = this.currentModelValue();
     this.setState({
       modelDialog: {
+        instanceId: ++this.modelDialogInstanceId,
+        origin,
         title: "Select Model",
         ...(selectedValue !== undefined ? { selectedValue } : {}),
         options: this.modelDialogOptions(models),
@@ -1874,10 +1914,35 @@ export class PiWebApp extends LitElement {
     });
   }
 
+  private async loadModelDialogData(): Promise<{ models: SessionModel[]; catalog: SessionModelCatalogEntry[] }> {
+    for (;;) {
+      const invalidation = this.modelDialogScopeInvalidation;
+      const [models, catalog] = await Promise.all([this.sessions.listModels(), this.sessions.listModelCatalog()]);
+      if (invalidation === this.modelDialogScopeInvalidation) return { models, catalog };
+    }
+  }
+
+  /** Refresh an already-open picker after another session changes the shared scope. */
+  private async refreshOpenModelDialog(): Promise<void> {
+    if (this.modelDialogMutationInFlight > 0) {
+      this.modelDialogRefreshPending = true;
+      return;
+    }
+    const dialog = this.currentModelDialog();
+    if (dialog === undefined) return;
+    const origin = dialog.origin;
+    const instanceId = dialog.instanceId;
+    const { models, catalog } = await this.loadModelDialogData();
+    if (this.modelDialogMutationInFlight > 0 || this.state.modelDialog?.instanceId !== instanceId || !this.modelDialogOriginIsCurrent(origin)) return;
+    const refreshedDialog = { ...dialog, options: this.modelDialogOptions(models), catalog };
+    const selectedValue = this.currentModelValue();
+    if (selectedValue === undefined) delete refreshedDialog.selectedValue;
+    else refreshedDialog.selectedValue = selectedValue;
+    this.setState({ modelDialog: refreshedDialog });
+  }
+
   private currentModelValue(): string | undefined {
-    const provider = this.state.status?.model?.provider;
-    const id = this.state.status?.model?.id;
-    return provider !== undefined && id !== undefined ? `${provider}/${id}` : undefined;
+    return modelValueFromStatus(this.state.status);
   }
 
   private modelDialogOptions(models: readonly Pick<SessionModel, "provider" | "id">[]): CommandOption[] {
@@ -2058,14 +2123,56 @@ export class PiWebApp extends LitElement {
   };
 
   private readonly handleToggleModelEnabled = async (provider: string, modelId: string, enabled: boolean): Promise<void> => {
-    const catalog = await this.sessions.setModelEnabled(provider, modelId, enabled);
+    const dialog = this.currentModelDialog();
+    if (dialog === undefined) return;
+    this.modelDialogMutationInFlight += 1;
+    try {
+      const catalog = await this.sessions.setModelEnabled(provider, modelId, enabled);
+      this.applyModelDialogCatalog(dialog, catalog);
+    } finally {
+      this.modelDialogMutationInFlight -= 1;
+      if (this.modelDialogMutationInFlight === 0 && this.modelDialogRefreshPending) {
+        this.modelDialogRefreshPending = false;
+        void this.refreshOpenModelDialog();
+      }
+    }
+  };
+
+  private readonly handleSetModelScope = async (mode: SessionModelScopeMode): Promise<void> => {
+    const dialog = this.currentModelDialog();
+    if (dialog === undefined) return;
+    this.modelDialogMutationInFlight += 1;
+    try {
+      const catalog = await this.sessions.setModelScope(mode);
+      this.applyModelDialogCatalog(dialog, catalog);
+    } finally {
+      this.modelDialogMutationInFlight -= 1;
+      if (this.modelDialogMutationInFlight === 0 && this.modelDialogRefreshPending) {
+        this.modelDialogRefreshPending = false;
+        void this.refreshOpenModelDialog();
+      }
+    }
+  };
+
+  private currentModelDialog(): NonNullable<AppState["modelDialog"]> | undefined {
     const dialog = this.state.modelDialog;
-    if (catalog === undefined || dialog === undefined) return;
+    if (dialog !== undefined && this.modelDialogOriginIsCurrent(dialog.origin)) return dialog;
+    if (dialog !== undefined) this.setState({ modelDialog: undefined });
+    return undefined;
+  }
+
+  private modelDialogOriginIsCurrent(origin: ModelDialogOrigin): boolean {
+    const session = this.state.selectedSession;
+    return session !== undefined && origin.machineId === selectedMachineId(this.state) && origin.sessionId === session.id && origin.cwd === session.cwd;
+  }
+
+  private applyModelDialogCatalog(dialog: NonNullable<AppState["modelDialog"]>, catalog: SessionModelCatalogEntry[] | undefined): void {
+    if (catalog === undefined || this.state.modelDialog?.instanceId !== dialog.instanceId || !this.modelDialogOriginIsCurrent(dialog.origin)) return;
     // The fresh catalog's enabled rows are the session's Enabled list in
     // order, so rebuilding both data sets keeps the dialog's modes and pi's
     // persisted scope consistent without another round trip.
     this.setState({ modelDialog: { ...dialog, catalog, options: this.modelDialogOptions(catalog.filter((entry) => entry.enabled)) } });
-  };
+  }
 
   private readonly handleSelectThinking = (): void => {
     void this.openThinkingDialog();
@@ -2154,7 +2261,7 @@ export class PiWebApp extends LitElement {
             <prompt-editor .sessionId=${state.selectedSession.id} .cwd=${state.selectedWorkspace?.path} .machineId=${selectedMachineId(state)} .projectId=${state.selectedWorkspace?.projectId} .workspaceId=${state.selectedWorkspace?.id} .disabled=${state.selectedSession.archived === true} .canSteer=${state.status?.isStreaming === true} .isCompacting=${state.status?.isCompacting === true} .canStop=${state.status?.isStreaming === true || state.status?.isBashRunning === true || state.status?.isCompacting === true || (state.status?.pendingMessageCount ?? 0) > 0} .status=${state.status} .availableThinkingLevels=${state.availableThinkingLevels} .sending=${state.sendingPrompts[state.selectedSession.id] === true} .onSend=${this.handleSendPrompt} .onStop=${this.handleStopActiveWork} .onSelectModel=${this.handleSelectModel} .onSelectThinking=${this.handleSelectThinking}></prompt-editor>
             ${this.renderStatusBar(state)}
             ${state.commandDialog !== undefined ? html`<command-picker .title=${state.commandDialog.title} .options=${state.commandDialog.options} .onPick=${(value: string) => this.sessions.respondToCommand(state.commandDialog?.requestId ?? "", value)} .onCancel=${() => { this.sessions.cancelCommand(); }}></command-picker>` : null}
-            ${state.modelDialog !== undefined ? html`<model-picker title=${state.modelDialog.title} .options=${state.modelDialog.options} .catalog=${state.modelDialog.catalog} .selectedValue=${state.modelDialog.selectedValue} .onPick=${(value: string) => { void this.pickModel(value); }} .onToggleEnabled=${this.handleToggleModelEnabled} .onCancel=${() => { this.setState({ modelDialog: undefined }); }}></model-picker>` : null}
+            ${state.modelDialog !== undefined ? html`<model-picker title=${state.modelDialog.title} .options=${state.modelDialog.options} .catalog=${state.modelDialog.catalog} .selectedValue=${state.modelDialog.selectedValue} .onPick=${(value: string) => { void this.pickModel(value); }} .onToggleEnabled=${this.handleToggleModelEnabled} .onSetScope=${this.handleSetModelScope} .onCancel=${() => { this.setState({ modelDialog: undefined }); }}></model-picker>` : null}
             ${state.thinkingDialog !== undefined ? html`<command-picker title=${state.thinkingDialog.title} .options=${state.thinkingDialog.options} .selectedValue=${state.thinkingDialog.selectedValue} .onPick=${(value: string) => { void this.pickThinking(value); }} .onCancel=${() => { this.setState({ thinkingDialog: undefined }); }}></command-picker>` : null}
           ` : html`<div class="empty">${this.sessionEmptyMessage()}</div>`}
         </main>
@@ -2173,6 +2280,12 @@ export class PiWebApp extends LitElement {
   }
 
   static override styles = appStyles;
+}
+
+function modelValueFromStatus(status: AppState["status"]): string | undefined {
+  const provider = status?.model?.provider;
+  const id = status?.model?.id;
+  return provider !== undefined && id !== undefined ? `${provider}/${id}` : undefined;
 }
 
 function createPluginRegistry(): PluginRegistry {

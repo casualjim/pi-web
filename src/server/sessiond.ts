@@ -33,7 +33,10 @@ import { SESSIOND_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
 import { agentSessionDirEnvOverride, effectivePiWebConfig, maxUploadBytes, offlineModeEnabled, PI_CODING_AGENT_DIR_ENV, PI_CODING_AGENT_SESSION_DIR_ENV } from "../config.js";
 import { createActiveAgentProfileDescriptor } from "../sessiond/activeAgentProfile.js";
 import { loadServerPluginRecoveryConfig } from "../serverPluginRecovery.js";
-import { PiWebPluginCatalog } from "./piWebPluginCatalog.js";
+import { DefaultPiPackageProvider, PiWebPluginCatalog } from "./piWebPluginCatalog.js";
+import { createDefaultPiPackageService } from "./piPackageService.js";
+import { PiPackageDismissalStore, piPackageDismissalStorePath } from "./storage/piPackageDismissalStore.js";
+import { reconcileAutoInstallablePiPackages } from "./sessiond/autoInstallPiPackages.js";
 import { applyAgentHttpIdleTimeout } from "./sessiond/agentHttpDispatcher.js";
 import { scrubNonAgentVisibleEnvKeys } from "./sessiond/agentProcessEnvironment.js";
 import { claimSessiondStateOwnership } from "./sessiond/sessiondStateOwnership.js";
@@ -154,6 +157,22 @@ async function createSessionDaemonRuntime() {
   } else {
     app.log.info({ httpIdleTimeoutMs: appliedHttpIdleTimeout.timeoutMs }, "applied agent profile HTTP idle timeout to the session daemon HTTP stack");
   }
+  // Best-effort, non-fatal reconciliation of Pi packages PI WEB ships "out of
+  // the box" (currently just the Relays plugin's @jmfederico/pi-relay
+  // package): installs one for the active agent profile, the same way the
+  // manual Settings UI Install action would, unless it is already configured
+  // or the profile dismissed it (removed it on purpose) before. Deliberately
+  // not awaited: reconciliation catches and logs its own failures internally,
+  // and a slow or failed install must never delay or block daemon startup.
+  void reconcileAutoInstallablePiPackages({
+    profileDir: activeAgentProfile.dir,
+    packageProvider: new DefaultPiPackageProvider(process.cwd(), activeAgentProfile.dir),
+    installer: createDefaultPiPackageService(process.cwd(), activeAgentProfile.dir),
+    dismissalChecker: new PiPackageDismissalStore(piPackageDismissalStorePath(daemonEnvironment)),
+    logger: app.log,
+  }).catch((error: unknown) => {
+    app.log.warn({ err: error }, "Pi package auto-install reconciliation failed unexpectedly; continuing without it");
+  });
   const serverPlugins = await createServerPluginRuntime({
     catalog: serverPluginCatalog,
     ...(serverPluginRecovery.safeStart === undefined ? {} : { safeStart: serverPluginRecovery.safeStart }),

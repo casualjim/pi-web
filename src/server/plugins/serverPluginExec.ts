@@ -46,12 +46,14 @@ function runExecFile(
   validateRequest(request, options.maxStdinBytes);
   if (request.signal.aborted) return Promise.reject(abortReason(request.signal));
 
-  const stdinPayload = createStdinPayload(request.stdin);
   const timeoutMs = Math.min(request.timeoutMs ?? options.maxTimeoutMs, options.maxTimeoutMs);
   const stdout = new BoundedOutput(options.maxOutputBytes);
   const stderr = new BoundedOutput(options.maxOutputBytes);
+  // Create the sensitive host-owned copy only after synchronous setup that can
+  // fail outside the Promise executor has completed.
+  const stdinPayload = createStdinPayload(request.stdin);
 
-  return new Promise((resolvePromise, rejectPromise) => {
+  const execution = new Promise<ServerPluginExecFileResult>((resolvePromise, rejectPromise) => {
     // The spawn overloads only narrow stream nullability for static stdio
     // tuples, so each branch keeps its own tuple; the ignore branch preserves
     // the exact pre-stdin behavior for payload-less commands.
@@ -80,8 +82,6 @@ function runExecFile(
     const cleanup = (): void => {
       clearTimeout(timeout);
       request.signal.removeEventListener("abort", onAbort);
-      // The host-owned payload copy must not outlive the settled command.
-      if (stdinPayload !== undefined) stdinPayload.fill(0);
     };
     const reject = (error: unknown): void => {
       if (settled) return;
@@ -129,9 +129,15 @@ function runExecFile(
       child.stdin.end(stdinPayload);
     }
   });
+
+  if (stdinPayload === undefined) return execution;
+  // Promise executors turn synchronous setup failures (including spawn()
+  // argument errors) into rejections. Attach wiping outside the executor so
+  // every settlement path clears the host-owned copy exactly once.
+  return execution.finally(() => { stdinPayload.fill(0); });
 }
 
-/** Copies the payload into a host-owned buffer that cleanup can zero after settle. */
+/** Copies the payload into a host-owned buffer that is zeroed after settlement. */
 function createStdinPayload(stdin: ServerPluginExecFileRequest["stdin"]): Buffer | undefined {
   if (stdin === undefined) return undefined;
   const payload = typeof stdin === "string" ? Buffer.from(stdin, "utf8") : Buffer.from(stdin);

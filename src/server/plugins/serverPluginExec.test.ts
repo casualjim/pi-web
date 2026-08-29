@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createServerPluginExecFile } from "./serverPluginExec.js";
 
 describe("server plugin execFile helper", () => {
@@ -69,6 +69,8 @@ describe("server plugin execFile helper", () => {
   it("pipes binary Uint8Array payloads byte for byte", async () => {
     const execFile = createServerPluginExecFile();
     const payload = new Uint8Array([0, 1, 2, 250, 251, 252, 10, 13, 255]);
+    const expectedPayload = [...payload];
+    const expectedHex = Buffer.from(payload).toString("hex");
 
     const result = await execFile({
       file: process.execPath,
@@ -78,7 +80,8 @@ describe("server plugin execFile helper", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe(Buffer.from(payload).toString("hex"));
+    expect(result.stdout).toBe(expectedHex);
+    expect([...payload]).toEqual(expectedPayload);
   });
 
   it("treats an empty stdin payload like an absent one", async () => {
@@ -106,6 +109,38 @@ describe("server plugin execFile helper", () => {
     });
 
     expect(result.exitCode).toBe(3);
+  });
+
+  it("zeroes its retained stdin copy when spawn throws synchronously", async () => {
+    const secret = "sync-spawn-secret";
+    const payload = new TextEncoder().encode(secret);
+    const expectedPayload = [...payload];
+    const fill = vi.spyOn(Buffer.prototype, "fill");
+    try {
+      const execFile = createServerPluginExecFile();
+      const error: unknown = await execFile({
+        file: "invalid\0file",
+        stdin: payload,
+        signal: new AbortController().signal,
+      }).then(
+        () => { throw new Error("Expected spawn to fail"); },
+        (reason: unknown) => reason,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error instanceof Error ? error.message : String(error)).not.toContain(secret);
+      const fillInstances: unknown[] = fill.mock.instances;
+      const retainedPayloads = fillInstances.filter((instance): instance is Buffer => (
+        Buffer.isBuffer(instance) && instance.byteLength === payload.byteLength
+      ));
+      expect(retainedPayloads).toHaveLength(1);
+      const retainedPayload = retainedPayloads[0];
+      if (retainedPayload === undefined) throw new Error("Expected the retained stdin Buffer to be wiped");
+      expect([...retainedPayload]).toEqual(new Array<number>(payload.byteLength).fill(0));
+      expect([...payload]).toEqual(expectedPayload);
+    } finally {
+      fill.mockRestore();
+    }
   });
 
   it("rejects stdin payloads above the configured byte cap before spawning", async () => {

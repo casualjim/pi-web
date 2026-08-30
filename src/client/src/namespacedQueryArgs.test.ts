@@ -29,6 +29,36 @@ describe("contribution-scoped query helpers", () => {
     expect(Object.isFrozen(first["tag"])).toBe(true);
   });
 
+  it("reads inherited-key names as own strings and bounds values, keys, counts, and aggregate length", () => {
+    const params = new URLSearchParams();
+    params.append("panel.workspace.panel--constructor", "safe");
+    for (let index = 0; index < 17; index += 1) params.append("panel.workspace.panel--tag", `tag-${String(index)}`);
+    params.set(`panel.workspace.panel--${"k".repeat(240)}`, "oversized-key");
+    params.set("panel.workspace.panel--oversized-value", "v".repeat(4_097));
+    installWindow(`https://example.test/app?${params.toString()}`);
+
+    const bounded = readContributionQuery("panel:workspace.panel");
+    expect(Object.hasOwn(bounded, "constructor")).toBe(true);
+    expect(Reflect.get(bounded, "constructor")).toBe("safe");
+    expect(typeof Reflect.get(bounded, "constructor")).toBe("string");
+    expect(Reflect.get(bounded, "toString")).toBeUndefined();
+    expect(bounded["tag"]).toEqual(Array.from({ length: 16 }, (_value, index) => `tag-${String(index)}`));
+    expect(bounded["oversized-value"]).toBeUndefined();
+    expect(Object.keys(bounded)).toEqual(["constructor", "tag"]);
+
+    const countParams = new URLSearchParams();
+    for (let index = 0; index < 66; index += 1) countParams.set(`panel.workspace.panel--key-${String(index)}`, "value");
+    installWindow(`https://example.test/app?${countParams.toString()}`);
+    expect(Object.keys(readContributionQuery("panel:workspace.panel"))).toHaveLength(64);
+    expect(Object.keys(readContributionQueryRecord())).toHaveLength(64);
+
+    const aggregateParams = new URLSearchParams();
+    for (let index = 0; index < 16; index += 1) aggregateParams.set(`panel.workspace.panel--value-${String(index)}`, "v".repeat(4_096));
+    installWindow(`https://example.test/app?${aggregateParams.toString()}`);
+    expect(Object.keys(readContributionQuery("panel:workspace.panel"))).toHaveLength(15);
+    expect(Object.keys(readContributionQueryRecord())).toHaveLength(15);
+  });
+
   it("canonicalizes alias writes with push/replace history and validates local keys", () => {
     const browser = installWindow("https://example.test/base/app?project=p1&workspace=w1&panel.workspace.panel--file=old.ts&legacy.workspace.panel--file=legacy.ts&other.workspace.panel--keep=yes&plain=kept#viewer");
 
@@ -54,6 +84,54 @@ describe("contribution-scoped query helpers", () => {
     expect(browser.replaced).toHaveLength(1);
   });
 
+  it("rejects over-bound key writes atomically without committing partial history", () => {
+    const params = new URLSearchParams({ project: "p1", workspace: "w1" });
+    for (let index = 0; index < 64; index += 1) params.set(`panel.workspace.panel--key-${String(index)}`, "value");
+    const browser = installWindow(`https://example.test/app?${params.toString()}#viewer`);
+    const before = browser.url.href;
+
+    expect(() => setContributionQueryKey("panel:workspace.panel", ["legacy:workspace.panel"], "next", "value"))
+      .toThrow("Contribution navigation has too many parameters");
+    expect(browser.url.href).toBe(before);
+    expect(browser.pushed).toHaveLength(0);
+    expect(browser.replaced).toHaveLength(0);
+
+    browser.navigate("https://example.test/app?project=p1#viewer");
+    const clean = browser.url.href;
+    expect(() => setContributionQueryKey("panel:workspace.panel", [], "x".repeat(240), "value"))
+      .toThrow("Contribution navigation parameter is too long");
+    expect(() => setContributionQueryKey("panel:workspace.panel", [], "mode", "v".repeat(4_097)))
+      .toThrow("Contribution navigation value is too long");
+    expect(() => setContributionQueryKey("panel:workspace.panel", [], "mode", Array.from({ length: 17 }, () => "v")))
+      .toThrow("Contribution navigation value has too many items");
+    expect(browser.url.href).toBe(clean);
+    expect(browser.pushed).toHaveLength(0);
+    expect(browser.replaced).toHaveLength(0);
+  });
+
+  it("accepts the aggregate limit exactly and rejects one more write without history", () => {
+    const params = new URLSearchParams();
+    for (let index = 0; index < 15; index += 1) {
+      params.set(`panel.workspace.panel--value-${String(index)}`, "v".repeat(4_096));
+    }
+    const existingLength = [...params].reduce((total, [key, value]) => total + key.length + value.length, 0);
+    const exactKey = "panel.workspace.panel--last";
+    const exactValueLength = 65_536 - existingLength - exactKey.length;
+    expect(exactValueLength).toBeGreaterThan(0);
+    expect(exactValueLength).toBeLessThanOrEqual(4_096);
+    const browser = installWindow(`https://example.test/app?${params.toString()}`);
+
+    expect(setContributionQueryKey("panel:workspace.panel", [], "last", "v".repeat(exactValueLength))).toBe(true);
+    expect(browser.pushed).toHaveLength(1);
+    const exactUrl = browser.url.href;
+
+    expect(() => setContributionQueryKey("panel:workspace.panel", [], "overflow", "x"))
+      .toThrow("Contribution navigation record is too long");
+    expect(browser.url.href).toBe(exactUrl);
+    expect(browser.pushed).toHaveLength(1);
+    expect(browser.replaced).toHaveLength(0);
+  });
+
   it("captures and restores only bounded contribution-owned parameters", () => {
     const browser = installWindow("https://example.test/app?project=p1&workspace=w1&panel.workspace.panel--file=one&panel.workspace.panel--file=two&plain=kept&bad--query=ignored#hash");
 
@@ -64,7 +142,7 @@ describe("contribution-scoped query helpers", () => {
     expect(writeContributionQueryRecord({
       "next.workspace.panel--mode": "preview",
       "next.workspace.panel--selection": ["a", "b"],
-      "invalid": "ignored",
+      invalid: "ignored",
     }, { replace: true })).toBe(true);
 
     expect(browser.url.searchParams.get("project")).toBe("p1");
@@ -76,6 +154,7 @@ describe("contribution-scoped query helpers", () => {
     expect(browser.url.searchParams.getAll("next.workspace.panel--selection")).toEqual(["a", "b"]);
     expect(browser.url.hash).toBe("#hash");
   });
+
 });
 
 function installWindow(href: string): {

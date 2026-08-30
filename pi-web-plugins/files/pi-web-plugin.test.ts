@@ -9,6 +9,7 @@ import plugin, { FILES_CODE_VIEWER_ELEMENT, FILES_PANEL_ELEMENT, FILES_VIEWER_EL
 afterEach(() => {
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("Files plugin activation", () => {
@@ -34,6 +35,36 @@ describe("Files plugin activation", () => {
     expect(customElements.get(FILES_PANEL_ELEMENT)).toBeDefined();
     expect(customElements.get(FILES_VIEWER_ELEMENT)).toBeDefined();
     expect(customElements.get(FILES_CODE_VIEWER_ELEMENT)).toBeDefined();
+  });
+
+  it("allocates registration-local runtime state for repeated module activation", () => {
+    const firstContext = createWorkspaceContext();
+    const secondContext = { ...createWorkspaceContext(), machine: { id: "remote-2", name: "Remote 2", kind: "remote" as const } };
+    const firstPanel = plugin.activate(activationContext("remote-1.files")).contributions.workspacePanels?.[0];
+    const secondPanel = plugin.activate(activationContext("remote-2.files")).contributions.workspacePanels?.[0];
+    const firstRendered = firstPanel?.render(firstContext);
+    const secondRendered = secondPanel?.render(secondContext);
+    const firstRuntime = firstRendered?.values.find((value) => value instanceof FilesRuntime);
+    const secondRuntime = secondRendered?.values.find((value) => value instanceof FilesRuntime);
+
+    expect(firstRendered?.values).toContain(firstContext);
+    expect(secondRendered?.values).toContain(secondContext);
+    expect(firstRuntime).toBeInstanceOf(FilesRuntime);
+    expect(secondRuntime).toBeInstanceOf(FilesRuntime);
+    expect(secondRuntime).not.toBe(firstRuntime);
+  });
+
+  it("still rejects an unrelated owner of a reserved Files element name", () => {
+    class UnrelatedElement extends HTMLElement {}
+    const registry = {
+      get: vi.fn((name: string) => name === FILES_CODE_VIEWER_ELEMENT ? UnrelatedElement : undefined),
+      define: vi.fn(),
+    };
+    vi.stubGlobal("customElements", registry);
+
+    expect(() => activateFilesPlugin(activationContext(), new FilesRuntime()))
+      .toThrow(`Files custom element name is already owned: ${FILES_CODE_VIEWER_ELEMENT}`);
+    expect(registry.define).not.toHaveBeenCalled();
   });
 
   it("uses the host template boundary and routes actions through public runtime callbacks", async () => {
@@ -62,8 +93,8 @@ describe("Files plugin activation", () => {
   });
 });
 
-function activationContext(): PluginActivationContext {
-  return Object.freeze({ apiVersion: 2, pluginId: "files", runtimePluginId: "files", html, svg });
+function activationContext(runtimePluginId = "files"): PluginActivationContext {
+  return Object.freeze({ apiVersion: 2, pluginId: "files", runtimePluginId, html, svg });
 }
 
 function createRuntimeContext(overrides: Partial<PluginRuntimeContext> = {}): PluginRuntimeContext {

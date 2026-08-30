@@ -14,12 +14,12 @@ export const FILES_PANEL_ELEMENT = "pi-web-files-panel";
 export const FILES_VIEWER_ELEMENT = "pi-web-files-viewer";
 export const FILES_CODE_VIEWER_ELEMENT = "pi-web-files-code-viewer";
 
-const runtime = new FilesRuntime();
+const filesCustomElementOwnersKey = Symbol.for("pi-web.files.custom-element-owners.v1");
 
 const plugin: PiWebPlugin = {
   apiVersion: 2,
   name: "Files",
-  activate: (context) => activateFilesPlugin(context, runtime),
+  activate: (context) => activateFilesPlugin(context, new FilesRuntime()),
 };
 
 export default plugin;
@@ -78,9 +78,32 @@ export function defineFilesCustomElements(): void {
 
 function defineCustomElement(name: string, constructor: CustomElementConstructor): void {
   const existing = customElements.get(name);
+  const owners = filesCustomElementOwners();
   if (existing === undefined) {
     customElements.define(name, constructor);
+    owners.set(name, constructor);
     return;
   }
-  if (existing !== constructor) throw new Error(`Files custom element name is already owned: ${name}`);
+  if (existing === constructor) {
+    owners.set(name, constructor);
+    return;
+  }
+  // Portable copies loaded from distinct machine module URLs have distinct
+  // constructors. Reuse the first same-source element implementation; the
+  // rendered element still receives this registration's context and runtime.
+  if (owners.get(name) === existing) return;
+  throw new Error(`Files custom element name is already owned: ${name}`);
+}
+
+function filesCustomElementOwners(): Map<string, CustomElementConstructor> {
+  const existing: unknown = Reflect.get(globalThis, filesCustomElementOwnersKey);
+  if (existing instanceof Map) {
+    // The Symbol.for key is private to this bundled source and every value is
+    // written only by defineCustomElement above.
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- Reflect.get cannot preserve the private Symbol.for registry's value type.
+    return existing as Map<string, CustomElementConstructor>;
+  }
+  const owners = new Map<string, CustomElementConstructor>();
+  Reflect.set(globalThis, filesCustomElementOwnersKey, owners);
+  return owners;
 }

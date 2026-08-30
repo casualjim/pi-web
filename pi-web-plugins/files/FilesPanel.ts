@@ -36,6 +36,7 @@ export class WorkspaceFilesPanel extends LitElement {
   private navigationModeKey = "";
   private modeStore: WorkspaceFileViewModeStore = createWorkspaceFileViewModeStore(undefined);
   private uploadReturnFocus: HTMLElement | undefined;
+  private visibilityObserver: ResizeObserver | undefined;
 
   protected override willUpdate(changedProperties: PropertyValues<this>): void {
     if (!changedProperties.has("context") && !changedProperties.has("runtime")) return;
@@ -55,6 +56,11 @@ export class WorkspaceFilesPanel extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener("resize", this.handleResponsiveVisibilityChange);
+    if (typeof ResizeObserver !== "undefined") {
+      this.visibilityObserver ??= new ResizeObserver(this.handleResponsiveVisibilityChange);
+      this.visibilityObserver.observe(this);
+    }
     if (!this.hasUpdated) return;
     const nextKey = this.context === undefined ? undefined : workspaceContextKey(this.context);
     this.bindRuntime(nextKey);
@@ -62,11 +68,14 @@ export class WorkspaceFilesPanel extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    window.removeEventListener("resize", this.handleResponsiveVisibilityChange);
+    this.visibilityObserver?.disconnect();
     this.unsubscribeRuntime?.();
     this.unsubscribeRuntime = undefined;
     this.boundRuntime = undefined;
     this.boundScopeKey = undefined;
-    if (this.uploadDialog?.open === true) this.uploadDialog.close();
+    this.uploadReturnFocus = undefined;
+    this.resetPendingUpload();
     super.disconnectedCallback();
   }
 
@@ -338,6 +347,15 @@ export class WorkspaceFilesPanel extends LitElement {
 
   private readonly handleDialogClick = (event: MouseEvent): void => {
     if (event.target === this.uploadDialog) this.closeUploadDialog();
+  };
+
+  private readonly handleResponsiveVisibilityChange = (): void => {
+    const dialog = this.uploadDialog;
+    if ((this.pendingUpload === undefined && dialog?.open !== true) || this.getClientRects().length > 0) return;
+    // The trigger remains connected when the compact shell CSS hides this
+    // panel, but focusing that hidden control would create a second trap.
+    this.uploadReturnFocus = undefined;
+    this.resetPendingUpload();
   };
 
   private openUploadReview(files: File[]): void {

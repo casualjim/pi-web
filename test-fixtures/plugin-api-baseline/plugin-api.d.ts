@@ -132,9 +132,8 @@ export interface WorkspaceFileUploadTask {
     readonly completed: Promise<WriteWorkspaceFileResponse>;
     cancel(): void;
 }
-/** Structural workspace-files surface supplied by browser API v2 hosts before capability versioning. */
-export interface LegacyWorkspaceFiles {
-    readonly capabilityVersion?: undefined;
+/** The five workspace-file operations published by browser API v2 hosts. */
+export interface WorkspaceFiles {
     /** Read a file from the workspace. Works for local and federated machines. */
     readFile(path: string): Promise<FileContentResponse>;
     /** List the entries of a workspace directory. Pass "" for the workspace root.
@@ -148,16 +147,17 @@ export interface LegacyWorkspaceFiles {
     /** Move or rename a file within the workspace. Default overwrite: false. */
     moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
 }
+/** Structural workspace-files value supplied by browser API v2 hosts before capability versioning. */
+export interface LegacyWorkspaceFiles extends WorkspaceFiles {
+    readonly capabilityVersion?: undefined;
+}
 /** Versioned workspace-scoped host capability available to first- and third-party browser plugins. */
-export interface WorkspaceFilesCapabilityV1 {
+export interface WorkspaceFilesCapabilityV1 extends WorkspaceFiles {
     readonly capabilityVersion: 1;
     readonly defaultUploadFolder: string;
     readonly maxInlinePreviewBytes: number;
     readFile(path: string, options?: WorkspaceFileRequestOptions): Promise<FileContentResponse>;
     listFiles(path: string, options?: WorkspaceFileRequestOptions): Promise<FileTreeResponse>;
-    writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
-    deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
-    moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
     /** Return a browser-ready URL already resolved by the host for this deployment and machine. */
     previewUrl(path: string, options?: WorkspaceFileReferenceOptions): string;
     /** Return a browser-ready download URL already resolved by the host for this deployment and machine. */
@@ -165,7 +165,8 @@ export interface WorkspaceFilesCapabilityV1 {
     /** Start one upload transport operation. Cancellation rejects `completed` with an AbortError. */
     uploadFile(file: File, options?: WorkspaceFileUploadOptions): WorkspaceFileUploadTask;
 }
-export type WorkspaceFiles = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
+/** Host context value used to feature-detect versioned workspace-file additions. */
+export type WorkspaceFilesContextValue = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
 export type WorkspacePanelFiles = WorkspaceFiles;
 /** JSON-only request path to the server module that currently owns this workspace. */
 export interface WorkspaceBackend {
@@ -179,7 +180,7 @@ export interface WorkspaceContext {
     machine: PluginMachine;
     workspace: Workspace;
     state?: PluginRuntimeState;
-    files: WorkspaceFiles;
+    files: WorkspaceFilesContextValue;
     /** Present only when this browser entry has a paired active server backend. */
     backend?: WorkspaceBackend;
     host: WorkspaceHost;
@@ -239,7 +240,7 @@ export interface WorkspaceLabelContext extends WorkspaceContext {
     machine: PluginMachine;
     workspace: Workspace;
     state?: PluginRuntimeState;
-    files: WorkspaceFiles;
+    files: WorkspaceFilesContextValue;
     host: WorkspaceHost;
 }
 export type WorkspaceLabelItem = WorkspaceLabelTextItem | WorkspaceLabelLinkItem | WorkspaceLabelRenderItem;

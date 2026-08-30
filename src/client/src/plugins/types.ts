@@ -86,8 +86,7 @@ export interface WorkspaceFileUploadTask {
   cancel(): void;
 }
 
-export interface LegacyWorkspaceFiles {
-  readonly capabilityVersion?: undefined;
+export interface WorkspaceFiles {
   readFile(path: string): Promise<FileContentResponse>;
   listFiles(path: string): Promise<FileTreeResponse>;
   writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
@@ -95,21 +94,22 @@ export interface LegacyWorkspaceFiles {
   moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
 }
 
-export interface WorkspaceFilesCapabilityV1 {
+export interface LegacyWorkspaceFiles extends WorkspaceFiles {
+  readonly capabilityVersion?: undefined;
+}
+
+export interface WorkspaceFilesCapabilityV1 extends WorkspaceFiles {
   readonly capabilityVersion: 1;
   readonly defaultUploadFolder: string;
   readonly maxInlinePreviewBytes: number;
   readFile(path: string, options?: WorkspaceFileRequestOptions): Promise<FileContentResponse>;
   listFiles(path: string, options?: WorkspaceFileRequestOptions): Promise<FileTreeResponse>;
-  writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
-  deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
-  moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
   previewUrl(path: string, options?: WorkspaceFileReferenceOptions): string;
   downloadUrl(path: string, options?: WorkspaceFileReferenceOptions): string;
   uploadFile(file: File, options?: WorkspaceFileUploadOptions): WorkspaceFileUploadTask;
 }
 
-export type WorkspaceFiles = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
+export type WorkspaceFilesContextValue = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
 
 export interface WorkspaceBackend {
   request(operation: string, input: JsonValue): Promise<JsonValue>;
@@ -123,7 +123,7 @@ export interface WorkspaceContext {
   machine: PluginMachine;
   workspace: Workspace;
   state: AppState;
-  files: WorkspaceFiles;
+  files: WorkspaceFilesContextValue;
   backend?: WorkspaceBackend;
   host: WorkspaceHost;
 }
@@ -270,7 +270,7 @@ export interface WorkspaceLabelContext extends WorkspaceContext {
   machine: PluginMachine;
   workspace: Workspace;
   state: AppState;
-  files: WorkspaceFiles;
+  files: WorkspaceFilesContextValue;
   host: WorkspaceHost;
 }
 

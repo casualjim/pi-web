@@ -11,9 +11,11 @@ import type {
   Workspace,
   WorkspaceFiles,
   WorkspaceFilesCapabilityV1,
+  WorkspaceFilesContextValue,
   WorkspaceInvalidation,
   WorkspacePanelContext,
   WorkspacePanelContribution,
+  WorkspacePanelFiles,
   WorkspacePanelNavigationV1,
   WorkspaceProviderCapabilities,
   WorkspaceProviderMetadata,
@@ -46,6 +48,25 @@ interface ExistingV2WorkspaceFiles {
   moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
 }
 
+// These declarations intentionally exercise the source patterns used by v2
+// adapters and test fakes. A union alias here produces TS2312/TS2422.
+interface ExtendedWorkspaceFiles extends WorkspaceFiles { readonly adapterName?: string; }
+interface ExtendedWorkspacePanelFiles extends WorkspacePanelFiles { readonly panelName?: string; }
+declare class ImplementedWorkspaceFiles implements WorkspaceFiles {
+  readFile: WorkspaceFiles["readFile"];
+  listFiles: WorkspaceFiles["listFiles"];
+  writeFile: WorkspaceFiles["writeFile"];
+  deleteFile: WorkspaceFiles["deleteFile"];
+  moveFile: WorkspaceFiles["moveFile"];
+}
+declare class ImplementedWorkspacePanelFiles implements WorkspacePanelFiles {
+  readFile: WorkspacePanelFiles["readFile"];
+  listFiles: WorkspacePanelFiles["listFiles"];
+  writeFile: WorkspacePanelFiles["writeFile"];
+  deleteFile: WorkspacePanelFiles["deleteFile"];
+  moveFile: WorkspacePanelFiles["moveFile"];
+}
+
 describe("public browser plugin API", () => {
   it("keeps host-owned activation and workspace snapshots readonly", () => {
     expectTypeOf<ReadonlyKeys<PluginActivationContext>>().toEqualTypeOf<keyof PluginActivationContext>();
@@ -63,6 +84,12 @@ describe("public browser plugin API", () => {
 
   it("adds a discriminated workspace-files capability without breaking the existing v2 structural surface", () => {
     expectTypeOf<ExistingV2WorkspaceFiles>().toExtend<WorkspaceFiles>();
+    expectTypeOf<ExtendedWorkspaceFiles>().toExtend<WorkspaceFiles>();
+    expectTypeOf<ExtendedWorkspacePanelFiles>().toExtend<WorkspacePanelFiles>();
+    expectTypeOf<ImplementedWorkspaceFiles>().toExtend<WorkspaceFiles>();
+    expectTypeOf<ImplementedWorkspacePanelFiles>().toExtend<WorkspacePanelFiles>();
+    expectTypeOf<Extract<WorkspaceFilesContextValue, { readonly capabilityVersion: 1 }>>()
+      .toEqualTypeOf<WorkspaceFilesCapabilityV1>();
     expectTypeOf<WorkspaceFilesCapabilityV1["capabilityVersion"]>().toEqualTypeOf<1>();
     expectTypeOf<ReadonlyKeys<Pick<WorkspaceFilesCapabilityV1, "capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">>>().toEqualTypeOf<"capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">();
   });

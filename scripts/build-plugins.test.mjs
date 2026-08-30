@@ -12,6 +12,7 @@ import {
   readPiWebPluginPackageArtifact,
 } from "../src/server/piWebPluginCatalog.js";
 import { PiWebPluginService } from "../src/server/piWebPluginService.js";
+import { PluginRegistry } from "../src/client/src/plugins/registry.js";
 import {
   buildDirectory,
   buildFilesBrowserPackage,
@@ -162,10 +163,13 @@ describe("Files browser package build", () => {
     const entrySource = await readFile(entryPath, "utf8");
     expect(moduleSpecifiers(entrySource).some((specifier) => /^\.\/assets\/viewerDependencies-[^/]+\.js$/u.test(specifier))).toBe(true);
 
-    const moduleUrl = pathToFileURL(entryPath);
-    moduleUrl.searchParams.set("buildTest", String(Date.now()));
-    const { builtModule, activation } = await withBrowserGlobals(async () => {
-      const imported = await import(moduleUrl.href);
+    const firstModuleUrl = pathToFileURL(entryPath);
+    firstModuleUrl.searchParams.set("buildTest", `remote-1-${String(Date.now())}`);
+    const secondModuleUrl = pathToFileURL(entryPath);
+    secondModuleUrl.searchParams.set("buildTest", `remote-2-${String(Date.now())}`);
+    const { builtModule, secondBuiltModule, activation, registrations } = await withBrowserGlobals(async () => {
+      const imported = await import(firstModuleUrl.href);
+      const secondImported = await import(secondModuleUrl.href);
       const template = (strings, ...values) => ({ strings, values });
       const activated = imported.default.activate({
         apiVersion: 2,
@@ -174,9 +178,41 @@ describe("Files browser package build", () => {
         html: template,
         svg: template,
       });
-      return { builtModule: imported, activation: activated };
+      const firstElementConstructor = customElements.get("pi-web-files-panel");
+      const registry = new PluginRegistry();
+      registry.register({ id: "remote-1.files", sourcePluginId: "files", machineId: "remote-1", plugin: imported.default });
+      registry.register({ id: "remote-2.files", sourcePluginId: "files", machineId: "remote-2", plugin: secondImported.default });
+      const panels = registry.getWorkspacePanels();
+      const firstContext = builtWorkspacePanelContext("remote-1");
+      const secondContext = builtWorkspacePanelContext("remote-2");
+      const firstRendered = panels.find((panel) => panel.machineId === "remote-1")?.render(firstContext);
+      const secondRendered = panels.find((panel) => panel.machineId === "remote-2")?.render(secondContext);
+      return {
+        builtModule: imported,
+        secondBuiltModule: secondImported,
+        activation: activated,
+        registrations: {
+          panelMachineIds: panels.map((panel) => panel.machineId),
+          firstElementConstructor,
+          secondElementConstructor: customElements.get("pi-web-files-panel"),
+          firstContextBound: firstRendered?.values.includes(firstContext) === true,
+          secondContextBound: secondRendered?.values.includes(secondContext) === true,
+          firstRuntime: firstRendered?.values.find((value) => value instanceof imported.FilesRuntime),
+          secondRuntime: secondRendered?.values.find((value) => value instanceof secondImported.FilesRuntime),
+        },
+      };
     });
     expect(builtModule.default).toMatchObject({ apiVersion: 2, name: "Files" });
+    expect(secondBuiltModule.default).toMatchObject({ apiVersion: 2, name: "Files" });
+    expect(secondBuiltModule.FilesRuntime).not.toBe(builtModule.FilesRuntime);
+    expect(registrations.panelMachineIds).toEqual(["remote-1", "remote-2"]);
+    expect(registrations.firstElementConstructor).toBeDefined();
+    expect(registrations.secondElementConstructor).toBe(registrations.firstElementConstructor);
+    expect(registrations.firstContextBound).toBe(true);
+    expect(registrations.secondContextBound).toBe(true);
+    expect(registrations.firstRuntime).toBeInstanceOf(builtModule.FilesRuntime);
+    expect(registrations.secondRuntime).toBeInstanceOf(secondBuiltModule.FilesRuntime);
+    expect(registrations.secondRuntime).not.toBe(registrations.firstRuntime);
     expect(activation.contributions.workspacePanels).toMatchObject([{
       id: "workspace.files",
       routeAliases: ["files", "core:workspace.files"],
@@ -294,6 +330,30 @@ async function recursiveEntryCount(root) {
     if (entry.isDirectory()) count += await recursiveEntryCount(join(root, entry.name));
   }
   return count;
+}
+
+function builtWorkspacePanelContext(machineId) {
+  return {
+    machine: { id: machineId, name: machineId, kind: "remote" },
+    workspace: { id: "workspace-1", projectId: "project-1", path: "/repo", label: "repo", isMain: true },
+    files: {
+      capabilityVersion: 1,
+      defaultUploadFolder: ".pi-web/uploads",
+      maxInlinePreviewBytes: 1024,
+      readFile: () => Promise.reject(new Error("not used")),
+      listFiles: () => Promise.reject(new Error("not used")),
+      writeFile: () => Promise.reject(new Error("not used")),
+      deleteFile: () => Promise.reject(new Error("not used")),
+      moveFile: () => Promise.reject(new Error("not used")),
+      previewUrl: () => "about:blank",
+      downloadUrl: () => "about:blank",
+      uploadFile: () => { throw new Error("not used"); },
+    },
+    host: { requestRender: () => undefined },
+    prompt: { insertText: () => undefined, getText: () => "", getSelection: () => null },
+    terminal: { open: () => undefined, runCommand: () => Promise.reject(new Error("not used")) },
+    navigation: { version: 1, contributionId: "files:workspace.files", query: {}, set: () => undefined },
+  };
 }
 
 async function withBrowserGlobals(action) {

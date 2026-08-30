@@ -879,7 +879,7 @@ interface WorkspacePanelContext {
   machine: PluginMachine;
   workspace: Workspace;
   state?: PluginRuntimeState;
-  files: WorkspaceFiles;
+  files: WorkspaceFilesContextValue;
   backend?: {
     request(operation: string, input: JsonValue): Promise<JsonValue>;
   };
@@ -936,21 +936,30 @@ Use existing classes such as `toolbar`, `viewer`, `empty`, and `muted` for panel
 
 #### Workspace-files capability v1
 
-`context.files` remains structurally compatible with the five file operations that existing browser API v2 plugins use. Current hosts add a discriminated capability branch:
+`WorkspaceFiles` and its `WorkspacePanelFiles` alias retain the extendable and implementable five-operation shape published for browser API v2 adapters and test fakes. Callback contexts expose the separately named discriminated value type so current hosts can add capability v1 without replacing that source-compatible base:
 
 ```ts
-type WorkspaceFiles = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
+interface WorkspaceFiles {
+  readFile(path: string): Promise<FileContentResponse>;
+  listFiles(path: string): Promise<FileTreeResponse>;
+  writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
+  deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
+  moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
+}
 
-interface WorkspaceFilesCapabilityV1 {
+type WorkspacePanelFiles = WorkspaceFiles;
+
+interface LegacyWorkspaceFiles extends WorkspaceFiles {
+  readonly capabilityVersion?: undefined;
+}
+
+interface WorkspaceFilesCapabilityV1 extends WorkspaceFiles {
   readonly capabilityVersion: 1;
   readonly defaultUploadFolder: string;
   readonly maxInlinePreviewBytes: number;
 
   readFile(path: string, options?: { signal?: AbortSignal }): Promise<FileContentResponse>;
   listFiles(path: string, options?: { signal?: AbortSignal }): Promise<FileTreeResponse>;
-  writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
-  deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
-  moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
 
   previewUrl(path: string, options?: { version?: string }): string;
   downloadUrl(path: string, options?: { version?: string }): string;
@@ -970,9 +979,13 @@ interface WorkspaceFilesCapabilityV1 {
     cancel(): void;
   };
 }
+
+type WorkspaceFilesContextValue =
+  | LegacyWorkspaceFiles
+  | WorkspaceFilesCapabilityV1;
 ```
 
-Check the discriminator before using the v1 additions:
+Check the context-value discriminator before using the v1 additions:
 
 ```js
 const files = context.files;
@@ -1023,7 +1036,7 @@ interface WorkspacePanelNavigationV1 {
 }
 ```
 
-Read `context.navigation?.query` on each current panel callback or custom-element update. Call `set(key, value)` to push a history entry, pass `{ replace: true }` to replace it, or pass `undefined`/`null` to remove the key. Local keys use plugin-id syntax such as `file` or `view-mode`; PI WEB owns the qualified query namespace, serialization, browser history, and restoration. Do not read or write `window.location` for panel-owned state.
+Read `context.navigation?.query` on each current panel callback or custom-element update. Call `set(key, value)` to push a history entry, pass `{ replace: true }` to replace it, or pass `undefined`/`null` to remove the key. Local keys use plugin-id syntax such as `file` or `view-mode`; PI WEB owns the qualified query namespace, serialization, browser history, and restoration. Do not read or write `window.location` for panel-owned state. Navigation state is bounded to 64 distinct namespaced parameters, 16 values per parameter, 256 characters per full namespaced parameter, 4,096 characters per serialized value, and 65,536 aggregate decoded key/value characters. Malformed or excess restored URL state is ignored within those bounds. An invalid or over-limit `set()` call throws before browser history or the current URL changes.
 
 The snapshot is populated only while the address-bar machine, project, and workspace match the bound context. A write from a stale context is ignored. Browser back/forward produces a fresh snapshot through the normal host render/restoration path. `navigationAliases` lists former qualified contribution ids for migration only: canonical values win, and a write removes matching alias values and writes the canonical namespace.
 
@@ -1093,7 +1106,7 @@ interface WorkspaceLabelContext {
   machine: PluginMachine;
   workspace: Workspace;
   state?: PluginRuntimeState;
-  files: WorkspaceFiles;
+  files: WorkspaceFilesContextValue;
   backend?: {
     request(operation: string, input: JsonValue): Promise<JsonValue>;
   };

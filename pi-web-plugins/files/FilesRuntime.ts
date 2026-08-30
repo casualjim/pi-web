@@ -2,8 +2,8 @@ import type {
   FileContentResponse,
   FileTreeEntry,
   WorkspaceFileUploadTask,
-  WorkspaceFiles,
   WorkspaceFilesCapabilityV1,
+  WorkspaceFilesContextValue,
   WorkspaceInvalidation,
   WorkspacePanelContext,
   WorkspacePanelNavigationV1,
@@ -85,7 +85,10 @@ interface ScopeRecord extends FilesScopeState {
   selectedAbort: AbortController | undefined;
   selectedNeedsRestore: boolean;
   treeRequestGeneration: number;
+  treeAbort: AbortController | undefined;
+  expandedAborts: Map<string, AbortController>;
   initialized: boolean;
+  suspended: boolean;
   lastUsed: number;
   uploadTasks: Map<string, WorkspaceFileUploadTask>;
   cancelledUploads: Set<string>;
@@ -119,7 +122,7 @@ export class FilesRuntime {
   prepare(context: WorkspacePanelContext): FilesScopeState {
     const scope = this.bindContext(context);
     this.synchronizeNavigation(scope);
-    if (!scope.initialized && scope.capabilityError === undefined) {
+    if (!scope.initialized && !scope.suspended && scope.capabilityError === undefined) {
       scope.initialized = true;
       void this.refreshFiles(context);
     }
@@ -135,12 +138,17 @@ export class FilesRuntime {
 
   subscribe(context: WorkspacePanelContext, listener: FilesScopeListener): () => void {
     const scope = this.bindContext(context);
+    scope.suspended = false;
     scope.listeners.add(listener);
     return () => {
       scope.listeners.delete(listener);
-      if (scope.listeners.size === 0 && scope.selectedAbort !== undefined) {
-        this.cancelSelectedRequest(scope);
-        scope.selectedNeedsRestore = scope.selectedFilePath !== undefined;
+      if (scope.listeners.size === 0) {
+        scope.suspended = true;
+        if (scope.selectedAbort !== undefined) {
+          this.cancelSelectedRequest(scope);
+          scope.selectedNeedsRestore = scope.selectedFilePath !== undefined;
+        }
+        this.cancelTreeRequests(scope, true);
       }
       this.evictInactiveScopes();
     };
@@ -151,25 +159,30 @@ export class FilesRuntime {
     const files = this.requireFiles(scope);
     if (files === undefined) return;
     scope.initialized = true;
+    this.cancelTreeRequests(scope);
     const generation = ++scope.treeRequestGeneration;
+    const abort = new AbortController();
+    scope.treeAbort = abort;
     scope.treeLoading = true;
     this.notify(scope);
     try {
-      const root = await files.listFiles("");
+      const root = await files.listFiles("", { signal: abort.signal });
       const expandedEntries = await Promise.all(Object.keys(scope.expandedDirs).map(async (path) => {
-        const response = await files.listFiles(path);
+        const response = await files.listFiles(path, { signal: abort.signal });
         return [path, response.entries] as const;
       }));
-      if (generation !== scope.treeRequestGeneration) return;
+      if (!this.isCurrentTreeRequest(scope, generation, abort)) return;
       scope.fileTree = root.entries;
       scope.expandedDirs = Object.fromEntries(expandedEntries);
       scope.treeStale = false;
       delete scope.error;
     } catch (error) {
-      if (generation !== scope.treeRequestGeneration || isAbortError(error)) return;
+      if (!this.isCurrentTreeRequest(scope, generation, abort) || isAbortError(error)) return;
+      abort.abort();
       scope.error = errorMessage(error);
     } finally {
-      if (generation === scope.treeRequestGeneration) {
+      if (this.isCurrentTreeRequest(scope, generation, abort)) {
+        scope.treeAbort = undefined;
         scope.treeLoading = false;
         this.notify(scope);
       }
@@ -180,19 +193,30 @@ export class FilesRuntime {
     const scope = this.bindContext(context);
     const files = this.requireFiles(scope);
     if (files === undefined) return;
+    this.cancelTreeRefreshForInteraction(scope);
     if (scope.expandedDirs[path] !== undefined) {
+      this.cancelExpandedRequest(scope, path);
       scope.expandedDirs = omitKey(scope.expandedDirs, path);
       this.notify(scope);
       return;
     }
+    this.cancelExpandedRequest(scope, path);
+    const abort = new AbortController();
+    scope.expandedAborts.set(path, abort);
     try {
-      const response = await files.listFiles(path);
+      const response = await files.listFiles(path, { signal: abort.signal });
+      if (!this.isCurrentExpandedRequest(scope, path, abort)) return;
       scope.expandedDirs = { ...scope.expandedDirs, [path]: response.entries };
       delete scope.error;
     } catch (error) {
+      if (!this.isCurrentExpandedRequest(scope, path, abort) || isAbortError(error)) return;
       scope.error = errorMessage(error);
+    } finally {
+      if (this.isCurrentExpandedRequest(scope, path, abort)) {
+        scope.expandedAborts.delete(path);
+        this.notify(scope);
+      }
     }
-    this.notify(scope);
   }
 
   async selectFile(context: WorkspacePanelContext, path: string): Promise<void> {
@@ -275,6 +299,10 @@ export class FilesRuntime {
     const scope = this.bindContext(context);
     this.synchronizeNavigation(scope);
     scope.treeStale = true;
+    if (scope.suspended) {
+      this.cancelTreeRequests(scope, true);
+      return;
+    }
     this.notify(scope);
     if (hasInFlightUpload(scope)) return;
     await this.refreshFiles(context);
@@ -302,7 +330,10 @@ export class FilesRuntime {
         selectedAbort: undefined,
         selectedNeedsRestore: false,
         treeRequestGeneration: 0,
+        treeAbort: undefined,
+        expandedAborts: new Map(),
         initialized: false,
+        suspended: false,
         lastUsed: 0,
         uploadTasks: new Map(),
         cancelledUploads: new Set(),
@@ -336,6 +367,15 @@ export class FilesRuntime {
   private restoreNavigationSelection(scope: ScopeRecord): void {
     if (scope.capabilityError !== undefined) return;
     const selectedPath = firstQueryString(scope.navigationSnapshot?.query["file"]);
+    if (scope.suspended) {
+      this.cancelSelectedRequest(scope);
+      if (selectedPath === undefined || selectedPath === "") delete scope.selectedFilePath;
+      else scope.selectedFilePath = selectedPath;
+      delete scope.selectedFileContent;
+      delete scope.selectedFileLoadError;
+      scope.selectedNeedsRestore = selectedPath !== undefined && selectedPath !== "";
+      return;
+    }
     if (selectedPath === scope.selectedFilePath && !scope.selectedNeedsRestore) return;
     if (selectedPath === undefined || selectedPath === "") {
       this.cancelSelectedRequest(scope);
@@ -378,6 +418,40 @@ export class FilesRuntime {
 
   private isCurrentFileRequest(scope: ScopeRecord, generation: number, path: string): boolean {
     return scope.selectedRequestGeneration === generation && scope.selectedFilePath === path;
+  }
+
+  private isCurrentTreeRequest(scope: ScopeRecord, generation: number, abort: AbortController): boolean {
+    return scope.treeRequestGeneration === generation && scope.treeAbort === abort;
+  }
+
+  private isCurrentExpandedRequest(scope: ScopeRecord, path: string, abort: AbortController): boolean {
+    return scope.expandedAborts.get(path) === abort;
+  }
+
+  private cancelTreeRequests(scope: ScopeRecord, markForRestore = false): void {
+    scope.treeRequestGeneration += 1;
+    scope.treeAbort?.abort();
+    scope.treeAbort = undefined;
+    for (const abort of scope.expandedAborts.values()) abort.abort();
+    scope.expandedAborts.clear();
+    if (!markForRestore) return;
+    scope.initialized = false;
+    scope.treeLoading = false;
+    scope.treeStale = true;
+  }
+
+  private cancelTreeRefreshForInteraction(scope: ScopeRecord): void {
+    if (scope.treeAbort === undefined) return;
+    scope.treeRequestGeneration += 1;
+    scope.treeAbort.abort();
+    scope.treeAbort = undefined;
+    scope.treeLoading = false;
+    scope.treeStale = true;
+  }
+
+  private cancelExpandedRequest(scope: ScopeRecord, path: string): void {
+    scope.expandedAborts.get(path)?.abort();
+    scope.expandedAborts.delete(path);
   }
 
   private cancelSelectedRequest(scope: ScopeRecord): void {
@@ -484,8 +558,21 @@ export class FilesRuntime {
     options: StartWorkspaceUploadOptions,
   ): Promise<void> {
     if (successful.length === 0 || scope.uploadBatches[batch.id] !== batch) return;
-    await this.refreshFiles(scope.context);
     const firstPath = successful[0]?.path;
+    if (scope.suspended) {
+      scope.initialized = false;
+      scope.treeStale = true;
+      if (options.selectUploadedFile !== false && firstPath !== undefined) {
+        scope.context.navigation?.set("file", firstPath);
+        this.cancelSelectedRequest(scope);
+        scope.selectedFilePath = firstPath;
+        delete scope.selectedFileContent;
+        delete scope.selectedFileLoadError;
+        scope.selectedNeedsRestore = true;
+      }
+      return;
+    }
+    await this.refreshFiles(scope.context);
     if (options.selectUploadedFile !== false && firstPath !== undefined && scope.uploadBatches[batch.id] === batch) {
       await this.selectFile(scope.context, firstPath);
     }
@@ -512,7 +599,7 @@ export class FilesRuntime {
   private notify(scope: ScopeRecord): void {
     const snapshot: FilesScopeState = scope;
     for (const listener of [...scope.listeners]) listener(snapshot, scope.context);
-    if (scope.listeners.size === 0) scope.context.host.requestRender();
+    if (scope.listeners.size === 0 && !scope.suspended) scope.context.host.requestRender();
   }
 
   private evictInactiveScopes(protectedKey?: string): void {
@@ -524,6 +611,7 @@ export class FilesRuntime {
       const candidate = candidates.shift();
       if (candidate === undefined) break;
       this.cancelSelectedRequest(candidate);
+      this.cancelTreeRequests(candidate);
       this.scopes.delete(candidate.key);
     }
     if (this.scopes.size <= MAX_RECENT_SCOPES) return;
@@ -535,7 +623,7 @@ export class FilesRuntime {
   }
 }
 
-export function workspaceFilesCapabilityV1(files: WorkspaceFiles): WorkspaceFilesCapabilityV1 | undefined {
+export function workspaceFilesCapabilityV1(files: WorkspaceFilesContextValue): WorkspaceFilesCapabilityV1 | undefined {
   return files.capabilityVersion === 1 ? files : undefined;
 }
 
@@ -545,7 +633,7 @@ export function workspaceUploadPath(destinationFolder: string, fileName: string)
   return folder === "" ? name : `${folder}/${name}`;
 }
 
-function filesCapabilityError(files: WorkspaceFiles, navigation: WorkspacePanelNavigationV1 | undefined): string | undefined {
+function filesCapabilityError(files: WorkspaceFilesContextValue, navigation: WorkspacePanelNavigationV1 | undefined): string | undefined {
   if (files.capabilityVersion !== 1) return "Files requires workspace-files capability v1. Update the PI WEB host.";
   if (navigation?.version !== 1) return "Files requires contribution navigation v1. Update the PI WEB host.";
   return undefined;

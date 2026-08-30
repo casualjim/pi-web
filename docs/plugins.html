@@ -352,8 +352,9 @@ import type { PiWebServerPlugin, WorkspaceProvider } from "@jmfederico/pi-web/se
               <h3>Workspace files, navigation, and invalidation</h3>
               <p>
                 Workspace-files capability v1, contribution navigation v1, and scoped invalidation are additive parts of
-                browser API v2. Existing v2 plugins that use only <code>readFile</code>, <code>listFiles</code>,
-                <code>writeFile</code>, <code>deleteFile</code>, and <code>moveFile</code> remain compatible. Check
+                browser API v2. Existing v2 plugins that extend or implement the five-operation
+                <code>WorkspaceFiles</code> or <code>WorkspacePanelFiles</code> base remain source compatible;
+                callback contexts use the separate discriminated <code>WorkspaceFilesContextValue</code>. Check
                 <code>context.files.capabilityVersion === 1</code> before using the added file methods, and treat
                 <code>context.navigation</code> and the second <code>onInvalidate</code> argument as optional on older
                 hosts.
@@ -361,7 +362,7 @@ import type { PiWebServerPlugin, WorkspaceProvider } from "@jmfederico/pi-web/se
               <ul>
                 <li>The host binds file helpers to the callback's selected machine and workspace. Capability v1 adds cancellable reads/listings, the workspace-effective upload folder and preview limit, plus browser-ready preview/download URLs with nested-deployment and federation routing already applied exactly once.</li>
                 <li><code>uploadFile()</code> starts one cancellable browser-file transport with progress. It defaults to creating directories without overwriting, rejects cancellation as <code>AbortError</code>, and leaves multi-file batches and UI state to the plugin.</li>
-                <li>Optional panel navigation owns namespaced deep-link state and browser history for one contribution; plugins use its immutable query snapshot and <code>set()</code> rather than reading or writing <code>window.location</code>.</li>
+                <li>Optional panel navigation owns bounded namespaced deep-link state and browser history for one contribution; malformed restored state is ignored, and invalid or over-limit <code>set()</code> calls fail before changing the URL.</li>
                 <li>Panels declare <code>workspace.files</code> to receive scoped successful-mutation and completed-agent-activity invalidations. Manual <code>refreshWorkspacePanels()</code> behavior remains compatible with existing v2 callbacks.</li>
               </ul>
               <p>

@@ -34,12 +34,14 @@ export function readContributionQuery(
   aliases: readonly QualifiedContributionId[] = [],
 ): ContributionQuerySnapshot {
   const params = new URLSearchParams(window.location.search);
-  const query: Record<string, string | string[]> = {};
+  const query = emptyQueryRecord<string | string[]>();
+  const budget = { parameterCount: 0, recordLength: 0 };
   for (const id of uniqueContributionIds(contributionId, aliases)) {
-    const candidate = readNamespacedQueryFromParams(params, queryNamespace(id));
+    const namespace = queryNamespace(id);
+    const candidate = readNamespacedQueryFromParams(params, namespace);
     for (const [key, value] of Object.entries(candidate)) {
       if (!isContributionQueryLocalKey(key) || Object.hasOwn(query, key)) continue;
-      query[key] = Array.isArray(value) ? [...value] : value;
+      addBoundedQueryValue(query, key, value, `${namespace}--${key}`.length, budget);
     }
   }
   return freezeContributionQuery(query);
@@ -47,21 +49,16 @@ export function readContributionQuery(
 
 /** Capture only bounded, syntactically valid contribution-owned query parameters. */
 export function readContributionQueryRecord(): ContributionQueryRecord {
-  const raw: Record<string, string | string[]> = {};
-  for (const [key, value] of new URLSearchParams(window.location.search)) {
-    if (!isContributionQueryParameter(key)) continue;
-    const existing = raw[key];
-    if (existing === undefined) raw[key] = value;
-    else if (Array.isArray(existing)) existing.push(value);
-    else raw[key] = [existing, value];
-  }
-  return normalizeContributionQueryRecord(raw);
+  return readBoundedQueryFromParams(
+    new URLSearchParams(window.location.search),
+    (key) => isContributionQueryParameter(key) ? { key, parameterLength: key.length } : undefined,
+  );
 }
 
 /** Validate and bound a record loaded from browser memory or another untyped boundary. */
 export function normalizeContributionQueryRecord(value: unknown): ContributionQueryRecord {
-  if (!isRecord(value)) return {};
-  const result: ContributionQueryRecord = {};
+  if (!isRecord(value)) return emptyQueryRecord<string | string[]>();
+  const result = emptyQueryRecord<string | string[]>();
   let parameterCount = 0;
   let recordLength = 0;
   for (const [key, candidate] of Object.entries(value)) {
@@ -115,12 +112,16 @@ export function setContributionQueryKey(
   if (!isContributionQueryLocalKey(key)) throw new Error(`Invalid contribution navigation key: ${key}`);
 
   const serializedValues = value === undefined || value === null ? [] : serializeContributionQueryValue(key, value);
-  const url = new URL(window.location.href);
-  for (const id of uniqueContributionIds(contributionId, aliases)) {
-    url.searchParams.delete(`${queryNamespace(id)}--${key}`);
+  const parameterKeys = uniqueContributionIds(contributionId, aliases).map((id) => `${queryNamespace(id)}--${key}`);
+  const canonicalKey = parameterKeys[0];
+  if (canonicalKey === undefined) throw new Error("Contribution navigation requires a canonical contribution id");
+  if (canonicalKey.length > MAX_CONTRIBUTION_QUERY_PARAMETER_LENGTH) {
+    throw new Error(`Contribution navigation parameter is too long for key: ${key}`);
   }
-  const canonicalKey = `${queryNamespace(contributionId)}--${key}`;
+  const url = new URL(window.location.href);
+  for (const parameterKey of parameterKeys) url.searchParams.delete(parameterKey);
   for (const item of serializedValues) url.searchParams.append(canonicalKey, item);
+  assertContributionQueryParamsWithinLimits(url.searchParams);
   return commitUrl(url, options);
 }
 
@@ -148,16 +149,11 @@ export function isContributionQueryLocalKey(value: string): boolean {
 
 function readNamespacedQueryFromParams(params: URLSearchParams, namespace: string): Record<string, string | string[]> {
   const prefix = `${namespace}--`;
-  const result: Record<string, string | string[]> = {};
-  for (const [key, value] of params.entries()) {
-    if (!key.startsWith(prefix)) continue;
-    const localKey = key.slice(prefix.length);
-    const existing = result[localKey];
-    if (existing === undefined) result[localKey] = value;
-    else if (Array.isArray(existing)) existing.push(value);
-    else result[localKey] = [existing, value];
-  }
-  return result;
+  return readBoundedQueryFromParams(params, (parameter) => {
+    if (!parameter.startsWith(prefix)) return undefined;
+    const key = parameter.slice(prefix.length);
+    return isContributionQueryLocalKey(key) ? { key, parameterLength: parameter.length } : undefined;
+  });
 }
 
 function uniqueContributionIds(
@@ -168,7 +164,7 @@ function uniqueContributionIds(
 }
 
 function freezeContributionQuery(query: Record<string, string | string[]>): ContributionQuerySnapshot {
-  const snapshot: Record<string, string | readonly string[]> = {};
+  const snapshot = emptyQueryRecord<string | readonly string[]>();
   for (const [key, value] of Object.entries(query)) {
     snapshot[key] = Array.isArray(value) ? Object.freeze([...value]) : value;
   }
@@ -204,6 +200,96 @@ function commitUrl(url: URL, options?: { replace?: boolean | undefined }): boole
   return true;
 }
 
+interface QueryBudget {
+  parameterCount: number;
+  recordLength: number;
+}
+
+function readBoundedQueryFromParams(
+  params: URLSearchParams,
+  acceptParameter: (parameter: string) => { key: string; parameterLength: number } | undefined,
+): ContributionQueryRecord {
+  const result = emptyQueryRecord<string | string[]>();
+  const budget: QueryBudget = { parameterCount: 0, recordLength: 0 };
+  for (const [parameter, value] of params) {
+    const accepted = acceptParameter(parameter);
+    if (accepted === undefined
+      || accepted.parameterLength > MAX_CONTRIBUTION_QUERY_PARAMETER_LENGTH
+      || value.length > MAX_CONTRIBUTION_QUERY_VALUE_LENGTH) continue;
+    appendBoundedQueryParam(result, accepted.key, value, accepted.parameterLength, budget);
+  }
+  return result;
+}
+
+function addBoundedQueryValue(
+  result: Record<string, string | string[]>,
+  key: string,
+  value: string | readonly string[],
+  parameterLength: number,
+  budget: QueryBudget,
+): boolean {
+  if (Object.hasOwn(result, key)) return false;
+  const values = typeof value === "string" ? [value] : [...value];
+  if (values.length === 0
+    || values.length > MAX_CONTRIBUTION_QUERY_VALUES
+    || values.some((item) => item.length > MAX_CONTRIBUTION_QUERY_VALUE_LENGTH)
+    || budget.parameterCount >= MAX_CONTRIBUTION_QUERY_PARAMETERS) return false;
+  const candidateLength = parameterLength + values.reduce((total, item) => total + item.length, 0);
+  if (budget.recordLength + candidateLength > MAX_CONTRIBUTION_QUERY_RECORD_LENGTH) return false;
+  result[key] = values.length === 1 ? values[0] ?? "" : values;
+  budget.parameterCount += 1;
+  budget.recordLength += candidateLength;
+  return true;
+}
+
+function appendBoundedQueryParam(
+  result: ContributionQueryRecord,
+  key: string,
+  value: string,
+  parameterLength: number,
+  budget: QueryBudget,
+): void {
+  if (!Object.hasOwn(result, key)) {
+    addBoundedQueryValue(result, key, value, parameterLength, budget);
+    return;
+  }
+  const existing = result[key];
+  const existingValues = Array.isArray(existing) ? existing : [existing ?? ""];
+  if (existingValues.length >= MAX_CONTRIBUTION_QUERY_VALUES
+    || budget.recordLength + value.length > MAX_CONTRIBUTION_QUERY_RECORD_LENGTH) return;
+  result[key] = [...existingValues, value];
+  budget.recordLength += value.length;
+}
+
+function assertContributionQueryParamsWithinLimits(params: URLSearchParams): void {
+  const valueCounts = new Map<string, number>();
+  let parameterCount = 0;
+  let recordLength = 0;
+  for (const [key, value] of params) {
+    if (!isContributionQueryParameter(key)) continue;
+    if (key.length > MAX_CONTRIBUTION_QUERY_PARAMETER_LENGTH) throw new Error(`Contribution navigation parameter is too long: ${key}`);
+    if (value.length > MAX_CONTRIBUTION_QUERY_VALUE_LENGTH) throw new Error(`Contribution navigation value is too long for parameter: ${key}`);
+    const previousCount = valueCounts.get(key) ?? 0;
+    if (previousCount === 0) {
+      parameterCount += 1;
+      recordLength += key.length;
+      if (parameterCount > MAX_CONTRIBUTION_QUERY_PARAMETERS) throw new Error("Contribution navigation has too many parameters");
+    }
+    const nextCount = previousCount + 1;
+    if (nextCount > MAX_CONTRIBUTION_QUERY_VALUES) throw new Error(`Contribution navigation parameter has too many values: ${key}`);
+    valueCounts.set(key, nextCount);
+    recordLength += value.length;
+    if (recordLength > MAX_CONTRIBUTION_QUERY_RECORD_LENGTH) throw new Error("Contribution navigation record is too long");
+  }
+}
+
+function emptyQueryRecord<Value>(): Record<string, Value> {
+  // Contribution-owned local keys may be named `constructor` or `toString`;
+  // a null prototype keeps absent and present values inside the published type.
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- Object.create(null) has the intended string-record runtime shape without a typed overload.
+  return Object.create(null) as Record<string, Value>;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

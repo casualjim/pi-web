@@ -24,8 +24,8 @@ describe("FilesRuntime tree and selection", () => {
 
     await runtime.refreshFiles(context);
 
-    expect(listFiles).toHaveBeenCalledWith("");
-    expect(listFiles).toHaveBeenCalledWith("src");
+    expect(listFiles.mock.calls.find(([path]) => path === "")?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(listFiles.mock.calls.find(([path]) => path === "src")?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(scope.fileTree).toEqual([directoryEntry("src"), fileEntry("README.md")]);
     expect(scope.expandedDirs).toEqual({ src: [fileEntry("src/index.ts")] });
     expect(scope.treeStale).toBe(false);
@@ -34,6 +34,56 @@ describe("FilesRuntime tree and selection", () => {
     await runtime.expandDir(context, "src");
     expect(listFiles).not.toHaveBeenCalled();
     expect(scope.expandedDirs).toEqual({});
+  });
+
+  it("aborts superseded refreshes and directory expansions before stale results can commit", async () => {
+    const trees = deferredTrees();
+    const context = createContext({ files: createFiles({ listFiles: trees.fn }) });
+    const runtime = new FilesRuntime();
+
+    const staleRefresh = runtime.refreshFiles(context);
+    const currentRefresh = runtime.refreshFiles(context);
+    expect(trees.request(0).signal.aborted).toBe(true);
+    trees.request(1).resolve(treeResponse("", [directoryEntry("src")]));
+    await Promise.all([staleRefresh, currentRefresh]);
+    expect(runtime.snapshot(context).fileTree).toEqual([directoryEntry("src")]);
+
+    const staleExpansion = runtime.expandDir(context, "src");
+    const concurrentExpansion = runtime.expandDir(context, "docs");
+    const currentExpansion = runtime.expandDir(context, "src");
+    expect(trees.request(2).signal.aborted).toBe(true);
+    expect(trees.request(3).signal.aborted).toBe(false);
+    trees.request(3).resolve(treeResponse("docs", [fileEntry("docs/guide.md")]));
+    trees.request(4).resolve(treeResponse("src", [fileEntry("src/current.ts")]));
+    await Promise.all([staleExpansion, concurrentExpansion, currentExpansion]);
+    expect(runtime.snapshot(context).expandedDirs).toEqual({
+      docs: [fileEntry("docs/guide.md")],
+      src: [fileEntry("src/current.ts")],
+    });
+  });
+
+  it("aborts tree work when its last observer disconnects and refreshes on reconnect", async () => {
+    const trees = deferredTrees();
+    const context = createContext({ files: createFiles({ listFiles: trees.fn }) });
+    const runtime = new FilesRuntime();
+    const unsubscribe = runtime.subscribe(context, vi.fn());
+
+    const refresh = runtime.refreshFiles(context);
+    const expansion = runtime.expandDir(context, "src");
+    unsubscribe();
+
+    expect(trees.request(0).signal.aborted).toBe(true);
+    expect(trees.request(1).signal.aborted).toBe(true);
+    expect(runtime.snapshot(context)).toMatchObject({ initialized: false, treeLoading: false, treeStale: true });
+    await Promise.all([refresh, expansion]);
+    await runtime.invalidate(context);
+    expect(trees.fn).toHaveBeenCalledTimes(2);
+
+    runtime.subscribe(context, vi.fn());
+    const scope = runtime.prepare(context);
+    trees.request(2).resolve(treeResponse("", [fileEntry("README.md")]));
+    await vi.waitFor(() => { expect(scope.fileTree).toEqual([fileEntry("README.md")]); });
+    expect(trees.request(2).signal.aborted).toBe(false);
   });
 
   it("keeps expected failures visible and clears its tree error after recovery", async () => {
@@ -171,7 +221,7 @@ describe("FilesRuntime uploads", () => {
         { path: "uploads/manual/b.txt", status: "completed" },
       ],
     });
-    expect(listFiles).toHaveBeenCalledWith("");
+    expect(listFiles.mock.calls.find(([path]) => path === "")?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(readFile).toHaveBeenCalledWith("uploads/manual/a.txt", expect.anything());
     expect(setNavigation).toHaveBeenCalledWith("file", "uploads/manual/a.txt");
   });
@@ -216,7 +266,7 @@ describe("FilesRuntime uploads", () => {
     await run?.done;
 
     expect(runtime.snapshot(context).uploadBatches["batch-1"]?.status).toBe("cancelled");
-    expect(listFiles).toHaveBeenCalledWith("");
+    expect(listFiles.mock.calls.find(([path]) => path === "")?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(readFile).toHaveBeenCalledWith("uploads/a.txt", expect.anything());
     expect(runtime.snapshot(context).selectedFilePath).toBe("uploads/a.txt");
   });
@@ -329,6 +379,27 @@ function createNavigation(
   set: WorkspacePanelNavigationV1["set"] = vi.fn<WorkspacePanelNavigationV1["set"]>(),
 ): WorkspacePanelNavigationV1 {
   return { version: 1, contributionId: "files:workspace.files", query, set };
+}
+
+function deferredTrees() {
+  const requests: {
+    path: string;
+    signal: AbortSignal;
+    resolve: (value: FileTreeResponse) => void;
+  }[] = [];
+  const fn = vi.fn<WorkspaceFilesCapabilityV1["listFiles"]>((path, options) => new Promise((resolve, reject) => {
+    const signal = options?.signal ?? new AbortController().signal;
+    requests.push({ path, signal, resolve });
+    signal.addEventListener("abort", () => { reject(new DOMException("cancelled", "AbortError")); }, { once: true });
+  }));
+  return {
+    fn,
+    request: (index: number) => {
+      const request = requests[index];
+      if (request === undefined) throw new Error(`Missing tree request ${String(index)}`);
+      return request;
+    },
+  };
 }
 
 function deferredReads() {

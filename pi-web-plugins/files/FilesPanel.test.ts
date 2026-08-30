@@ -32,7 +32,9 @@ describe("Files panel component boundary", () => {
       expect(viewer.selectedPath).toBe("README.md");
       expect(viewer.file?.content).toBe("contents:README.md");
     });
-    expect(listFiles).toHaveBeenCalledWith("src");
+    const expansionCall = listFiles.mock.calls.find(([path]) => path === "src");
+    expect(expansionCall).toBeDefined();
+    expect(expansionCall?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(readFile.mock.calls[0]?.[0]).toBe("README.md");
     expect(readFile.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
   });
@@ -91,6 +93,31 @@ describe("Files panel component boundary", () => {
     });
   });
 
+  it("cancels an unobserved tree request on disconnect and reloads it on reconnect", async () => {
+    const signals: AbortSignal[] = [];
+    let listCount = 0;
+    const listFiles = vi.fn<WorkspaceFilesCapabilityV1["listFiles"]>((path, options) => {
+      listCount += 1;
+      const signal = options?.signal ?? new AbortController().signal;
+      signals.push(signal);
+      if (listCount > 1) return Promise.resolve(treeResponse(path, [{ name: "README.md", path: "README.md", type: "file" }]));
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => { reject(new DOMException("cancelled", "AbortError")); }, { once: true });
+      });
+    });
+    const context = createContext({ files: createFiles({ listFiles }) });
+    const panel = await mountPanel(context);
+    await vi.waitFor(() => { expect(listFiles).toHaveBeenCalledOnce(); });
+
+    panel.remove();
+    expect(signals[0]?.aborted).toBe(true);
+    document.body.append(panel);
+
+    await vi.waitFor(() => { expect(listFiles).toHaveBeenCalledTimes(2); });
+    await vi.waitFor(() => { expect(panel.shadowRoot?.textContent).toContain("README.md"); });
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
   it("uses a native modal dialog for upload review and restores trigger focus on close", async () => {
     const context = createContext();
     const panel = await mountPanel(context);
@@ -112,6 +139,37 @@ describe("Files panel component boundary", () => {
     await panel.updateComplete;
     expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
     expect(panel.shadowRoot?.activeElement).toBe(upload);
+  });
+
+  it("closes upload review without refocusing a hidden trigger when responsive layout hides the panel", async () => {
+    const panel = await mountPanel(createContext());
+    const upload = buttonWithText(panel.shadowRoot, "Upload");
+    const focus = vi.spyOn(upload, "focus");
+    const input = requiredElement(panel.shadowRoot?.querySelector<HTMLInputElement>("#workspace-upload-input"), "upload input");
+    upload.click();
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["hello"], "hello.txt")] });
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    await panel.updateComplete;
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector<HTMLDialogElement>("dialog.upload-dialog")?.open).toBe(true);
+
+    Object.defineProperty(panel, "getClientRects", { configurable: true, value: () => [] });
+    focus.mockClear();
+    window.dispatchEvent(new Event("resize"));
+    await panel.updateComplete;
+    await panel.updateComplete;
+
+    expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    panel.requestUpdate();
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
+
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["later"], "later.txt")] });
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    window.dispatchEvent(new Event("resize"));
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
   });
 
   it("submits reviewed files with safe defaults and renders upload completion", async () => {

@@ -34,7 +34,7 @@ import { loadExternalPlugins, type ExternalPluginLoadResult } from "../plugins/e
 import { PluginRegistry, installPluginRuntimeScope, installWorkspaceLabelScope, installWorkspacePanelScope } from "../plugins/registry";
 import { createPluginWorkspaceBackend } from "../plugins/workspaceBackend";
 import { createWorkspaceFiles as createPluginWorkspaceFiles } from "../plugins/workspaceFiles";
-import { isContributionQueryLocalKey, queryNamespace, readContributionQuery, readContributionQueryRecord, readNamespacedString, setContributionQueryKey, setNamespacedQueryKey, writeContributionQueryRecord, type ContributionQueryRecord } from "../namespacedQueryArgs";
+import { contributionQueryFromRecord, isContributionQueryLocalKey, queryNamespace, readContributionQuery, readContributionQueryRecord, readNamespacedString, setContributionQueryKey, setNamespacedQueryKey, writeContributionQueryRecord, type ContributionQueryRecord } from "../namespacedQueryArgs";
 import { AppShellController } from "../appShell/appShellController";
 import { BrowserResumeController } from "../appShell/browserResumeController";
 import { NavigationSectionsController, type NavigationSection } from "../appShell/navigationState";
@@ -97,6 +97,12 @@ interface WorkspaceRouteFinishOptions {
   unavailablePanelViewRoute: boolean;
   requestedTool: AppRoute["tool"];
   requestedView: AppRoute["view"];
+  restoredWorkspaceIdentity?: WorkspaceRouteIdentity | undefined;
+}
+
+interface WorkspaceContributionQueryRestore {
+  readonly identity: WorkspaceRouteIdentity;
+  readonly query: Readonly<ContributionQueryRecord>;
 }
 
 interface SessionCleanupDialogState {
@@ -552,12 +558,14 @@ export class PiWebApp extends LitElement {
       const route = resolveAppRoute(parsedRoute, (value) => this.plugins.resolveWorkspacePanelRouteId(value, selectedMachineId(this.state)));
       const unavailableToolRoute = parsedRoute.tool !== undefined && route.tool === undefined;
       const unavailablePanelViewRoute = parsedRoute.view !== undefined && parsedRoute.view !== "chat" && route.view === undefined;
+      const restoredWorkspaceIdentity = workspaceRouteIdentity(route);
       const finishOptions: WorkspaceRouteFinishOptions = {
         updateUrl,
         normalizeUnavailableRoute: unavailableToolRoute || unavailablePanelViewRoute,
         unavailablePanelViewRoute,
         requestedTool: route.tool,
         requestedView: route.view,
+        ...(restoredWorkspaceIdentity === undefined ? {} : { restoredWorkspaceIdentity }),
       };
       this.setState({
         workspaceTool: route.tool ?? this.state.workspaceTool,
@@ -607,7 +615,10 @@ export class PiWebApp extends LitElement {
       if (fallback !== undefined) this.setState({ mainView: fallback });
     }
     const selectionChanged = this.reconcileWorkspacePanelSelection();
-    await this.refreshRestoredWorkspaceTool(this.state.workspaceTool);
+    const contributionQueryRestore = options.restoredWorkspaceIdentity === undefined
+      ? undefined
+      : { identity: options.restoredWorkspaceIdentity, query: surface.contributionQuery ?? {} };
+    await this.refreshRestoredWorkspaceTool(this.state.workspaceTool, contributionQueryRestore);
     if (options.updateUrl || selectionChanged || normalizeUnavailableRoute) {
       this.updateUrl(selectionChanged || normalizeUnavailableRoute ? { replace: true } : undefined, surface.contributionQuery);
     }
@@ -763,8 +774,13 @@ export class PiWebApp extends LitElement {
       && this.state.selectedSession?.id === route.sessionId;
   }
 
-  private async refreshRestoredWorkspaceTool(tool: QualifiedContributionId | undefined): Promise<void> {
-    if (tool !== undefined && tool !== "core:workspace.terminal") await this.invalidateWorkspacePanels(tool);
+  private async refreshRestoredWorkspaceTool(
+    tool: QualifiedContributionId | undefined,
+    contributionQueryRestore?: WorkspaceContributionQueryRestore,
+  ): Promise<void> {
+    if (tool !== undefined && tool !== "core:workspace.terminal") {
+      await this.invalidateWorkspacePanels(tool, contributionQueryRestore);
+    }
   }
 
   private resolveRestoredMainView(view: AppState["mainView"] | undefined): AppState["mainView"] | undefined {
@@ -1553,7 +1569,11 @@ export class PiWebApp extends LitElement {
     };
   }
 
-  private createWorkspacePanelContext(workspace: Workspace, machine = pluginMachineFromState(this.state)): WorkspacePanelContext {
+  private createWorkspacePanelContext(
+    workspace: Workspace,
+    machine = pluginMachineFromState(this.state),
+    contributionQueryRestore?: WorkspaceContributionQueryRestore,
+  ): WorkspacePanelContext {
     const machineId = machine.id;
     const createContext = (
       binding: WorkspacePluginBinding,
@@ -1573,7 +1593,9 @@ export class PiWebApp extends LitElement {
           open: (options) => { void this.openRuntimeTerminal(machineId, workspace, options); },
           runCommand: (input) => terminalCommandRuns.runCommand({ ...input, workspace }),
         },
-        ...(contributionId === undefined ? {} : { navigation: this.createWorkspacePanelNavigation(workspace, machine, contributionId, navigationAliases) }),
+        ...(contributionId === undefined ? {} : {
+          navigation: this.createWorkspacePanelNavigation(workspace, machine, contributionId, navigationAliases, contributionQueryRestore),
+        }),
         openTerminal: (options) => { void this.openRuntimeTerminal(machineId, workspace, options); },
         host: this.createWorkspaceHost(),
         piWebUnstable: { terminalCommandRuns },
@@ -1591,11 +1613,14 @@ export class PiWebApp extends LitElement {
     machine: PluginMachine,
     contributionId: QualifiedContributionId,
     navigationAliases: readonly QualifiedContributionId[],
+    contributionQueryRestore?: WorkspaceContributionQueryRestore,
   ): WorkspacePanelNavigationV1 {
     const identity: WorkspaceRouteIdentity = { machineId: machine.id, projectId: workspace.projectId, workspaceId: workspace.id };
-    const query = routeMatchesWorkspaceIdentity(readRoute(), identity)
-      ? readContributionQuery(contributionId, navigationAliases)
-      : Object.freeze({});
+    const query = contributionQueryRestore !== undefined && sameWorkspaceRouteIdentity(identity, contributionQueryRestore.identity)
+      ? contributionQueryFromRecord(contributionQueryRestore.query, contributionId, navigationAliases)
+      : routeMatchesWorkspaceIdentity(readRoute(), identity)
+        ? readContributionQuery(contributionId, navigationAliases)
+        : Object.freeze({});
     return Object.freeze({
       version: 1,
       contributionId,
@@ -1613,10 +1638,16 @@ export class PiWebApp extends LitElement {
     });
   }
 
-  private invalidateWorkspacePanels(panelId?: QualifiedContributionId): Promise<void> {
+  private invalidateWorkspacePanels(
+    panelId?: QualifiedContributionId,
+    contributionQueryRestore?: WorkspaceContributionQueryRestore,
+  ): Promise<void> {
     const workspace = this.state.selectedWorkspace;
     if (workspace === undefined) return Promise.resolve();
-    return this.plugins.invalidateWorkspacePanels(this.createWorkspacePanelContext(workspace), panelId);
+    return this.plugins.invalidateWorkspacePanels(
+      this.createWorkspacePanelContext(workspace, pluginMachineFromState(this.state), contributionQueryRestore),
+      panelId,
+    );
   }
 
   private invalidateWorkspaceResources(workspace: Workspace, machine: PluginMachine, invalidation: WorkspaceInvalidation): Promise<void> {
@@ -2466,6 +2497,11 @@ function isTerminalEvent(event: BrowserRealtimeEvent): event is TerminalUiEvent 
 
 function emptyWorkspaceRouteSurface(): WorkspaceRouteSurface {
   return {};
+}
+
+function workspaceRouteIdentity(route: Pick<AppRoute, "machineId" | "projectId" | "workspaceId">): WorkspaceRouteIdentity | undefined {
+  if (route.projectId === undefined || route.projectId === "" || route.workspaceId === undefined || route.workspaceId === "") return undefined;
+  return { machineId: route.machineId ?? "local", projectId: route.projectId, workspaceId: route.workspaceId };
 }
 
 function machineScopedKey(machineId: string, value: string): string {

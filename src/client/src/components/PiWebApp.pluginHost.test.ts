@@ -208,39 +208,7 @@ describe("PiWebApp plugin host", () => {
     }));
     const files = testWorkspaceFiles({ readFile });
     const contexts: PublicWorkspacePanelContext[] = [];
-    appPluginRegistry(app).register({
-      id: "files",
-      plugin: {
-        apiVersion: 2,
-        name: "Files host integration",
-        activate: ({ html }) => ({
-          contributions: {
-            workspacePanels: [{
-              id: "workspace.files",
-              title: "Files",
-              routeAliases: ["files", "core:workspace.files"],
-              navigationAliases: ["core:workspace.files"],
-              invalidationResources: ["workspace.files"],
-              onInvalidate: (context, invalidation) => {
-                const runtimeContext: PublicWorkspacePanelContext = {
-                  machine: context.machine,
-                  workspace: context.workspace,
-                  files,
-                  ...(context.backend === undefined ? {} : { backend: context.backend }),
-                  host: context.host,
-                  prompt: context.prompt,
-                  terminal: context.terminal,
-                  ...(context.navigation === undefined ? {} : { navigation: context.navigation }),
-                };
-                contexts.push(runtimeContext);
-                return runtime.invalidate(runtimeContext, invalidation);
-              },
-              render: () => html`<p>Files</p>`,
-            }],
-          },
-        }),
-      },
-    });
+    registerFilesRuntimePanel(app, runtime, files, contexts);
 
     await callAsyncAppMethod(app, "restoreRoute", false);
     const legacyContext = contexts[0];
@@ -271,6 +239,134 @@ describe("PiWebApp plugin host", () => {
       query: { file: "back.ts" },
     });
     expect(readFile.mock.calls.map(([path]) => path)).toEqual(["legacy.ts", "back.ts"]);
+  });
+
+  it("restores remembered Files navigation through machine A→B→A before each selection settles", async () => {
+    const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
+    const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
+    const projectB: Project = { id: "project-b", name: "Project B", path: "/repo-b", createdAt: "now" };
+    const workspaceA: Workspace = { id: "workspace-a", projectId: projectA.id, path: "/repo-a", label: "A", isMain: true, effectiveConfig: {} };
+    const workspaceB: Workspace = { id: "workspace-b", projectId: projectB.id, path: "/repo-b", label: "B", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&tool=files%3Aworkspace.files&view=files%3Aworkspace.files&core.workspace.files--file=a.ts&core.workspace.files--mode=raw");
+    const app = new PiWebApp();
+    if (!Reflect.set(app, "schedulePiWebStatusRefresh", () => undefined)) throw new Error("Could not stub deferred status refresh");
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [machineA, machineB],
+      selectedMachine: machineA,
+      projects: [projectA],
+      selectedProject: projectA,
+      workspaces: [workspaceA],
+      selectedWorkspace: workspaceA,
+      workspaceTool: "files:workspace.files",
+      mainView: "files:workspace.files",
+    });
+    markPluginLoadingReady(app, [machineB.id]);
+    if (!Reflect.set(app, "restoreRouteMachine", (route: { machineId?: string | undefined }) => {
+      const target = (route.machineId ?? "local") === machineB.id
+        ? { machine: machineB, project: projectB, workspace: workspaceB }
+        : { machine: machineA, project: projectA, workspace: workspaceA };
+      setAppState(app, {
+        ...appState(app),
+        selectedMachine: target.machine,
+        projects: [target.project],
+        selectedProject: target.project,
+        workspaces: [target.workspace],
+        selectedWorkspace: target.workspace,
+        selectedSession: undefined,
+        error: "",
+      });
+      return Promise.resolve();
+    })) throw new Error("Could not stub machine route selection");
+
+    type TestFileContent = Awaited<ReturnType<WorkspaceFilesCapabilityV1["readFile"]>>;
+    const pendingReads: { path: string; resolve: (content: TestFileContent) => void }[] = [];
+    const readFile = vi.fn<WorkspaceFilesCapabilityV1["readFile"]>((path) => new Promise<TestFileContent>((resolve) => {
+      pendingReads.push({ path, resolve });
+    }));
+    const resolveRead = (index: number) => {
+      const request = pendingReads[index];
+      if (request === undefined) throw new Error(`Missing pending file read ${String(index)}`);
+      request.resolve({
+        path: request.path,
+        encoding: "utf8",
+        size: request.path.length,
+        modifiedAt: "2026-06-25T00:00:00.000Z",
+        content: `loaded:${request.path}`,
+        truncated: false,
+        binary: false,
+      });
+    };
+    const runtime = new FilesRuntime();
+    const contexts: PublicWorkspacePanelContext[] = [];
+    registerFilesRuntimePanel(app, runtime, testWorkspaceFiles({ readFile }), contexts);
+    rememberMachineNavigationSnapshot(app, {
+      machineId: machineB.id,
+      projectId: projectB.id,
+      workspaceId: workspaceB.id,
+      tool: "files:workspace.files",
+      view: "files:workspace.files",
+      surface: {
+        contributionQuery: {
+          "files.workspace.files--file": "b.ts",
+          "files.workspace.files--mode": "preview",
+        },
+      },
+    });
+
+    let toBSettled = false;
+    const toB = callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
+    void toB.then(() => { toBSettled = true; });
+    await vi.waitFor(() => { expect(pendingReads).toHaveLength(1); });
+    const contextB = latestFilesContext(contexts, machineB.id);
+
+    expect(toBSettled).toBe(false);
+    expect(contextB.navigation?.query).toEqual({ file: "b.ts", mode: "preview" });
+    expect(browser.url.searchParams.get("project")).toBe(projectA.id);
+    expect(browser.url.searchParams.get("core.workspace.files--file")).toBe("a.ts");
+    resolveRead(0);
+    await toB;
+
+    expect(appState(app).selectedMachine?.id).toBe(machineB.id);
+    expect(runtime.snapshot(contextB)).toMatchObject({
+      selectedFilePath: "b.ts",
+      selectedFileContent: { path: "b.ts", content: "loaded:b.ts" },
+    });
+    expect(browser.url.searchParams.get("machine")).toBe(machineB.id);
+    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
+    expect(browser.url.searchParams.get("files.workspace.files--mode")).toBe("preview");
+    expect(browser.url.searchParams.has("core.workspace.files--file")).toBe(false);
+
+    let toASettled = false;
+    const toA = callAsyncAppMethod(app, "selectMachineWithMemory", machineA);
+    void toA.then(() => { toASettled = true; });
+    await vi.waitFor(() => { expect(pendingReads).toHaveLength(2); });
+    const contextA = latestFilesContext(contexts, machineA.id);
+
+    expect(toASettled).toBe(false);
+    expect(contextA.navigation?.query).toEqual({ file: "a.ts", mode: "raw" });
+    expect(browser.url.searchParams.get("machine")).toBe(machineB.id);
+    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
+    resolveRead(1);
+    await toA;
+
+    expect(appState(app).selectedMachine?.id).toBe(machineA.id);
+    expect(runtime.snapshot(contextA)).toMatchObject({
+      selectedFilePath: "a.ts",
+      selectedFileContent: { path: "a.ts", content: "loaded:a.ts" },
+    });
+    expect(readFile.mock.calls.map(([path]) => path)).toEqual(["b.ts", "a.ts"]);
+    expect(browser.url.searchParams.has("machine")).toBe(false);
+    expect(browser.url.searchParams.get("core.workspace.files--file")).toBe("a.ts");
+    expect(browser.url.searchParams.get("core.workspace.files--mode")).toBe("raw");
+    expect(browser.url.searchParams.has("files.workspace.files--file")).toBe(false);
+    expect(browser.pushed).toHaveLength(2);
+    expect(browser.replaced).toHaveLength(2);
+    expect(historyUrl(browser.replaced, 0).searchParams.get("files.workspace.files--file")).toBe("b.ts");
+    expect(historyUrl(browser.replaced, 0).searchParams.has("core.workspace.files--file")).toBe(false);
+    expect(historyUrl(browser.replaced, 1).searchParams.get("core.workspace.files--file")).toBe("a.ts");
+    expect(historyUrl(browser.replaced, 1).searchParams.has("files.workspace.files--file")).toBe(false);
   });
 
   it("waits for gateway contributions before choosing the first default workspace panel", () => {
@@ -629,6 +725,77 @@ function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelCon
       },
     }),
   };
+}
+
+function registerFilesRuntimePanel(
+  app: PiWebApp,
+  runtime: FilesRuntime,
+  files: WorkspaceFilesCapabilityV1,
+  contexts: PublicWorkspacePanelContext[],
+): void {
+  appPluginRegistry(app).register({
+    id: "files",
+    plugin: {
+      apiVersion: 2,
+      name: "Files host integration",
+      activate: ({ html }) => ({
+        contributions: {
+          workspacePanels: [{
+            id: "workspace.files",
+            title: "Files",
+            routeAliases: ["files", "core:workspace.files"],
+            navigationAliases: ["core:workspace.files"],
+            invalidationResources: ["workspace.files"],
+            onInvalidate: (context, invalidation) => {
+              const runtimeContext: PublicWorkspacePanelContext = {
+                machine: context.machine,
+                workspace: context.workspace,
+                files,
+                ...(context.backend === undefined ? {} : { backend: context.backend }),
+                host: context.host,
+                prompt: context.prompt,
+                terminal: context.terminal,
+                ...(context.navigation === undefined ? {} : { navigation: context.navigation }),
+              };
+              contexts.push(runtimeContext);
+              return runtime.invalidate(runtimeContext, invalidation);
+            },
+            render: () => html`<p>Files</p>`,
+          }],
+        },
+      }),
+    },
+  });
+}
+
+function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string[] = []): void {
+  if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
+  if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
+  const loaded: unknown = Reflect.get(app, "loadedMachinePluginIds");
+  if (!(loaded instanceof Set)) throw new Error("PiWebApp loaded-machine plugin set was unavailable");
+  for (const machineId of loadedMachineIds) loaded.add(machineId);
+}
+
+function rememberMachineNavigationSnapshot(app: PiWebApp, snapshot: MachineNavigationSnapshot): void {
+  const memory: unknown = Reflect.get(app, "machineNavigation");
+  if (typeof memory !== "object" || memory === null) throw new Error("PiWebApp machine-navigation memory was unavailable");
+  const remember: unknown = Reflect.get(memory, "remember");
+  if (typeof remember !== "function") throw new Error("PiWebApp machine-navigation remember operation was unavailable");
+  Reflect.apply(remember, memory, [snapshot]);
+}
+
+function latestFilesContext(contexts: readonly PublicWorkspacePanelContext[], machineId: string): PublicWorkspacePanelContext {
+  for (let index = contexts.length - 1; index >= 0; index -= 1) {
+    const context = contexts[index];
+    if (context?.machine.id === machineId) return context;
+  }
+  throw new Error(`Files did not receive a context for ${machineId}`);
+}
+
+function historyUrl(entries: readonly string[], index: number): URL {
+  const entry = entries[index];
+  if (entry === undefined) throw new Error(`Missing history entry ${String(index)}`);
+  return new URL(entry);
 }
 
 function testWorkspaceFiles(overrides: Partial<WorkspaceFilesCapabilityV1> = {}): WorkspaceFilesCapabilityV1 {

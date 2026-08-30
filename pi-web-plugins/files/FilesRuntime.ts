@@ -121,7 +121,7 @@ export class FilesRuntime {
 
   prepare(context: WorkspacePanelContext): FilesScopeState {
     const scope = this.bindContext(context);
-    this.synchronizeNavigation(scope);
+    void this.synchronizeNavigation(scope);
     if (!scope.initialized && !scope.suspended && scope.capabilityError === undefined) {
       scope.initialized = true;
       void this.refreshFiles(context);
@@ -297,15 +297,19 @@ export class FilesRuntime {
   async invalidate(context: WorkspacePanelContext, _invalidation?: WorkspaceInvalidation): Promise<void> {
     void _invalidation;
     const scope = this.bindContext(context);
-    this.synchronizeNavigation(scope);
+    const navigationRestore = this.synchronizeNavigation(scope);
     scope.treeStale = true;
     if (scope.suspended) {
       this.cancelTreeRequests(scope, true);
+      await navigationRestore;
       return;
     }
     this.notify(scope);
-    if (hasInFlightUpload(scope)) return;
-    await this.refreshFiles(context);
+    if (hasInFlightUpload(scope)) {
+      await navigationRestore;
+      return;
+    }
+    await Promise.all([navigationRestore, this.refreshFiles(context)]);
   }
 
   private bindContext(context: WorkspacePanelContext): ScopeRecord {
@@ -358,13 +362,13 @@ export class FilesRuntime {
     return undefined;
   }
 
-  private synchronizeNavigation(scope: ScopeRecord): void {
-    if (scope.navigationSnapshot === scope.context.navigation && !scope.selectedNeedsRestore) return;
+  private synchronizeNavigation(scope: ScopeRecord): Promise<void> {
+    if (scope.navigationSnapshot === scope.context.navigation && !scope.selectedNeedsRestore) return Promise.resolve();
     scope.navigationSnapshot = scope.context.navigation;
-    this.restoreNavigationSelection(scope);
+    return this.restoreNavigationSelection(scope);
   }
 
-  private restoreNavigationSelection(scope: ScopeRecord): void {
+  private async restoreNavigationSelection(scope: ScopeRecord): Promise<void> {
     if (scope.capabilityError !== undefined) return;
     const selectedPath = firstQueryString(scope.navigationSnapshot?.query["file"]);
     if (scope.suspended) {
@@ -386,7 +390,7 @@ export class FilesRuntime {
       this.notify(scope);
       return;
     }
-    void this.restoreFile(scope, selectedPath);
+    await this.restoreFile(scope, selectedPath);
   }
 
   private async restoreFile(scope: ScopeRecord, path: string): Promise<void> {

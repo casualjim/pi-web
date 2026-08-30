@@ -33,7 +33,28 @@ export function readContributionQuery(
   contributionId: QualifiedContributionId,
   aliases: readonly QualifiedContributionId[] = [],
 ): ContributionQuerySnapshot {
-  const params = new URLSearchParams(window.location.search);
+  return contributionQueryFromParams(new URLSearchParams(window.location.search), contributionId, aliases);
+}
+
+/** Project a bounded full contribution-query record into one contribution's canonical snapshot. */
+export function contributionQueryFromRecord(
+  record: Readonly<Record<string, ContributionQueryValue>>,
+  contributionId: QualifiedContributionId,
+  aliases: readonly QualifiedContributionId[] = [],
+): ContributionQuerySnapshot {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(normalizeContributionQueryRecord(record))) {
+    if (typeof value === "string") params.append(key, value);
+    else for (const item of value) params.append(key, item);
+  }
+  return contributionQueryFromParams(params, contributionId, aliases);
+}
+
+function contributionQueryFromParams(
+  params: URLSearchParams,
+  contributionId: QualifiedContributionId,
+  aliases: readonly QualifiedContributionId[],
+): ContributionQuerySnapshot {
   const query = emptyQueryRecord<string | string[]>();
   const budget = { parameterCount: 0, recordLength: 0 };
   for (const id of uniqueContributionIds(contributionId, aliases)) {

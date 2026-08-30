@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  contributionQueryFromRecord,
   isContributionQueryParameter,
   readContributionQuery,
   readContributionQueryRecord,
@@ -28,6 +29,19 @@ describe("contribution-scoped query helpers", () => {
     expect(first).toEqual({ file: "canonical.ts", mode: "preview", tag: ["one", "two"] });
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first["tag"])).toBe(true);
+  });
+
+  it("projects remembered full records through canonical and alias contribution identities", () => {
+    const projected = contributionQueryFromRecord({
+      "panel.workspace.panel--file": "canonical.ts",
+      "legacy.workspace.panel--file": "legacy.ts",
+      "legacy.workspace.panel--mode": "preview",
+      "other.workspace.panel--file": "other.ts",
+      malformed: "ignored",
+    }, "panel:workspace.panel", ["legacy:workspace.panel"]);
+
+    expect(projected).toEqual({ file: "canonical.ts", mode: "preview" });
+    expect(Object.isFrozen(projected)).toBe(true);
   });
 
   it("reads inherited-key names as own strings and bounds values, keys, counts, and aggregate length", () => {

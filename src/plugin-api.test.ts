@@ -14,6 +14,7 @@ import type {
   WorkspaceInvalidation,
   WorkspacePanelContext,
   WorkspacePanelContribution,
+  WorkspacePanelNavigationV1,
   WorkspaceProviderCapabilities,
   WorkspaceProviderMetadata,
   WorkspaceRemovalPresentation,
@@ -35,6 +36,7 @@ type ReadonlyKeys<Value> = {
 }[keyof Value];
 
 type WritableKeys<Value> = Exclude<keyof Value, ReadonlyKeys<Value>>;
+type IsOptional<Value, Key extends keyof Value> = Pick<Value, Key> extends Required<Pick<Value, Key>> ? false : true;
 
 interface ExistingV2WorkspaceFiles {
   readFile(path: string): Promise<FileContentResponse>;
@@ -63,6 +65,16 @@ describe("public browser plugin API", () => {
     expectTypeOf<ExistingV2WorkspaceFiles>().toExtend<WorkspaceFiles>();
     expectTypeOf<WorkspaceFilesCapabilityV1["capabilityVersion"]>().toEqualTypeOf<1>();
     expectTypeOf<ReadonlyKeys<Pick<WorkspaceFilesCapabilityV1, "capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">>>().toEqualTypeOf<"capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">();
+  });
+
+  it("adds optional versioned panel navigation without changing browser API v2 compatibility", () => {
+    type NavigationIsOptional = IsOptional<WorkspacePanelContext, "navigation">;
+    type NavigationAliasesAreOptional = IsOptional<WorkspacePanelContribution, "navigationAliases">;
+    expectTypeOf<WorkspacePanelNavigationV1["version"]>().toEqualTypeOf<1>();
+    expectTypeOf<ReadonlyKeys<Pick<WorkspacePanelNavigationV1, "version" | "contributionId" | "query">>>()
+      .toEqualTypeOf<"version" | "contributionId" | "query">();
+    expectTypeOf<NavigationIsOptional>().toEqualTypeOf<true>();
+    expectTypeOf<NavigationAliasesAreOptional>().toEqualTypeOf<true>();
   });
 
   it("keeps invalidation snapshots readonly and one-argument v2 callbacks assignable", () => {

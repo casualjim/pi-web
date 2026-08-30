@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readRoute, resolveAppRoute, writeRoute, type AppRoute } from "./route";
+import { readRoute, resolveAppRoute, routeMatchesWorkspaceIdentity, writeRoute, type AppRoute } from "./route";
 
 const originalWindow = globalThis.window;
 
@@ -77,6 +77,21 @@ describe("route helpers", () => {
       tool: "git:workspace.git",
       view: "git:workspace.git",
     });
+  });
+
+  it("matches contribution navigation to the exact machine, project, and workspace route", () => {
+    expect(routeMatchesWorkspaceIdentity(
+      { machineId: undefined, projectId: "p1", workspaceId: "w1" },
+      { machineId: "local", projectId: "p1", workspaceId: "w1" },
+    )).toBe(true);
+    expect(routeMatchesWorkspaceIdentity(
+      { machineId: "remote", projectId: "p1", workspaceId: "w1" },
+      { machineId: "local", projectId: "p1", workspaceId: "w1" },
+    )).toBe(false);
+    expect(routeMatchesWorkspaceIdentity(
+      { machineId: "remote", projectId: "p1", workspaceId: "other" },
+      { machineId: "remote", projectId: "p1", workspaceId: "w1" },
+    )).toBe(false);
   });
 
   it("writes compact URLs with push history and preserves path/hash", () => {

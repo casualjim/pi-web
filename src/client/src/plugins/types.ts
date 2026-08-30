@@ -207,9 +207,20 @@ export interface QualifiedPluginAction extends AppAction {
   machineId?: string;
 }
 
+export type ContributionQueryValue = string | number | boolean | readonly (string | number | boolean)[];
+
+export interface WorkspacePanelNavigationV1 {
+  readonly version: 1;
+  readonly contributionId: QualifiedContributionId;
+  readonly query: Readonly<Record<string, string | readonly string[]>>;
+  set(key: string, value: ContributionQueryValue | undefined | null, options?: { replace?: boolean | undefined }): void;
+}
+
 export interface WorkspacePanelContext extends WorkspaceContext {
   prompt: PluginPromptEditor;
   terminal: WorkspacePanelTerminal;
+  /** Contribution-scoped address-bar state for deep links and browser history. */
+  navigation?: WorkspacePanelNavigationV1;
   /**
    * @deprecated Runtime-only compatibility alias for pre-v2 plugins. Use `terminal.open()` instead.
    * This is intentionally not part of the public `@jmfederico/pi-web/plugin-api` declarations.
@@ -251,6 +262,8 @@ export interface WorkspacePanelContribution {
   order?: number;
   /** Former URL tool/view values that should resolve to this panel. */
   routeAliases?: string[];
+  /** Former qualified contribution ids whose namespaced query keys remain readable. */
+  navigationAliases?: QualifiedContributionId[];
   visible?: (context: WorkspacePanelContext) => boolean;
   badge?: (context: WorkspacePanelContext) => string | number | TemplateResult | undefined;
   invalidationResources?: readonly WorkspaceResource[];

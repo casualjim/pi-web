@@ -71,7 +71,7 @@ export interface AppState {
   actionPaletteOpen: boolean;
   projectDialogOpen: boolean;
   machineDialogOpen: boolean;
-  workspaceTool: QualifiedContributionId;
+  workspaceTool: QualifiedContributionId | undefined;
   mainView: "navigation" | "chat" | QualifiedContributionId;
   fileTree: FileTreeEntry[];
   expandedDirs: Record<string, FileTreeEntry[]>;
@@ -186,7 +186,7 @@ export function initialAppState(): AppState {
     actionPaletteOpen: false,
     projectDialogOpen: false,
     machineDialogOpen: false,
-    workspaceTool: "core:workspace.files",
+    workspaceTool: undefined,
     mainView: "chat",
     fileTree: [],
     expandedDirs: {},

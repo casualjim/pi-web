@@ -45,26 +45,6 @@ export function readContributionQuery(
   return freezeContributionQuery(query);
 }
 
-/** Read one contribution's canonical/alias snapshot from a captured generic record. */
-export function readContributionQueryFromRecord(
-  record: Readonly<ContributionQueryRecord> | undefined,
-  contributionId: QualifiedContributionId,
-  aliases: readonly QualifiedContributionId[] = [],
-): ContributionQuerySnapshot {
-  if (record === undefined) return Object.freeze({});
-  const query: Record<string, string | string[]> = {};
-  for (const id of uniqueContributionIds(contributionId, aliases)) {
-    const prefix = `${queryNamespace(id)}--`;
-    for (const [parameter, value] of Object.entries(record)) {
-      if (!parameter.startsWith(prefix)) continue;
-      const key = parameter.slice(prefix.length);
-      if (!isContributionQueryLocalKey(key) || Object.hasOwn(query, key)) continue;
-      query[key] = Array.isArray(value) ? [...value] : value;
-    }
-  }
-  return freezeContributionQuery(query);
-}
-
 /** Capture only bounded, syntactically valid contribution-owned query parameters. */
 export function readContributionQueryRecord(): ContributionQueryRecord {
   const raw: Record<string, string | string[]> = {};

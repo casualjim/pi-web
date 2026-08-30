@@ -64,9 +64,9 @@ describe("PluginRegistry", () => {
     registry.register({ id: "core", plugin: corePlugin });
 
     expect(registry.getActions(createContext().context).some((action) => action.id === "core:actions.show")).toBe(true);
-    expect(registry.getWorkspacePanels().map((panel) => panel.id)).toEqual(["core:workspace.files", "core:workspace.terminal"]);
-    expect(registry.resolveWorkspacePanelRouteId("files", "local")).toBe("core:workspace.files");
-    expect(registry.resolveWorkspacePanelRouteId("core:workspace.files", "local")).toBe("core:workspace.files");
+    expect(registry.getWorkspacePanels().map((panel) => panel.id)).toEqual(["core:workspace.terminal"]);
+    expect(registry.resolveWorkspacePanelRouteId("files", "local")).toBeUndefined();
+    expect(registry.resolveWorkspacePanelRouteId("core:workspace.files", "local")).toBeUndefined();
   });
 
   it("rejects legacy browser plugins with an attributed API-version error", () => {
@@ -429,9 +429,9 @@ describe("PluginRegistry", () => {
     const inactive = registry.getActions(createContext().context);
     const active = registry.getActions(createContext({ selectedWorkspace: testWorkspace() }).context);
 
-    expect(inactive.find((action) => action.id === "core:view.files")?.enabled).toBe(false);
+    expect(inactive.find((action) => action.id === "core:view.files")).toBeUndefined();
     expect(inactive.find((action) => action.id === "core:view.terminal")?.enabled).toBe(false);
-    expect(active.find((action) => action.id === "core:view.files")?.enabled).toBe(true);
+    expect(active.find((action) => action.id === "core:view.files")).toBeUndefined();
     expect(active.find((action) => action.id === "core:view.terminal")?.enabled).toBe(true);
     expect(active.find((action) => action.id === "core:workspace.delete")?.enabled).toBe(false);
 
@@ -627,9 +627,7 @@ describe("PluginRegistry", () => {
       ["core:prompt.focus", "mod+g c"],
       ["core:settings.open", "mod+,"],
       ["core:view.chat", "mod+1"],
-      ["core:view.files", "mod+2"],
       ["core:view.terminal", "mod+4"],
-      ["core:workspace.refresh-files", "mod+shift+f"],
       ["core:session.start", "mod+enter"],
       ["core:session.stop", "mod+."],
     ]);
@@ -1078,22 +1076,9 @@ function createWorkspacePanelContext(machineId: string, prompt: WorkspacePanelCo
     prompt,
     terminal: { open: vi.fn(), runCommand: vi.fn() },
     host: { requestRender: vi.fn() },
-    fileTree: [],
-    expandedDirs: {},
-    selectedFilePath: undefined,
-    selectedFileContent: undefined,
-    selectedFileLoadError: undefined,
-    fileTreeStale: false,
     activeTerminalCount: 0,
     selectedTerminalId: undefined,
     terminalAutoStart: false,
-    workspaceUploadDefaultFolder: ".pi-web/uploads",
-    onRefreshFiles: vi.fn(),
-    onExpandDir: vi.fn(),
-    onSelectFile: vi.fn(),
-    onStartWorkspaceUpload: vi.fn(),
-    onCancelWorkspaceUpload: vi.fn(),
-    onClearWorkspaceUpload: vi.fn(),
     onSelectTerminal: vi.fn(),
   };
 }

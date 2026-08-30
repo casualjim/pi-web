@@ -33,8 +33,8 @@ function installWindow(href: string): { pushed: string[]; replaced: string[] } {
 }
 
 const routeAliases: Record<string, AppRoute["tool"]> = {
-  files: "core:workspace.files",
-  "core:workspace.files": "core:workspace.files",
+  files: "files:workspace.files",
+  "core:workspace.files": "files:workspace.files",
   git: "git:workspace.git",
   "core:workspace.git": "git:workspace.git",
   "git:workspace.git": "git:workspace.git",
@@ -54,7 +54,7 @@ describe("route helpers", () => {
       workspaceId: "w1",
       sessionId: "s1",
       tool: "git:workspace.git",
-      view: "core:workspace.files",
+      view: "files:workspace.files",
     });
   });
 

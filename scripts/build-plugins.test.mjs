@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile 
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Window } from "happy-dom";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -162,9 +163,26 @@ describe("Files browser package build", () => {
 
     const moduleUrl = pathToFileURL(entryPath);
     moduleUrl.searchParams.set("buildTest", String(Date.now()));
-    const builtModule = await import(moduleUrl.href);
+    const { builtModule, activation } = await withBrowserGlobals(async () => {
+      const imported = await import(moduleUrl.href);
+      const template = (strings, ...values) => ({ strings, values });
+      const activated = imported.default.activate({
+        apiVersion: 2,
+        pluginId: "files",
+        runtimePluginId: "files",
+        html: template,
+        svg: template,
+      });
+      return { builtModule: imported, activation: activated };
+    });
     expect(builtModule.default).toMatchObject({ apiVersion: 2, name: "Files" });
-    expect(builtModule.default.activate({})).toEqual({ contributions: {} });
+    expect(activation.contributions.workspacePanels).toMatchObject([{
+      id: "workspace.files",
+      routeAliases: ["files", "core:workspace.files"],
+      navigationAliases: ["core:workspace.files"],
+      invalidationResources: ["workspace.files"],
+    }]);
+    expect(activation.contributions.actions.map(({ id }) => id)).toEqual(["view.files", "workspace.refresh-files"]);
     expect(typeof builtModule.loadFilesViewerDependencies).toBe("function");
     expect(typeof builtModule.filesStyles).toBe("string");
     expect(builtModule.filesStyles).toContain("var(--pi-text)");
@@ -243,4 +261,41 @@ async function recursiveEntryCount(root) {
     if (entry.isDirectory()) count += await recursiveEntryCount(join(root, entry.name));
   }
   return count;
+}
+
+async function withBrowserGlobals(action) {
+  const browser = new Window({ url: "http://localhost/" });
+  const names = [
+    "window",
+    "document",
+    "customElements",
+    "HTMLElement",
+    "Element",
+    "Node",
+    "ShadowRoot",
+    "Document",
+    "CSSStyleSheet",
+    "CustomEvent",
+    "Event",
+    "HTMLDialogElement",
+    "HTMLInputElement",
+    "File",
+    "DOMException",
+    "navigator",
+  ];
+  const previous = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  for (const name of names) {
+    const value = name === "window" ? browser : name === "document" ? browser.document : browser[name];
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  }
+  try {
+    return await action();
+  } finally {
+    for (const name of names) {
+      const descriptor = previous.get(name);
+      if (descriptor === undefined) delete globalThis[name];
+      else Object.defineProperty(globalThis, name, descriptor);
+    }
+    await browser.happyDOM.abort();
+  }
 }

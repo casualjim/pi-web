@@ -11,6 +11,3 @@ export { defaultHighlightStyle, StreamLanguage, syntaxHighlighting } from "@code
 export { diff as diffLanguage } from "@codemirror/legacy-modes/mode/diff";
 export { EditorState } from "@codemirror/state";
 export { EditorView, keymap, lineNumbers } from "@codemirror/view";
-export { css, html, LitElement } from "lit";
-export { unsafeHTML } from "lit/directives/unsafe-html.js";
-export { marked } from "marked";

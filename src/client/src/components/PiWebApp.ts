@@ -7,7 +7,6 @@ import { isSessionActive } from "../../../shared/activity";
 import { PI_WEB_CAPABILITIES, supportsPiWebCapability } from "../../../shared/capabilities";
 import { machineScopedPluginId } from "../../../shared/machinePluginIds";
 import { AuthController } from "../controllers/authController";
-import { FileExplorerController } from "../controllers/fileExplorerController";
 import { MachineController } from "../controllers/machineController";
 import { MachineStatusController } from "../controllers/machineStatusController";
 import { ProjectController, type ProjectTrustChoice } from "../controllers/projectController";
@@ -35,7 +34,7 @@ import { loadExternalPlugins, type ExternalPluginLoadResult } from "../plugins/e
 import { PluginRegistry, installPluginRuntimeScope, installWorkspaceLabelScope, installWorkspacePanelScope } from "../plugins/registry";
 import { createPluginWorkspaceBackend } from "../plugins/workspaceBackend";
 import { createWorkspaceFiles as createPluginWorkspaceFiles } from "../plugins/workspaceFiles";
-import { isContributionQueryLocalKey, queryNamespace, readContributionQuery, readContributionQueryFromRecord, readContributionQueryRecord, readNamespacedString, setContributionQueryKey, setNamespacedQueryKey, writeContributionQueryRecord, type ContributionQueryRecord } from "../namespacedQueryArgs";
+import { isContributionQueryLocalKey, queryNamespace, readContributionQuery, readContributionQueryRecord, readNamespacedString, setContributionQueryKey, setNamespacedQueryKey, writeContributionQueryRecord, type ContributionQueryRecord } from "../namespacedQueryArgs";
 import { AppShellController } from "../appShell/appShellController";
 import { BrowserResumeController } from "../appShell/browserResumeController";
 import { NavigationSectionsController, type NavigationSection } from "../appShell/navigationState";
@@ -195,11 +194,6 @@ export class PiWebApp extends LitElement {
     (patch) => { this.setState(patch); },
     { onRefreshError: (machineId, error) => { console.warn(`Failed to refresh PI WEB status for ${machineId}`, error); } },
   );
-  private readonly files = new FileExplorerController(
-    () => this.state,
-    (patch) => { this.setState(patch); },
-    () => { this.updateUrl(); },
-  );
   private readonly keyboard = new KeyboardShortcutDispatcher();
   private readonly realtime = new RealtimeSocket();
   private readonly machineRealtimeSockets = new Map<string, RealtimeSocket>();
@@ -242,6 +236,7 @@ export class PiWebApp extends LitElement {
   private readonly loadedMachinePluginIds = new Set<string>();
   private readonly machinePluginLoadPromises = new Map<string, Promise<void>>();
   private gatewayPluginLoadPromise: Promise<void> | undefined;
+  private gatewayPluginLoadAttemptComplete = false;
   private themePreference: ThemePreference = readStoredThemePreference() ?? DEFAULT_THEME_PREFERENCE;
   @state() private activeThemeId: QualifiedContributionId = CLASSIC_THEME_ID;
   @state() private isRefreshingApp = false;
@@ -531,8 +526,7 @@ export class PiWebApp extends LitElement {
   private async refreshCurrentWorkspaceSurface(): Promise<void> {
     const workspace = this.state.selectedWorkspace;
     const tool = this.state.mainView !== "chat" && this.state.mainView !== "navigation" ? this.state.mainView : this.effectiveWorkspaceTool();
-    if (tool === "core:workspace.files") await this.files.refreshFiles();
-    else if (tool === "core:workspace.terminal" && workspace !== undefined) await this.refreshActiveTerminals(workspace);
+    if (tool === "core:workspace.terminal" && workspace !== undefined) await this.refreshActiveTerminals(workspace);
     else if (tool !== undefined) await this.invalidateWorkspacePanels(tool);
   }
 
@@ -548,7 +542,6 @@ export class PiWebApp extends LitElement {
   private async restoreRouteFor(parsedRoute: ParsedAppRoute, updateUrl: boolean, surface = this.readWorkspaceRouteSurface(parsedRoute), restoredMainView?: AppState["mainView"]) {
     const machineBeforeRestore = selectedMachineId(this.state);
     const routeSurface = parsedRoute.projectId === undefined || parsedRoute.projectId === "" ? emptyWorkspaceRouteSurface() : surface;
-    const selectedFilePath = this.selectedFilePathFromSurface(routeSurface);
     const restoreSeq = ++this.routeRestoreSeq;
     this.routeRestoreDepth += 1;
     this.restoringRouteTerminalId = routeSurface.selectedTerminalId;
@@ -569,29 +562,28 @@ export class PiWebApp extends LitElement {
       this.setState({
         workspaceTool: route.tool ?? this.state.workspaceTool,
         mainView: this.resolveRestoredMainView(restoredMainView) ?? route.view ?? this.defaultRouteView(),
-        selectedFilePath,
         selectedTerminalId: routeSurface.selectedTerminalId,
       });
       if (route.projectId === undefined || route.projectId === "") {
-        await this.finishWorkspaceRouteRestore(undefined, routeSurface, finishOptions);
+        await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
         return;
       }
       if (this.routeMatchesCurrentSelection(route)) {
         if (routeSurface.selectedTerminalId !== undefined) this.rememberSelectedTerminal(routeSurface.selectedTerminalId);
-        await this.finishWorkspaceRouteRestore(selectedFilePath, routeSurface, finishOptions);
+        await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
         return;
       }
       const project = this.state.projects.find((p) => p.id === route.projectId);
       if (!project) {
-        this.setState({ selectedFilePath: undefined, selectedTerminalId: undefined });
-        await this.finishWorkspaceRouteRestore(undefined, emptyWorkspaceRouteSurface(), finishOptions);
+        this.setState({ selectedTerminalId: undefined });
+        await this.finishWorkspaceRouteRestore(emptyWorkspaceRouteSurface(), finishOptions);
         return;
       }
       await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false });
       if (!this.isCurrentRouteRestore(restoreSeq)) return;
-      this.setState({ selectedFilePath, selectedTerminalId: routeSurface.selectedTerminalId });
+      this.setState({ selectedTerminalId: routeSurface.selectedTerminalId });
       if (routeSurface.selectedTerminalId !== undefined) this.rememberSelectedTerminal(routeSurface.selectedTerminalId);
-      await this.finishWorkspaceRouteRestore(selectedFilePath, routeSurface, finishOptions);
+      await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
     } finally {
       this.routeRestoreDepth = Math.max(0, this.routeRestoreDepth - 1);
       if (this.routeRestoreDepth === 0) this.restoringRouteTerminalId = undefined;
@@ -600,7 +592,6 @@ export class PiWebApp extends LitElement {
   }
 
   private async finishWorkspaceRouteRestore(
-    selectedFilePath: string | undefined,
     surface: WorkspaceRouteSurface,
     options: WorkspaceRouteFinishOptions,
   ): Promise<void> {
@@ -616,7 +607,7 @@ export class PiWebApp extends LitElement {
       if (fallback !== undefined) this.setState({ mainView: fallback });
     }
     const selectionChanged = this.reconcileWorkspacePanelSelection();
-    await this.refreshRestoredWorkspaceTool(this.state.workspaceTool, selectedFilePath);
+    await this.refreshRestoredWorkspaceTool(this.state.workspaceTool);
     if (options.updateUrl || selectionChanged || normalizeUnavailableRoute) {
       this.updateUrl(selectionChanged || normalizeUnavailableRoute ? { replace: true } : undefined, surface.contributionQuery);
     }
@@ -632,11 +623,6 @@ export class PiWebApp extends LitElement {
       contributionQuery: readContributionQueryRecord(),
       selectedTerminalId: readNamespacedString(TERMINAL_ROUTE_NAMESPACE, "terminal"),
     };
-  }
-
-  private selectedFilePathFromSurface(surface: WorkspaceRouteSurface): string | undefined {
-    const value = readContributionQueryFromRecord(surface.contributionQuery, "core:workspace.files")["file"];
-    return typeof value === "string" ? value : value?.[0];
   }
 
   private routeForSelectedMachine(route: ParsedAppRoute): ParsedAppRoute {
@@ -777,13 +763,8 @@ export class PiWebApp extends LitElement {
       && this.state.selectedSession?.id === route.sessionId;
   }
 
-  private async refreshRestoredWorkspaceTool(tool: QualifiedContributionId | undefined, selectedFilePath: string | undefined): Promise<void> {
-    if (tool === "core:workspace.files") {
-      await this.files.refreshFiles();
-      if (selectedFilePath !== undefined) await this.files.restoreFile(selectedFilePath);
-    } else if (tool !== undefined && tool !== "core:workspace.terminal") {
-      await this.invalidateWorkspacePanels(tool);
-    }
+  private async refreshRestoredWorkspaceTool(tool: QualifiedContributionId | undefined): Promise<void> {
+    if (tool !== undefined && tool !== "core:workspace.terminal") await this.invalidateWorkspacePanels(tool);
   }
 
   private resolveRestoredMainView(view: AppState["mainView"] | undefined): AppState["mainView"] | undefined {
@@ -988,7 +969,8 @@ export class PiWebApp extends LitElement {
     this.activeTerminalIds.clear();
     const selectedTerminalId = this.routeRestoreInProgress ? this.restoringRouteTerminalId : next.selectedWorkspace === undefined ? undefined : this.terminalSelection.latestTerminalId(this.terminalWorkspaceKey(next.selectedWorkspace));
     this.setState({ activeTerminalCount: 0, selectedTerminalId });
-    if (!this.routeRestoreInProgress || next.selectedWorkspace !== undefined) this.reconcileWorkspacePanelSelection();
+    const gatewayPluginsLoading = this.gatewayPluginLoadPromise !== undefined && !this.gatewayPluginLoadAttemptComplete;
+    if ((!this.routeRestoreInProgress || next.selectedWorkspace !== undefined) && !gatewayPluginsLoading) this.reconcileWorkspacePanelSelection();
     if (!this.routeRestoreInProgress) {
       this.rememberCurrentMachineNavigation();
       this.writeSelectedTerminalToUrl(selectedTerminalId, { replace: true });
@@ -1103,12 +1085,13 @@ export class PiWebApp extends LitElement {
   }
 
   private handleActivityTransition(previous: AppState, next: AppState) {
-    const wasActive = isActive(previous);
-    const nowActive = isActive(next);
-    if (wasActive && !nowActive) {
-      this.setState({ fileTreeStale: true });
-      this.refreshSelectedWorkspaceTool(this.state.workspaceTool);
-    }
+    if (!isActive(previous) || isActive(next)) return;
+    const workspace = next.selectedWorkspace;
+    if (workspace === undefined) return;
+    void this.invalidateWorkspaceResources(workspace, pluginMachineFromState(next), {
+      reason: "agent-activity",
+      resources: ["workspace.files"],
+    });
   }
 
   private handleMachineChange(previous: AppState, next: AppState): void {
@@ -1125,8 +1108,7 @@ export class PiWebApp extends LitElement {
   }
 
   private refreshSelectedWorkspaceTool(tool: QualifiedContributionId | undefined): void {
-    if (tool === "core:workspace.files") void this.files.refreshFiles();
-    else if (tool !== undefined && tool !== "core:workspace.terminal") void this.invalidateWorkspacePanels(tool);
+    if (tool !== undefined && tool !== "core:workspace.terminal") void this.invalidateWorkspacePanels(tool);
   }
 
   private renderWorkspacePanel() {
@@ -1595,22 +1577,9 @@ export class PiWebApp extends LitElement {
         openTerminal: (options) => { void this.openRuntimeTerminal(machineId, workspace, options); },
         host: this.createWorkspaceHost(),
         piWebUnstable: { terminalCommandRuns },
-        fileTree: this.state.fileTree,
-        expandedDirs: this.state.expandedDirs,
-        selectedFilePath: this.state.selectedFilePath,
-        selectedFileContent: this.state.selectedFileContent,
-        selectedFileLoadError: this.state.selectedFileLoadError,
-        fileTreeStale: this.state.fileTreeStale,
         activeTerminalCount: this.state.activeTerminalCount,
         selectedTerminalId: this.state.selectedTerminalId,
         terminalAutoStart: this.terminalAutoStartWorkspaceId === workspace.id,
-        workspaceUploadDefaultFolder: workspaceEffectiveUploadFolder(workspace.effectiveConfig, this.workspaceUploadDefaultFolder),
-        onRefreshFiles: () => this.files.refreshFiles(),
-        onExpandDir: (path: string) => { void this.files.expandDir(path); },
-        onSelectFile: (path: string) => { void this.files.selectFile(path); },
-        onStartWorkspaceUpload: (files, options) => this.files.startWorkspaceUpload(files, options),
-        onCancelWorkspaceUpload: (batchId) => { this.files.cancelWorkspaceUpload(batchId); },
-        onClearWorkspaceUpload: (batchId) => { this.files.clearWorkspaceUpload(batchId); },
         onSelectTerminal: (terminalId: string | undefined, options?: { replace?: boolean | undefined }) => { this.selectTerminal(terminalId, options); },
       }, createContext);
     };
@@ -1760,7 +1729,9 @@ export class PiWebApp extends LitElement {
   private ensureGatewayPluginsLoaded(): Promise<void> {
     const existing = this.gatewayPluginLoadPromise;
     if (existing !== undefined) return existing;
+    this.gatewayPluginLoadAttemptComplete = false;
     const load = this.loadExternalPlugins().then((complete) => {
+      this.gatewayPluginLoadAttemptComplete = true;
       if (!complete && this.gatewayPluginLoadPromise === load) this.gatewayPluginLoadPromise = undefined;
     });
     this.gatewayPluginLoadPromise = load;

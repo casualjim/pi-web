@@ -1,40 +1,16 @@
 import { html, type TemplateResult } from "lit";
 import { renderBuiltinTabIcon } from "../../components/tabIcons";
-import "../../components/WorkspaceFilesPanel";
 import type { WorkspacePanelContribution, WorkspacePanelContext } from "../types";
 
 export function createCoreWorkspacePanels(): WorkspacePanelContribution[] {
-  return [
-    {
-      id: "workspace.files",
-      title: "Files",
-      icon: renderBuiltinTabIcon("files"),
-      order: 10,
-      routeAliases: ["files"],
-      invalidationResources: ["workspace.files"],
-      onInvalidate: (context) => isSelectedWorkspaceContext(context) ? context.onRefreshFiles() : undefined,
-      render: renderFiles,
-    },
-    {
-      id: "workspace.terminal",
-      title: "Terminal",
-      icon: renderBuiltinTabIcon("terminal"),
-      order: 30,
-      badge: (context) => context.activeTerminalCount > 0 ? context.activeTerminalCount : undefined,
-      render: renderTerminal,
-    },
-  ];
-}
-
-function isSelectedWorkspaceContext(context: WorkspacePanelContext): boolean {
-  const selected = context.state.selectedWorkspace;
-  return selected?.id === context.workspace.id
-    && selected.projectId === context.workspace.projectId
-    && (context.state.selectedMachine?.id ?? "local") === context.machine.id;
-}
-
-function renderFiles(context: WorkspacePanelContext): TemplateResult {
-  return html`<workspace-files-panel .context=${context}></workspace-files-panel>`;
+  return [{
+    id: "workspace.terminal",
+    title: "Terminal",
+    icon: renderBuiltinTabIcon("terminal"),
+    order: 30,
+    badge: (context) => context.activeTerminalCount > 0 ? context.activeTerminalCount : undefined,
+    render: renderTerminal,
+  }];
 }
 
 function renderTerminal(context: WorkspacePanelContext): TemplateResult {

@@ -110,7 +110,6 @@ describe("machineNavigationSnapshotFromState", () => {
       selectedSession: session("session"),
       workspaceTool: "core:workspace.files",
       mainView: "core:workspace.files",
-      selectedFilePath: "src/main.ts",
       selectedTerminalId: "terminal-1",
     };
 
@@ -137,7 +136,6 @@ describe("machineNavigationSnapshotFromState", () => {
   it("does not carry workspace surface without a selected workspace", () => {
     const state: AppState = {
       ...initialAppState(),
-      selectedFilePath: "src/main.ts",
       selectedTerminalId: "terminal-1",
     };
 

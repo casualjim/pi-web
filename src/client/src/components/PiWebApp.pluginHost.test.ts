@@ -44,7 +44,7 @@ describe("PiWebApp plugin host", () => {
     appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
 
     await callAsyncAppMethod(app, "refreshCurrentWorkspaceSurface");
-    await callAsyncAppMethod(app, "refreshRestoredWorkspaceTool", "browser-only:workspace.panel", undefined);
+    await callAsyncAppMethod(app, "refreshRestoredWorkspaceTool", "browser-only:workspace.panel");
     callAppMethod(app, "refreshSelectedWorkspaceTool", "browser-only:workspace.panel");
     await Promise.resolve();
 
@@ -70,7 +70,9 @@ describe("PiWebApp plugin host", () => {
       workspaces: [workspace],
       workspaceTool: "core:workspace.files",
     });
-    const subscribed = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void>();
+    let finishSubscription: () => void = () => undefined;
+    const subscription = new Promise<void>((resolve) => { finishSubscription = resolve; });
+    const subscribed = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => Promise<void>>(() => subscription);
     const legacy = vi.fn();
     appPluginRegistry(app).register({
       id: "browser-only",
@@ -87,13 +89,6 @@ describe("PiWebApp plugin host", () => {
         }),
       },
     });
-    const filesController: unknown = Reflect.get(app, "files");
-    if (typeof filesController !== "object" || filesController === null) throw new Error("PiWebApp files controller was unavailable");
-    let finishCoreRefresh: () => void = () => undefined;
-    const coreRefresh = new Promise<void>((resolve) => { finishCoreRefresh = resolve; });
-    const refreshCoreFiles = vi.fn(() => coreRefresh);
-    if (!Reflect.set(filesController, "refreshFiles", refreshCoreFiles)) throw new Error("Could not stub core Files refresh");
-
     const runtime = createPluginRuntimeContext(app);
     const refreshFiles: unknown = Reflect.get(runtime, "refreshFiles");
     if (!isAsyncVoidCallback(refreshFiles)) throw new Error("Legacy refreshFiles runtime alias was unavailable");
@@ -101,9 +96,9 @@ describe("PiWebApp plugin host", () => {
     const aliasCompletion = Promise.resolve(refreshFiles()).then(() => { aliasSettled = true; });
     await Promise.resolve();
 
-    expect(refreshCoreFiles).toHaveBeenCalledOnce();
+    expect(subscribed).toHaveBeenCalledOnce();
     expect(aliasSettled).toBe(false);
-    finishCoreRefresh();
+    finishSubscription();
     await aliasCompletion;
     expect(aliasSettled).toBe(true);
     expect(subscribed).toHaveBeenCalledOnce();
@@ -181,6 +176,35 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("browser-only.workspace.panel--mode")).toBeNull();
   });
 
+  it("waits for gateway contributions before choosing the first default workspace panel", () => {
+    const app = createApp();
+    const previous = initialAppState();
+    const next = { ...previous, selectedProject: project, selectedWorkspace: workspace, workspaces: [workspace] };
+    if (!Reflect.set(app, "gatewayPluginLoadPromise", new Promise<void>(() => undefined))) throw new Error("Could not mark gateway plugins loading");
+    if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", false)) throw new Error("Could not mark gateway plugin loading incomplete");
+    if (!Reflect.set(app, "refreshActiveTerminals", () => Promise.resolve())) throw new Error("Could not stub terminal refresh");
+    if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub workspace deletion refresh");
+    setAppState(app, next);
+
+    callAppMethod(app, "handleWorkspaceChange", previous, next);
+    expect(appState(app).workspaceTool).toBeUndefined();
+
+    appPluginRegistry(app).register({
+      id: "first",
+      plugin: {
+        apiVersion: 2,
+        name: "First panel",
+        activate: ({ html }) => ({
+          contributions: { workspacePanels: [{ id: "workspace.first", title: "First", order: 10, render: () => html`<p>First</p>` }] },
+        }),
+      },
+    });
+    callAppMethod(app, "reconcileWorkspacePanelSelection");
+
+    expect(appState(app).workspaceTool).toBe("first:workspace.first");
+    expect(appState(app).mainView).toBe("chat");
+  });
+
   it("falls back to the first visible panel and keeps Chat available when a requested panel is unavailable", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.files&view=core%3Aworkspace.files");
     const app = new PiWebApp();
@@ -192,11 +216,9 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "core:workspace.files",
       mainView: "core:workspace.files",
     });
-    const filesPanel = appPluginRegistry(app).getWorkspacePanels().find(({ id }) => id === "core:workspace.files");
-    if (filesPanel === undefined) throw new Error("Core Files panel was unavailable");
-    filesPanel.visible = () => false;
+    expect(appPluginRegistry(app).getWorkspacePanels().some(({ id }) => id === "core:workspace.files")).toBe(false);
 
-    await callAsyncAppMethod(app, "finishWorkspaceRouteRestore", undefined, { contributionQuery: {} }, {
+    await callAsyncAppMethod(app, "finishWorkspaceRouteRestore", { contributionQuery: {} }, {
       updateUrl: false,
       normalizeUnavailableRoute: false,
       unavailablePanelViewRoute: false,
@@ -471,7 +493,7 @@ function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelCon
     name,
     activate: ({ html }) => ({
       contributions: {
-        workspacePanels: [{ id: "workspace.panel", title: name, onInvalidate, render: () => html`<p>${name}</p>` }],
+        workspacePanels: [{ id: "workspace.panel", title: name, invalidationResources: ["workspace.files"], onInvalidate, render: () => html`<p>${name}</p>` }],
       },
     }),
   };

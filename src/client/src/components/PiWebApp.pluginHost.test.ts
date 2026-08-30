@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FilesRuntime } from "../../../../pi-web-plugins/files/FilesRuntime";
+import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspacePanelContext } from "../../../plugin-api";
 import type { Machine, Project, Workspace } from "../api";
 import { initialAppState } from "../appState";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
@@ -40,7 +42,7 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "browser-only:workspace.panel",
       mainView: "browser-only:workspace.panel",
     });
-    const invalidated = vi.fn<(context: WorkspacePanelContext) => void>();
+    const invalidated = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void>();
     appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
 
     await callAsyncAppMethod(app, "refreshCurrentWorkspaceSurface");
@@ -60,6 +62,10 @@ describe("PiWebApp plugin host", () => {
     await Promise.resolve();
 
     expect(invalidated).toHaveBeenCalledTimes(5);
+    const agentCall = invalidated.mock.calls[4];
+    expect(agentCall?.[0].machine.id).toBe("local");
+    expect(agentCall?.[0].workspace.id).toBe("workspace-1");
+    expect(agentCall?.[1]).toEqual({ reason: "agent-activity", resources: ["workspace.files"] });
   });
 
   it("keeps legacy refreshFiles behavior through scoped workspace.files invalidation", async () => {
@@ -176,6 +182,97 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("browser-only.workspace.panel--mode")).toBeNull();
   });
 
+  it("restores Files legacy routes and query-only history through the real runtime invalidation path", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=files&view=core%3Aworkspace.files&core.workspace.files--file=legacy.ts&core.workspace.files--mode=preview");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
+    if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
+
+    const runtime = new FilesRuntime();
+    const readFile = vi.fn<WorkspaceFilesCapabilityV1["readFile"]>((path) => Promise.resolve({
+      path,
+      encoding: "utf8",
+      size: path.length,
+      modifiedAt: "2026-06-25T00:00:00.000Z",
+      content: `loaded:${path}`,
+      truncated: false,
+      binary: false,
+    }));
+    const files = testWorkspaceFiles({ readFile });
+    const contexts: PublicWorkspacePanelContext[] = [];
+    appPluginRegistry(app).register({
+      id: "files",
+      plugin: {
+        apiVersion: 2,
+        name: "Files host integration",
+        activate: ({ html }) => ({
+          contributions: {
+            workspacePanels: [{
+              id: "workspace.files",
+              title: "Files",
+              routeAliases: ["files", "core:workspace.files"],
+              navigationAliases: ["core:workspace.files"],
+              invalidationResources: ["workspace.files"],
+              onInvalidate: (context, invalidation) => {
+                const runtimeContext: PublicWorkspacePanelContext = {
+                  machine: context.machine,
+                  workspace: context.workspace,
+                  files,
+                  ...(context.backend === undefined ? {} : { backend: context.backend }),
+                  host: context.host,
+                  prompt: context.prompt,
+                  terminal: context.terminal,
+                  ...(context.navigation === undefined ? {} : { navigation: context.navigation }),
+                };
+                contexts.push(runtimeContext);
+                return runtime.invalidate(runtimeContext, invalidation);
+              },
+              render: () => html`<p>Files</p>`,
+            }],
+          },
+        }),
+      },
+    });
+
+    await callAsyncAppMethod(app, "restoreRoute", false);
+    const legacyContext = contexts[0];
+    if (legacyContext === undefined) throw new Error("Files did not receive the legacy route context");
+    await vi.waitFor(() => { expect(runtime.snapshot(legacyContext).selectedFileContent?.content).toBe("loaded:legacy.ts"); });
+
+    expect(appState(app)).toMatchObject({
+      workspaceTool: "files:workspace.files",
+      mainView: "files:workspace.files",
+    });
+    expect(contexts[0]?.navigation).toMatchObject({
+      version: 1,
+      contributionId: "files:workspace.files",
+      query: { file: "legacy.ts", mode: "preview" },
+    });
+
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=files&view=core%3Aworkspace.files&files.workspace.files--file=back.ts");
+    callAppMethod(app, "onPopState");
+    await vi.waitFor(() => { expect(contexts).toHaveLength(2); });
+    const backContext = contexts[1];
+    if (backContext === undefined) throw new Error("Files did not receive the query-only history context");
+    await vi.waitFor(() => { expect(runtime.snapshot(backContext).selectedFileContent?.content).toBe("loaded:back.ts"); });
+
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1]?.navigation).toMatchObject({
+      version: 1,
+      contributionId: "files:workspace.files",
+      query: { file: "back.ts" },
+    });
+    expect(readFile.mock.calls.map(([path]) => path)).toEqual(["legacy.ts", "back.ts"]);
+  });
+
   it("waits for gateway contributions before choosing the first default workspace panel", () => {
     const app = createApp();
     const previous = initialAppState();
@@ -274,6 +371,41 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
     expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
     expect(browser.replaced.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the generic shell and host files available when the Files module fails to load", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.files&view=core%3Aworkspace.files");
+    const app = new PiWebApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.files",
+      mainView: "core:workspace.files",
+    });
+    const failure = new Error("Files module unavailable");
+    vi.mocked(loadExternalPlugins).mockResolvedValue({
+      registrations: [],
+      failures: [{ entry: manifestEntry("files"), error: failure }],
+    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await ensureGatewayPluginsLoaded(app);
+
+    expect(appState(app)).toMatchObject({
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
+    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat", "core:workspace.terminal"]);
+    expect(workspacePanelContextFromApp(app).files.capabilityVersion).toBe(1);
+    expect(warning).toHaveBeenCalledWith(
+      "Failed to load PI WEB plugin files (./files/plugin.js)",
+      failure,
+    );
   });
 
   it("keeps successful registrations while making an incomplete gateway load retryable", async () => {
@@ -487,7 +619,7 @@ function stubPluginLoadRendering(app: PiWebApp): void {
   if (!Reflect.set(app, "requestUpdate", () => undefined)) throw new Error("Could not stub Lit update scheduling");
 }
 
-function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelContext) => void): PiWebPlugin {
+function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void): PiWebPlugin {
   return {
     apiVersion: 2,
     name,
@@ -496,6 +628,23 @@ function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelCon
         workspacePanels: [{ id: "workspace.panel", title: name, invalidationResources: ["workspace.files"], onInvalidate, render: () => html`<p>${name}</p>` }],
       },
     }),
+  };
+}
+
+function testWorkspaceFiles(overrides: Partial<WorkspaceFilesCapabilityV1> = {}): WorkspaceFilesCapabilityV1 {
+  return {
+    capabilityVersion: 1,
+    defaultUploadFolder: ".pi-web/uploads",
+    maxInlinePreviewBytes: 1024 * 1024,
+    readFile: () => Promise.reject(new Error("Unexpected file read")),
+    listFiles: (path) => Promise.resolve({ path, entries: [], scannedAt: "2026-06-25T00:00:00.000Z", truncated: false }),
+    writeFile: () => Promise.reject(new Error("Unexpected file write")),
+    deleteFile: () => Promise.reject(new Error("Unexpected file delete")),
+    moveFile: () => Promise.reject(new Error("Unexpected file move")),
+    previewUrl: (path) => `https://example.test/preview/${encodeURIComponent(path)}`,
+    downloadUrl: (path) => `https://example.test/download/${encodeURIComponent(path)}`,
+    uploadFile: () => { throw new Error("Unexpected file upload"); },
+    ...overrides,
   };
 }
 

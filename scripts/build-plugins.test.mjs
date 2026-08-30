@@ -11,6 +11,7 @@ import {
   PiWebPluginCatalog,
   readPiWebPluginPackageArtifact,
 } from "../src/server/piWebPluginCatalog.js";
+import { PiWebPluginService } from "../src/server/piWebPluginService.js";
 import {
   buildDirectory,
   buildFilesBrowserPackage,
@@ -215,6 +216,38 @@ describe("Files browser package build", () => {
     expect([...artifact.files.keys()].sort()).toEqual(
       packageFiles.filter((path) => path.startsWith("browser/")).sort(),
     );
+
+    const serviceOptions = {
+      roots: [{ path: tempDir, source: "bundled", scope: "bundled" }],
+      packageProvider: false,
+    };
+    const service = new PiWebPluginService(serviceOptions);
+    const manifest = await service.manifest();
+    expect(manifest.plugins).toEqual([expect.objectContaining({
+      id: "files",
+      source: "bundled",
+      scope: "bundled",
+      machineSpecific: false,
+    })]);
+    expect(manifest.plugins[0]?.module).toContain("/pi-web-plugins/files/browser/pi-web-plugin.js?");
+    await expect(service.readAsset("files", "browser/pi-web-plugin.js")).resolves.toMatchObject({
+      contentType: "application/javascript; charset=utf-8",
+    });
+    const lazyChunk = packageFiles.find((path) => /^browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path));
+    if (lazyChunk === undefined) throw new Error("Built Files package has no lazy viewer chunk");
+    await expect(service.readAsset("files", lazyChunk)).resolves.toMatchObject({
+      contentType: "application/javascript; charset=utf-8",
+    });
+
+    const disabledService = new PiWebPluginService({
+      ...serviceOptions,
+      configProvider: () => ({ plugins: { files: { enabled: false } } }),
+    });
+    await expect(disabledService.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(disabledService.plugins()).resolves.toMatchObject({
+      plugins: [{ id: "files", enabled: false }],
+    });
+    await expect(disabledService.readAsset("files", "browser/pi-web-plugin.js")).resolves.toBeUndefined();
   });
 
   it("keeps the dedicated Files source directory in plugin watch coverage", async () => {

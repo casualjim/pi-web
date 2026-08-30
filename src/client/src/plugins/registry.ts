@@ -1,6 +1,6 @@
 import { html, svg } from "lit";
 import { requirePluginBackendRevision } from "../../../shared/pluginBackendProtocol";
-import type { PiWebPluginRegistration, PluginAction, PluginRuntimeContext, QualifiedContributionId, QualifiedPluginAction, QualifiedThemeContribution, QualifiedThemePairContribution, QualifiedWorkspaceLabelContribution, QualifiedWorkspacePanelContribution, ThemeContribution, ThemePairContribution, WorkspaceLabelContext, WorkspaceLabelContribution, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePanelContribution, WorkspacePluginBinding } from "./types";
+import type { PiWebPluginRegistration, PluginAction, PluginRuntimeContext, QualifiedContributionId, QualifiedPluginAction, QualifiedThemeContribution, QualifiedThemePairContribution, QualifiedWorkspaceLabelContribution, QualifiedWorkspacePanelContribution, ThemeContribution, ThemePairContribution, WorkspaceInvalidation, WorkspaceLabelContext, WorkspaceLabelContribution, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePanelContribution, WorkspacePluginBinding, WorkspaceResource } from "./types";
 
 const idPattern = /^[a-z][a-z0-9.-]*$/u;
 const localIdPattern = /^[a-z][a-z0-9.-]*$/u;
@@ -129,10 +129,31 @@ export class PluginRegistry {
   }
 
   async invalidateWorkspacePanels(context: WorkspacePanelContext, panelId?: QualifiedContributionId): Promise<void> {
+    await this.invalidateMatchingWorkspacePanels(
+      context,
+      (panel) => panelId === undefined || panel.id === panelId,
+    );
+  }
+
+  async invalidateWorkspaceResources(context: WorkspacePanelContext, invalidation: WorkspaceInvalidation): Promise<void> {
+    const resources = new Set(invalidation.resources);
+    await this.invalidateMatchingWorkspacePanels(
+      context,
+      (panel) => panel.invalidationResources?.some((resource) => resources.has(resource)) === true,
+      invalidation,
+    );
+  }
+
+  private async invalidateMatchingWorkspacePanels(
+    context: WorkspacePanelContext,
+    matches: (panel: QualifiedWorkspacePanelContribution) => boolean,
+    invalidation?: WorkspaceInvalidation,
+  ): Promise<void> {
     await Promise.all(this.workspacePanels.map(async (panel) => {
-      if (panel.onInvalidate === undefined || (panelId !== undefined && panel.id !== panelId)) return;
+      if (panel.onInvalidate === undefined || !matches(panel)) return;
       try {
-        await panel.onInvalidate(context);
+        if (invalidation === undefined) await panel.onInvalidate(context);
+        else await panel.onInvalidate(context, invalidation);
       } catch (error) {
         console.warn(`Failed to invalidate PI WEB plugin panel ${panel.id}`, error);
       }
@@ -192,17 +213,23 @@ export class PluginRegistry {
     const binding = workspacePluginBinding(pluginId, sourcePluginId, backendRevision);
     const sourceId = `${sourcePluginId ?? pluginId}:${panel.id}`;
     const routeAliases = this.parseRouteAliases(id, panel.routeAliases, sourceId);
+    const invalidationResources = this.parseInvalidationResources(id, panel.invalidationResources);
     return {
       ...panel,
       id,
       pluginId,
       localId: panel.id,
       ...(routeAliases.length === 0 ? {} : { routeAliases }),
+      ...(panel.invalidationResources === undefined ? {} : { invalidationResources }),
       ...(machineId === undefined ? {} : { machineId }),
       ...(sourcePluginId === undefined ? {} : { sourcePluginId }),
       visible: (context: WorkspacePanelContext) => this.isContributionActive(pluginId, machineId, context.machine.id, sourcePluginId) && (visible?.(workspacePanelContextFor(context, binding)) ?? true),
       ...(badge === undefined ? {} : { badge: (context: WorkspacePanelContext) => this.isContributionActive(pluginId, machineId, context.machine.id, sourcePluginId) ? badge(workspacePanelContextFor(context, binding)) : undefined }),
-      ...(onInvalidate === undefined ? {} : { onInvalidate: (context: WorkspacePanelContext) => this.isContributionActive(pluginId, machineId, context.machine.id, sourcePluginId) ? onInvalidate(workspacePanelContextFor(context, binding)) : undefined }),
+      ...(onInvalidate === undefined ? {} : { onInvalidate: (context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => {
+        if (!this.isContributionActive(pluginId, machineId, context.machine.id, sourcePluginId)) return undefined;
+        const scopedContext = workspacePanelContextFor(context, binding);
+        return invalidation === undefined ? onInvalidate(scopedContext) : onInvalidate(scopedContext, invalidation);
+      } }),
       render: (context: WorkspacePanelContext) => panel.render(workspacePanelContextFor(context, binding)),
     };
   }
@@ -302,6 +329,17 @@ export class PluginRegistry {
     return parsed;
   }
 
+  private parseInvalidationResources(id: QualifiedContributionId, value: unknown): WorkspaceResource[] {
+    if (value === undefined) return [];
+    if (!isUnknownArray(value)) throw new Error(`Invalid workspace-panel invalidation resources for ${id}`);
+    const resources: WorkspaceResource[] = [];
+    for (const resource of value) {
+      if (resource !== "workspace.files") throw new Error(`Invalid workspace-panel invalidation resource for ${id}: ${formatUnknownValue(resource)}`);
+      if (!resources.includes(resource)) resources.push(resource);
+    }
+    return resources;
+  }
+
   private validatePluginId(pluginId: string): void {
     if (!idPattern.test(pluginId)) throw new Error(`Invalid plugin id: ${pluginId}`);
   }
@@ -375,6 +413,10 @@ function addMappedSetValue(map: Map<string, Set<string>>, key: string, value: st
   const existing = map.get(key);
   if (existing === undefined) map.set(key, new Set([value]));
   else existing.add(value);
+}
+
+function isUnknownArray(value: unknown): value is unknown[] {
+  return Array.isArray(value);
 }
 
 function isQualifiedContributionId(value: string): value is QualifiedContributionId {

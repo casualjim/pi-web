@@ -7,7 +7,7 @@ import { machineScopedPluginId } from "../../../shared/machinePluginIds";
 import { corePlugin } from "./core";
 import { PluginRegistry, installWorkspaceLabelScope, installWorkspacePanelScope } from "./registry";
 import { themePackPlugin } from "./themes";
-import type { PiWebPlugin, PluginRuntimeContext, ThemeTokens, WorkspaceFiles, WorkspaceHost, WorkspaceLabelContext, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePluginBinding } from "./types";
+import type { PiWebPlugin, PluginRuntimeContext, ThemeTokens, WorkspaceFiles, WorkspaceHost, WorkspaceInvalidation, WorkspaceLabelContext, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePluginBinding } from "./types";
 import { createPluginWorkspaceBackend } from "./workspaceBackend";
 import type { PluginBackendRequestTarget } from "../api/pluginBackends";
 
@@ -277,17 +277,19 @@ describe("PluginRegistry", () => {
         activate: () => ({
           contributions: {
             workspacePanels: [
-              { id: "broken", title: "Broken", onInvalidate: () => { throw new Error("broken refresh"); }, render: () => html`<p>Broken</p>` },
-              { id: "healthy", title: "Healthy", onInvalidate: invalidated, render: () => html`<p>Healthy</p>` },
+              { id: "broken", title: "Broken", invalidationResources: ["workspace.files"], onInvalidate: () => { throw new Error("broken refresh"); }, render: () => html`<p>Broken</p>` },
+              { id: "healthy", title: "Healthy", invalidationResources: ["workspace.files"], onInvalidate: invalidated, render: () => html`<p>Healthy</p>` },
             ],
           },
         }),
       },
     });
 
-    await registry.invalidateWorkspacePanels(createWorkspacePanelContext("local"));
+    const invalidation: WorkspaceInvalidation = { reason: "mutation", resources: ["workspace.files"] };
+    await registry.invalidateWorkspaceResources(createWorkspacePanelContext("local"), invalidation);
 
     expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(expect.any(Object), invalidation);
     expect(warning).toHaveBeenCalledWith("Failed to invalidate PI WEB plugin panel example:broken", expect.objectContaining({ message: "broken refresh" }));
 
     invalidated.mockClear();
@@ -295,6 +297,54 @@ describe("PluginRegistry", () => {
     await registry.invalidateWorkspacePanels(createWorkspacePanelContext("local"), "example:healthy");
     expect(invalidated).toHaveBeenCalledOnce();
     expect(warning).not.toHaveBeenCalled();
+  });
+
+  it("keeps automatic resource invalidation subscribed while manual v2 invalidation remains broad", async () => {
+    const registry = new PluginRegistry();
+    const subscribed = vi.fn();
+    const legacy = vi.fn();
+    registry.register({
+      id: "example",
+      plugin: {
+        apiVersion: 2,
+        name: "Example",
+        activate: () => ({
+          contributions: {
+            workspacePanels: [
+              { id: "subscribed", title: "Subscribed", invalidationResources: ["workspace.files"], onInvalidate: subscribed, render: () => html`<p>Subscribed</p>` },
+              { id: "legacy", title: "Legacy", onInvalidate: legacy, render: () => html`<p>Legacy</p>` },
+            ],
+          },
+        }),
+      },
+    });
+    const context = createWorkspacePanelContext("remote-1");
+    const invalidation: WorkspaceInvalidation = { reason: "agent-activity", resources: ["workspace.files"] };
+
+    await registry.invalidateWorkspaceResources(context, invalidation);
+
+    expect(subscribed).toHaveBeenCalledWith(context, invalidation);
+    expect(legacy).not.toHaveBeenCalled();
+
+    await registry.invalidateWorkspacePanels(context);
+
+    expect(subscribed).toHaveBeenLastCalledWith(context);
+    expect(legacy).toHaveBeenCalledWith(context);
+  });
+
+  it("rejects unsupported workspace invalidation resources transactionally", () => {
+    const registry = new PluginRegistry();
+    const panel = { id: "files", title: "Files", render: () => html`<p>Files</p>` };
+    Reflect.set(panel, "invalidationResources", ["workspace.unknown"]);
+
+    expect(() => {
+      registry.register({
+        id: "example",
+        plugin: { apiVersion: 2, name: "Example", activate: () => ({ contributions: { workspacePanels: [panel] } }) },
+      });
+    }).toThrow("Invalid workspace-panel invalidation resource for example:files: workspace.unknown");
+    expect(registry.hasPlugin("example")).toBe(false);
+    expect(registry.getWorkspacePanels()).toEqual([]);
   });
 
   it("evaluates core action enablement against runtime state", () => {

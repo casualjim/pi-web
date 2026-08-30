@@ -11,6 +11,8 @@ export function createCoreWorkspacePanels(): WorkspacePanelContribution[] {
       icon: renderBuiltinTabIcon("files"),
       order: 10,
       routeAliases: ["files"],
+      invalidationResources: ["workspace.files"],
+      onInvalidate: (context) => isSelectedWorkspaceContext(context) ? context.onRefreshFiles() : undefined,
       render: renderFiles,
     },
     {
@@ -22,6 +24,13 @@ export function createCoreWorkspacePanels(): WorkspacePanelContribution[] {
       render: renderTerminal,
     },
   ];
+}
+
+function isSelectedWorkspaceContext(context: WorkspacePanelContext): boolean {
+  const selected = context.state.selectedWorkspace;
+  return selected?.id === context.workspace.id
+    && selected.projectId === context.workspace.projectId
+    && (context.state.selectedMachine?.id ?? "local") === context.machine.id;
 }
 
 function renderFiles(context: WorkspacePanelContext): TemplateResult {

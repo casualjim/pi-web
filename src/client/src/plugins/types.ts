@@ -58,13 +58,58 @@ export interface PluginMachine {
   kind: Machine["kind"];
 }
 
-export interface WorkspaceFiles {
+export interface WorkspaceFileRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
+export interface WorkspaceFileReferenceOptions {
+  readonly version?: string;
+}
+
+export interface WorkspaceFileUploadProgress {
+  readonly loaded: number;
+  readonly total: number;
+  readonly percent: number;
+  readonly lengthComputable: boolean;
+}
+
+export interface WorkspaceFileUploadOptions {
+  readonly destinationFolder?: string;
+  readonly createDirs?: boolean;
+  readonly overwrite?: boolean;
+  readonly onProgress?: (progress: WorkspaceFileUploadProgress) => void;
+}
+
+export interface WorkspaceFileUploadTask {
+  readonly path: string;
+  readonly completed: Promise<WriteWorkspaceFileResponse>;
+  cancel(): void;
+}
+
+export interface LegacyWorkspaceFiles {
+  readonly capabilityVersion?: undefined;
   readFile(path: string): Promise<FileContentResponse>;
   listFiles(path: string): Promise<FileTreeResponse>;
   writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
   deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
   moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
 }
+
+export interface WorkspaceFilesCapabilityV1 {
+  readonly capabilityVersion: 1;
+  readonly defaultUploadFolder: string;
+  readonly maxInlinePreviewBytes: number;
+  readFile(path: string, options?: WorkspaceFileRequestOptions): Promise<FileContentResponse>;
+  listFiles(path: string, options?: WorkspaceFileRequestOptions): Promise<FileTreeResponse>;
+  writeFile(path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions): Promise<WriteWorkspaceFileResponse>;
+  deleteFile(path: string): Promise<DeleteWorkspaceFileResponse>;
+  moveFile(fromPath: string, toPath: string, options?: MoveWorkspaceFileOptions): Promise<MoveWorkspaceFileResponse>;
+  previewUrl(path: string, options?: WorkspaceFileReferenceOptions): string;
+  downloadUrl(path: string, options?: WorkspaceFileReferenceOptions): string;
+  uploadFile(file: File, options?: WorkspaceFileUploadOptions): WorkspaceFileUploadTask;
+}
+
+export type WorkspaceFiles = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
 
 export interface WorkspaceBackend {
   request(operation: string, input: JsonValue): Promise<JsonValue>;
@@ -127,6 +172,7 @@ export interface PluginRuntimeContext {
   selectMainView: (view: AppState["mainView"]) => void;
   selectWorkspaceTool: (tool: QualifiedContributionId) => void;
   openTerminal: (options?: { terminalId?: string | undefined }) => void;
+  /** @deprecated Compatibility alias that publishes `workspace.files` invalidation for the selected workspace. */
   refreshFiles: () => void | Promise<void>;
   /** Invalidate plugin workspace-panel data for the selected workspace. */
   refreshWorkspacePanels: (panelId?: QualifiedContributionId) => void | Promise<void>;
@@ -180,7 +226,7 @@ export interface WorkspacePanelContext extends WorkspaceContext {
   selectedTerminalId: string | undefined;
   terminalAutoStart: boolean;
   workspaceUploadDefaultFolder: string;
-  onRefreshFiles: () => void;
+  onRefreshFiles: () => void | Promise<void>;
   onExpandDir: (path: string) => void;
   onSelectFile: (path: string) => void;
   onStartWorkspaceUpload: (files: readonly File[], options: { destinationFolder: string; createDirs?: boolean; overwrite?: boolean; selectUploadedFile?: boolean }) => { batchId: string; done: Promise<void> } | undefined;
@@ -190,6 +236,13 @@ export interface WorkspacePanelContext extends WorkspaceContext {
 }
 
 export type WorkspacePanelIcon = TemplateResult;
+export type WorkspaceResource = "workspace.files";
+export type WorkspaceInvalidationReason = "manual" | "mutation" | "agent-activity";
+
+export interface WorkspaceInvalidation {
+  readonly reason: WorkspaceInvalidationReason;
+  readonly resources: readonly WorkspaceResource[];
+}
 
 export interface WorkspacePanelContribution {
   id: LocalContributionId;
@@ -200,7 +253,8 @@ export interface WorkspacePanelContribution {
   routeAliases?: string[];
   visible?: (context: WorkspacePanelContext) => boolean;
   badge?: (context: WorkspacePanelContext) => string | number | TemplateResult | undefined;
-  onInvalidate?: (context: WorkspacePanelContext) => void | Promise<void>;
+  invalidationResources?: readonly WorkspaceResource[];
+  onInvalidate?: (context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void | Promise<void>;
   render: (context: WorkspacePanelContext) => TemplateResult;
 }
 

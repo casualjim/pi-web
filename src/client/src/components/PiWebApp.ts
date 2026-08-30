@@ -27,7 +27,7 @@ import { selectedNotificationView } from "../sessionNotifications";
 import { SessionUnreadController } from "../sessionUnread";
 import { initialSessionWarningVisibilityState, reconcileSessionWarningVisibility, toggleSessionWarnings } from "../sessionWarningVisibility";
 import { RealtimeSocket, type BrowserRealtimeEvent } from "../sessionSocket";
-import type { PluginMachine, PluginPromptEditor, QualifiedContributionId, QualifiedThemeContribution, QualifiedThemePairContribution, QualifiedWorkspacePanelContribution, PluginRuntimeContext, TerminalCommandRunsInternalRuntime, WorkspaceFiles, WorkspaceHost, WorkspaceLabelContext, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePluginBinding } from "../plugins/types";
+import type { PluginMachine, PluginPromptEditor, QualifiedContributionId, QualifiedThemeContribution, QualifiedThemePairContribution, QualifiedWorkspacePanelContribution, PluginRuntimeContext, TerminalCommandRunsInternalRuntime, WorkspaceFiles, WorkspaceHost, WorkspaceInvalidation, WorkspaceLabelContext, WorkspaceLabelItem, WorkspacePanelContext, WorkspacePluginBinding } from "../plugins/types";
 import { CLASSIC_THEME_ID, DEFAULT_THEME_PREFERENCE, applyPiWebTheme, findThemePairForTheme, readStoredThemePreference, resolveThemePreference, writeStoredThemePreference, type ThemePreference, type ThemePreferenceResolution } from "../theme";
 import { corePlugin } from "../plugins/core";
 import { themePackPlugin } from "../plugins/themes";
@@ -1460,7 +1460,7 @@ export class PiWebApp extends LitElement {
         machine,
         workspace,
         state: this.state,
-        files: this.createWorkspaceFiles(workspace, machine.id),
+        files: this.createWorkspaceFiles(workspace, machine),
         ...(backend === undefined ? {} : { backend }),
         host: this.createWorkspaceHost(),
       }, createContext);
@@ -1468,8 +1468,11 @@ export class PiWebApp extends LitElement {
     return createContext(coreWorkspacePluginBinding());
   }
 
-  private createWorkspaceFiles(workspace: Workspace, machineId: string): WorkspaceFiles {
-    return createPluginWorkspaceFiles(workspacesApi, workspace, machineId, () => { void this.files.refreshFiles(); });
+  private createWorkspaceFiles(workspace: Workspace, machine: PluginMachine): WorkspaceFiles {
+    return createPluginWorkspaceFiles(workspacesApi, workspace, machine.id, {
+      defaultUploadFolder: workspaceEffectiveUploadFolder(workspace.effectiveConfig, this.workspaceUploadDefaultFolder),
+      onInvalidate: (invalidation) => { void this.invalidateWorkspaceResources(workspace, machine, invalidation); },
+    });
   }
 
   private createWorkspaceHost(): WorkspaceHost {
@@ -1478,8 +1481,7 @@ export class PiWebApp extends LitElement {
     };
   }
 
-  private createWorkspacePanelContext(workspace: Workspace): WorkspacePanelContext {
-    const machine = pluginMachineFromState(this.state);
+  private createWorkspacePanelContext(workspace: Workspace, machine = pluginMachineFromState(this.state)): WorkspacePanelContext {
     const machineId = machine.id;
     const createContext = (binding: WorkspacePluginBinding): WorkspacePanelContext => {
       const terminalCommandRuns = this.terminalCommandRunsForOrigin(binding.registrationPluginId, machineId);
@@ -1488,7 +1490,7 @@ export class PiWebApp extends LitElement {
         machine,
         workspace,
         state: this.state,
-        files: this.createWorkspaceFiles(workspace, machineId),
+        files: this.createWorkspaceFiles(workspace, machine),
         ...(backend === undefined ? {} : { backend }),
         prompt: this.createPromptEditor(),
         terminal: {
@@ -1508,7 +1510,7 @@ export class PiWebApp extends LitElement {
         selectedTerminalId: this.state.selectedTerminalId,
         terminalAutoStart: this.terminalAutoStartWorkspaceId === workspace.id,
         workspaceUploadDefaultFolder: workspaceEffectiveUploadFolder(workspace.effectiveConfig, this.workspaceUploadDefaultFolder),
-        onRefreshFiles: () => { void this.files.refreshFiles(); },
+        onRefreshFiles: () => this.files.refreshFiles(),
         onExpandDir: (path: string) => { void this.files.expandDir(path); },
         onSelectFile: (path: string) => { void this.files.selectFile(path); },
         onStartWorkspaceUpload: (files, options) => this.files.startWorkspaceUpload(files, options),
@@ -1524,6 +1526,19 @@ export class PiWebApp extends LitElement {
     const workspace = this.state.selectedWorkspace;
     if (workspace === undefined) return Promise.resolve();
     return this.plugins.invalidateWorkspacePanels(this.createWorkspacePanelContext(workspace), panelId);
+  }
+
+  private invalidateWorkspaceResources(workspace: Workspace, machine: PluginMachine, invalidation: WorkspaceInvalidation): Promise<void> {
+    return this.plugins.invalidateWorkspaceResources(this.createWorkspacePanelContext(workspace, machine), invalidation);
+  }
+
+  private invalidateSelectedWorkspaceFiles(): Promise<void> {
+    const workspace = this.state.selectedWorkspace;
+    if (workspace === undefined) return Promise.resolve();
+    return this.invalidateWorkspaceResources(workspace, pluginMachineFromState(this.state), {
+      reason: "manual",
+      resources: ["workspace.files"],
+    });
   }
 
   private getActions(): AppAction[] {
@@ -1740,7 +1755,7 @@ export class PiWebApp extends LitElement {
       selectMainView: (view) => { this.selectMainView(view); },
       selectWorkspaceTool: (tool) => { this.openWorkspaceTool(tool); },
       openTerminal: (options) => { this.openTerminal(options); },
-      refreshFiles: () => this.files.refreshFiles(),
+      refreshFiles: () => this.invalidateSelectedWorkspaceFiles(),
       refreshWorkspacePanels: (panelId) => this.invalidateWorkspacePanels(panelId),
       refreshAppData: () => this.refreshAppData(),
       checkForPiWebUpdates: () => this.piWebStatusController.checkForUpdates(),

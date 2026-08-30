@@ -3,7 +3,7 @@ import type { Workspace } from "../api";
 import { initialAppState } from "../appState";
 import { loadExternalPlugins, type PluginManifestEntry } from "../plugins/external";
 import { PluginRegistry } from "../plugins/registry";
-import type { PiWebPlugin, PluginRuntimeContext, WorkspacePanelContext } from "../plugins/types";
+import type { PiWebPlugin, PluginRuntimeContext, WorkspaceInvalidation, WorkspacePanelContext } from "../plugins/types";
 import { PiWebApp } from "./PiWebApp";
 
 vi.mock("../plugins/external", () => ({ loadExternalPlugins: vi.fn() }));
@@ -56,6 +56,58 @@ describe("PiWebApp plugin host", () => {
     await Promise.resolve();
 
     expect(invalidated).toHaveBeenCalledTimes(5);
+  });
+
+  it("keeps legacy refreshFiles behavior through scoped workspace.files invalidation", async () => {
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.files",
+    });
+    const subscribed = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void>();
+    const legacy = vi.fn();
+    appPluginRegistry(app).register({
+      id: "browser-only",
+      plugin: {
+        apiVersion: 2,
+        name: "Browser only",
+        activate: ({ html }) => ({
+          contributions: {
+            workspacePanels: [
+              { id: "resource", title: "Resource", invalidationResources: ["workspace.files"], onInvalidate: subscribed, render: () => html`<p>Resource</p>` },
+              { id: "legacy", title: "Legacy", onInvalidate: legacy, render: () => html`<p>Legacy</p>` },
+            ],
+          },
+        }),
+      },
+    });
+    const filesController: unknown = Reflect.get(app, "files");
+    if (typeof filesController !== "object" || filesController === null) throw new Error("PiWebApp files controller was unavailable");
+    let finishCoreRefresh: () => void = () => undefined;
+    const coreRefresh = new Promise<void>((resolve) => { finishCoreRefresh = resolve; });
+    const refreshCoreFiles = vi.fn(() => coreRefresh);
+    if (!Reflect.set(filesController, "refreshFiles", refreshCoreFiles)) throw new Error("Could not stub core Files refresh");
+
+    const runtime = createPluginRuntimeContext(app);
+    const refreshFiles: unknown = Reflect.get(runtime, "refreshFiles");
+    if (!isAsyncVoidCallback(refreshFiles)) throw new Error("Legacy refreshFiles runtime alias was unavailable");
+    let aliasSettled = false;
+    const aliasCompletion = Promise.resolve(refreshFiles()).then(() => { aliasSettled = true; });
+    await Promise.resolve();
+
+    expect(refreshCoreFiles).toHaveBeenCalledOnce();
+    expect(aliasSettled).toBe(false);
+    finishCoreRefresh();
+    await aliasCompletion;
+    expect(aliasSettled).toBe(true);
+    expect(subscribed).toHaveBeenCalledOnce();
+    const call = subscribed.mock.calls[0];
+    expect(call?.[0].machine.id).toBe("local");
+    expect(call?.[0].workspace.id).toBe("workspace-1");
+    expect(call?.[1]).toEqual({ reason: "manual", resources: ["workspace.files"] });
+    expect(legacy).not.toHaveBeenCalled();
   });
 
   it("keeps successful registrations while making an incomplete gateway load retryable", async () => {
@@ -172,6 +224,10 @@ async function ensureGatewayPluginsLoaded(app: PiWebApp): Promise<void> {
   const result: unknown = Reflect.apply(ensure, app, []);
   if (!(result instanceof Promise)) throw new Error("PiWebApp gateway plugin loader did not return a promise");
   await result;
+}
+
+function isAsyncVoidCallback(value: unknown): value is () => void | Promise<void> {
+  return typeof value === "function";
 }
 
 function isPluginRuntimeContext(value: unknown): value is PluginRuntimeContext {

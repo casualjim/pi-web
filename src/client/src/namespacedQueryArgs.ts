@@ -86,16 +86,7 @@ export function writeContributionQueryRecord(
 ): boolean {
   const normalized = normalizeContributionQueryRecord(record);
   const url = new URL(window.location.href);
-  for (const key of [...url.searchParams.keys()]) {
-    if (isContributionQueryParameter(key)) url.searchParams.delete(key);
-  }
-  for (const [key, value] of Object.entries(normalized)) {
-    if (Array.isArray(value)) {
-      for (const item of value) url.searchParams.append(key, item);
-    } else {
-      url.searchParams.set(key, value);
-    }
-  }
+  replaceContributionQueryParams(url.searchParams, normalized);
   return commitUrl(url, options);
 }
 
@@ -118,10 +109,25 @@ export function setContributionQueryKey(
   if (canonicalKey.length > MAX_CONTRIBUTION_QUERY_PARAMETER_LENGTH) {
     throw new Error(`Contribution navigation parameter is too long for key: ${key}`);
   }
+  const callerParams = new URLSearchParams();
+  for (const item of serializedValues) callerParams.append(canonicalKey, item);
+  // Validate only caller-owned input. Restored URL state is an untyped boundary
+  // and is normalized below instead of being allowed to poison this write.
+  assertContributionQueryParamsWithinLimits(callerParams);
+
+  const replacedParameterKeys = new Set(parameterKeys);
+  const candidates = new URLSearchParams(callerParams);
   const url = new URL(window.location.href);
-  for (const parameterKey of parameterKeys) url.searchParams.delete(parameterKey);
-  for (const item of serializedValues) url.searchParams.append(canonicalKey, item);
-  assertContributionQueryParamsWithinLimits(url.searchParams);
+  for (const [parameter, existingValue] of url.searchParams) {
+    if (isContributionQueryParameter(parameter) && !replacedParameterKeys.has(parameter)) {
+      candidates.append(parameter, existingValue);
+    }
+  }
+  const normalized = readBoundedQueryFromParams(
+    candidates,
+    (parameter) => isContributionQueryParameter(parameter) ? { key: parameter, parameterLength: parameter.length } : undefined,
+  );
+  replaceContributionQueryParams(url.searchParams, normalized);
   return commitUrl(url, options);
 }
 
@@ -259,6 +265,22 @@ function appendBoundedQueryParam(
     || budget.recordLength + value.length > MAX_CONTRIBUTION_QUERY_RECORD_LENGTH) return;
   result[key] = [...existingValues, value];
   budget.recordLength += value.length;
+}
+
+function replaceContributionQueryParams(
+  params: URLSearchParams,
+  record: Readonly<Record<string, string | readonly string[]>>,
+): void {
+  for (const key of [...params.keys()]) {
+    if (isContributionQueryParameter(key)) params.delete(key);
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string") {
+      params.set(key, value);
+      continue;
+    }
+    for (const item of value) params.append(key, item);
+  }
 }
 
 function assertContributionQueryParamsWithinLimits(params: URLSearchParams): void {

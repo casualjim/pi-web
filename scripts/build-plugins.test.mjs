@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -117,7 +117,7 @@ describe("Files browser package build", () => {
     });
   });
 
-  it("emits only package metadata and a self-contained lazy browser graph within catalog bounds", { timeout: 30_000 }, async () => {
+  it("emits only package metadata and an entry-resident browser graph within catalog bounds", { timeout: 30_000 }, async () => {
     const source = resolve("pi-web-plugins/files");
     const target = join(tempDir, "files");
     await buildFilesBrowserPackage(source, target);
@@ -125,7 +125,7 @@ describe("Files browser package build", () => {
     const packageFiles = await recursiveFiles(target);
     expect(packageFiles.filter((path) => !path.startsWith("browser/"))).toEqual(["package.json"]);
     expect(packageFiles).toContain("browser/pi-web-plugin.js");
-    expect(packageFiles.some((path) => /^browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path))).toBe(true);
+    expect(packageFiles.some((path) => /^browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path))).toBe(false);
     expect(packageFiles.some((path) => /^browser\/assets\/files-icon-[^/]+\.svg$/u.test(path))).toBe(true);
     expect(packageFiles.some((path) => path.endsWith(".map"))).toBe(false);
     expect(packageFiles.some((path) => /\.(?:ts|css)$/u.test(path))).toBe(false);
@@ -146,7 +146,7 @@ describe("Files browser package build", () => {
 
     const browserRoot = join(target, "browser");
     const browserJavaScript = packageFiles.filter((path) => path.startsWith("browser/") && path.endsWith(".js"));
-    expect(browserJavaScript.length).toBeGreaterThan(1);
+    expect(browserJavaScript).toEqual(["browser/pi-web-plugin.js"]);
     for (const packagePath of browserJavaScript) {
       const file = join(target, packagePath);
       const sourceText = await readFile(file, "utf8");
@@ -161,13 +161,18 @@ describe("Files browser package build", () => {
 
     const entryPath = join(browserRoot, "pi-web-plugin.js");
     const entrySource = await readFile(entryPath, "utf8");
-    expect(moduleSpecifiers(entrySource).some((specifier) => /^\.\/assets\/viewerDependencies-[^/]+\.js$/u.test(specifier))).toBe(true);
+    expect(moduleSpecifiers(entrySource).filter((specifier) => specifier.endsWith(".js"))).toEqual([]);
 
-    const firstModuleUrl = pathToFileURL(entryPath);
-    firstModuleUrl.searchParams.set("buildTest", `remote-1-${String(Date.now())}`);
-    const secondModuleUrl = pathToFileURL(entryPath);
-    secondModuleUrl.searchParams.set("buildTest", `remote-2-${String(Date.now())}`);
-    const { builtModule, secondBuiltModule, activation, registrations } = await withBrowserGlobals(async () => {
+    const artifactProbeRoot = join(tempDir, "_artifact-probe");
+    const firstBrowserRoot = join(artifactProbeRoot, "remote-a", "browser");
+    const secondBrowserRoot = join(artifactProbeRoot, "remote-b", "browser");
+    await mkdir(artifactProbeRoot, { recursive: true });
+    await cp(browserRoot, firstBrowserRoot, { recursive: true });
+    await cp(browserRoot, secondBrowserRoot, { recursive: true });
+    const firstModuleUrl = pathToFileURL(join(firstBrowserRoot, "pi-web-plugin.js"));
+    const secondModuleUrl = pathToFileURL(join(secondBrowserRoot, "pi-web-plugin.js"));
+    const remoteBContent = "const selectedOnRemoteB: string = 'healthy';";
+    const { builtModule, secondBuiltModule, activation, registrations, viewerProbe } = await withBrowserGlobals(async () => {
       const imported = await import(firstModuleUrl.href);
       const secondImported = await import(secondModuleUrl.href);
       const template = (strings, ...values) => ({ strings, values });
@@ -179,6 +184,7 @@ describe("Files browser package build", () => {
         svg: template,
       });
       const firstElementConstructor = customElements.get("pi-web-files-panel");
+      const firstCodeViewerConstructor = customElements.get("pi-web-files-code-viewer");
       const registry = new PluginRegistry();
       registry.register({ id: "remote-1.files", sourcePluginId: "files", machineId: "remote-1", plugin: imported.default });
       registry.register({ id: "remote-2.files", sourcePluginId: "files", machineId: "remote-2", plugin: secondImported.default });
@@ -187,6 +193,18 @@ describe("Files browser package build", () => {
       const secondContext = builtWorkspacePanelContext("remote-2");
       const firstRendered = panels.find((panel) => panel.machineId === "remote-1")?.render(firstContext);
       const secondRendered = panels.find((panel) => panel.machineId === "remote-2")?.render(secondContext);
+
+      // The retained canonical constructor belongs to remote A. Remove every
+      // post-entry A asset, then prove healthy remote B content still gets a
+      // real CodeMirror editor without consulting A's old artifact root.
+      await rm(join(firstBrowserRoot, "assets"), { recursive: true, force: true });
+      const secondDependencies = await secondImported.loadFilesViewerDependencies();
+      const codeViewer = document.createElement("pi-web-files-code-viewer");
+      codeViewer.content = remoteBContent;
+      codeViewer.language = "typescript";
+      document.body.append(codeViewer);
+      await waitFor(() => codeViewer.shadowRoot?.querySelector(".cm-editor") !== null);
+
       return {
         builtModule: imported,
         secondBuiltModule: secondImported,
@@ -195,10 +213,18 @@ describe("Files browser package build", () => {
           panelMachineIds: panels.map((panel) => panel.machineId),
           firstElementConstructor,
           secondElementConstructor: customElements.get("pi-web-files-panel"),
+          firstCodeViewerConstructor,
+          secondCodeViewerConstructor: customElements.get("pi-web-files-code-viewer"),
           firstContextBound: firstRendered?.values.includes(firstContext) === true,
           secondContextBound: secondRendered?.values.includes(secondContext) === true,
           firstRuntime: firstRendered?.values.find((value) => value instanceof imported.FilesRuntime),
           secondRuntime: secondRendered?.values.find((value) => value instanceof secondImported.FilesRuntime),
+        },
+        viewerProbe: {
+          firstAssetsUnavailable: await stat(join(firstBrowserRoot, "assets")).then(() => false, () => true),
+          secondLoaderSucceeded: typeof secondDependencies.EditorView === "function",
+          rendered: codeViewer.shadowRoot?.querySelector(".cm-editor") !== null,
+          text: codeViewer.shadowRoot?.textContent ?? "",
         },
       };
     });
@@ -208,11 +234,19 @@ describe("Files browser package build", () => {
     expect(registrations.panelMachineIds).toEqual(["remote-1", "remote-2"]);
     expect(registrations.firstElementConstructor).toBeDefined();
     expect(registrations.secondElementConstructor).toBe(registrations.firstElementConstructor);
+    expect(registrations.firstCodeViewerConstructor).toBeDefined();
+    expect(registrations.secondCodeViewerConstructor).toBe(registrations.firstCodeViewerConstructor);
     expect(registrations.firstContextBound).toBe(true);
     expect(registrations.secondContextBound).toBe(true);
     expect(registrations.firstRuntime).toBeInstanceOf(builtModule.FilesRuntime);
     expect(registrations.secondRuntime).toBeInstanceOf(secondBuiltModule.FilesRuntime);
     expect(registrations.secondRuntime).not.toBe(registrations.firstRuntime);
+    expect(viewerProbe).toMatchObject({
+      firstAssetsUnavailable: true,
+      secondLoaderSucceeded: true,
+      rendered: true,
+    });
+    expect(viewerProbe.text).toContain("selectedOnRemoteB");
     expect(activation.contributions.workspacePanels).toMatchObject([{
       id: "workspace.files",
       routeAliases: ["files", "core:workspace.files"],
@@ -223,8 +257,8 @@ describe("Files browser package build", () => {
     expect(typeof builtModule.loadFilesViewerDependencies).toBe("function");
     expect(typeof builtModule.filesStyles).toBe("string");
     expect(builtModule.filesStyles).toContain("var(--pi-text)");
-    expect(typeof builtModule.filesIconUrl).toBe("string");
-    expect((await stat(fileURLToPath(builtModule.filesIconUrl))).isFile()).toBe(true);
+    expect(typeof secondBuiltModule.filesIconUrl).toBe("string");
+    expect((await stat(fileURLToPath(secondBuiltModule.filesIconUrl))).isFile()).toBe(true);
 
     const catalog = new PiWebPluginCatalog({
       roots: [{ path: tempDir, source: "bundled", scope: "bundled" }],
@@ -267,11 +301,6 @@ describe("Files browser package build", () => {
     })]);
     expect(manifest.plugins[0]?.module).toContain("/pi-web-plugins/files/browser/pi-web-plugin.js?");
     await expect(service.readAsset("files", "browser/pi-web-plugin.js")).resolves.toMatchObject({
-      contentType: "application/javascript; charset=utf-8",
-    });
-    const lazyChunk = packageFiles.find((path) => /^browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path));
-    if (lazyChunk === undefined) throw new Error("Built Files package has no lazy viewer chunk");
-    await expect(service.readAsset("files", lazyChunk)).resolves.toMatchObject({
       contentType: "application/javascript; charset=utf-8",
     });
 
@@ -356,29 +385,64 @@ function builtWorkspacePanelContext(machineId) {
   };
 }
 
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolvePromise) => { setTimeout(resolvePromise, 10); });
+  }
+  throw new Error(`Timed out after ${String(timeoutMs)}ms waiting for built browser behavior`);
+}
+
 async function withBrowserGlobals(action) {
   const browser = new Window({ url: "http://localhost/" });
   const names = [
     "window",
     "document",
     "customElements",
+    "Window",
     "HTMLElement",
-    "Element",
-    "Node",
-    "ShadowRoot",
-    "Document",
-    "CSSStyleSheet",
-    "CustomEvent",
-    "Event",
+    "HTMLDivElement",
     "HTMLDialogElement",
     "HTMLInputElement",
+    "Element",
+    "Node",
+    "Text",
+    "ShadowRoot",
+    "Document",
+    "DocumentFragment",
+    "Range",
+    "Selection",
+    "CSSStyleSheet",
+    "CSS",
+    "DOMRect",
+    "DOMRectReadOnly",
+    "MutationObserver",
+    "ResizeObserver",
+    "EventTarget",
+    "CustomEvent",
+    "Event",
+    "FocusEvent",
+    "KeyboardEvent",
+    "MouseEvent",
+    "InputEvent",
+    "CompositionEvent",
     "File",
     "DOMException",
     "navigator",
+    "getComputedStyle",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
   ];
+  const ownersKey = Symbol.for("pi-web.files.custom-element-owners.v1");
+  const previousOwners = Object.getOwnPropertyDescriptor(globalThis, ownersKey);
+  Reflect.deleteProperty(globalThis, ownersKey);
   const previous = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   for (const name of names) {
-    const value = name === "window" ? browser : name === "document" ? browser.document : browser[name];
+    let value = name === "window" ? browser : name === "document" ? browser.document : browser[name];
+    if (typeof value === "function" && ["getComputedStyle", "requestAnimationFrame", "cancelAnimationFrame"].includes(name)) {
+      value = value.bind(browser);
+    }
     Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
   }
   try {
@@ -389,6 +453,8 @@ async function withBrowserGlobals(action) {
       if (descriptor === undefined) delete globalThis[name];
       else Object.defineProperty(globalThis, name, descriptor);
     }
+    if (previousOwners === undefined) Reflect.deleteProperty(globalThis, ownersKey);
+    else Object.defineProperty(globalThis, ownersKey, previousOwners);
     await browser.happyDOM.abort();
   }
 }

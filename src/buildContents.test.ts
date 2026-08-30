@@ -156,7 +156,7 @@ describe("production build contents", () => {
         "dist/pi-web-plugins/files/package.json",
         "dist/pi-web-plugins/files/browser/pi-web-plugin.js",
       ]));
-      expect(filesPluginFiles.some((path) => /\/browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path))).toBe(true);
+      expect(filesPluginFiles.some((path) => /\/browser\/assets\/viewerDependencies-[^/]+\.js$/u.test(path))).toBe(false);
       expect(filesPluginFiles.some((path) => /\/browser\/assets\/files-icon-[^/]+\.svg$/u.test(path))).toBe(true);
       expect(filesPluginFiles.every((path) => path.endsWith("/package.json") || path.includes("/browser/"))).toBe(true);
       expect(packagedFiles).toEqual(expect.arrayContaining(filesPluginFiles));

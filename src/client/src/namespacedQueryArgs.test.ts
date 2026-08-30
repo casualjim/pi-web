@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  isContributionQueryParameter,
   readContributionQuery,
   readContributionQueryRecord,
   setContributionQueryKey,
@@ -84,19 +85,69 @@ describe("contribution-scoped query helpers", () => {
     expect(browser.replaced).toHaveLength(1);
   });
 
-  it("rejects over-bound key writes atomically without committing partial history", () => {
-    const params = new URLSearchParams({ project: "p1", workspace: "w1" });
-    for (let index = 0; index < 64; index += 1) params.set(`panel.workspace.panel--key-${String(index)}`, "value");
+  it("removes an overlong restored value before valid set and remove writes", () => {
+    const params = new URLSearchParams({ machine: "remote", project: "p1", workspace: "w1", plain: "kept" });
+    params.set("legacy.workspace.panel--file", "legacy.ts");
+    params.set("other.workspace.panel--poison", "v".repeat(4_097));
+    const browser = installWindow(`https://example.test/base/app?${params.toString()}#viewer`);
+
+    expect(setContributionQueryKey("panel:workspace.panel", ["legacy:workspace.panel"], "file", "README.md")).toBe(true);
+    expect(browser.url.searchParams.get("panel.workspace.panel--file")).toBe("README.md");
+    expect(browser.url.searchParams.has("legacy.workspace.panel--file")).toBe(false);
+    expect(browser.url.searchParams.has("other.workspace.panel--poison")).toBe(false);
+    expect(browser.url.searchParams.get("plain")).toBe("kept");
+    expect(browser.url.pathname).toBe("/base/app");
+    expect(browser.url.hash).toBe("#viewer");
+
+    params.delete("legacy.workspace.panel--file");
+    params.set("panel.workspace.panel--file", "README.md");
+    params.set("other.workspace.panel--poison", "v".repeat(4_097));
+    browser.navigate(`https://example.test/base/app?${params.toString()}#viewer`);
+    expect(setContributionQueryKey("panel:workspace.panel", [], "file", undefined)).toBe(true);
+    expect(browser.url.searchParams.has("panel.workspace.panel--file")).toBe(false);
+    expect(browser.url.searchParams.has("other.workspace.panel--poison")).toBe(false);
+  });
+
+  it("trims restored repeated-value overflow before prioritizing a valid setter", () => {
+    const params = new URLSearchParams({ project: "p1", plain: "kept" });
+    for (let index = 0; index < 17; index += 1) params.append("other.workspace.panel--tag", `tag-${String(index)}`);
     const browser = installWindow(`https://example.test/app?${params.toString()}#viewer`);
-    const before = browser.url.href;
 
-    expect(() => setContributionQueryKey("panel:workspace.panel", ["legacy:workspace.panel"], "next", "value"))
-      .toThrow("Contribution navigation has too many parameters");
-    expect(browser.url.href).toBe(before);
-    expect(browser.pushed).toHaveLength(0);
-    expect(browser.replaced).toHaveLength(0);
+    expect(setContributionQueryKey("panel:workspace.panel", [], "file", "README.md")).toBe(true);
+    expect(browser.url.searchParams.get("panel.workspace.panel--file")).toBe("README.md");
+    expect(browser.url.searchParams.getAll("other.workspace.panel--tag"))
+      .toEqual(Array.from({ length: 16 }, (_value, index) => `tag-${String(index)}`));
+    expect(browser.url.searchParams.get("plain")).toBe("kept");
+    expect(browser.url.hash).toBe("#viewer");
+  });
 
-    browser.navigate("https://example.test/app?project=p1#viewer");
+  it("trims restored parameter-count overflow while retaining the caller's valid write", () => {
+    const params = new URLSearchParams({ project: "p1" });
+    for (let index = 0; index < 65; index += 1) params.set(`other.workspace.panel--key-${String(index)}`, "value");
+    const browser = installWindow(`https://example.test/app?${params.toString()}`);
+
+    expect(setContributionQueryKey("panel:workspace.panel", [], "file", "README.md")).toBe(true);
+    const keys = new Set(contributionEntries(browser.url).map(([key]) => key));
+    expect(keys.size).toBe(64);
+    expect(keys.has("panel.workspace.panel--file")).toBe(true);
+    expect(browser.url.searchParams.get("panel.workspace.panel--file")).toBe("README.md");
+  });
+
+  it("trims restored aggregate overflow while retaining the caller's valid write", () => {
+    const params = new URLSearchParams({ project: "p1", plain: "kept" });
+    for (let index = 0; index < 16; index += 1) params.set(`other.workspace.panel--value-${String(index)}`, "v".repeat(4_096));
+    expect(contributionRecordLength(params)).toBeGreaterThan(65_536);
+    const browser = installWindow(`https://example.test/app?${params.toString()}#viewer`);
+
+    expect(setContributionQueryKey("panel:workspace.panel", [], "file", "README.md")).toBe(true);
+    expect(browser.url.searchParams.get("panel.workspace.panel--file")).toBe("README.md");
+    expect(contributionRecordLength(browser.url.searchParams)).toBeLessThanOrEqual(65_536);
+    expect(browser.url.searchParams.get("plain")).toBe("kept");
+    expect(browser.url.hash).toBe("#viewer");
+  });
+
+  it("rejects caller-owned over-bound writes atomically without committing history", () => {
+    const browser = installWindow("https://example.test/app?project=p1#viewer");
     const clean = browser.url.href;
     expect(() => setContributionQueryKey("panel:workspace.panel", [], "x".repeat(240), "value"))
       .toThrow("Contribution navigation parameter is too long");
@@ -109,23 +160,21 @@ describe("contribution-scoped query helpers", () => {
     expect(browser.replaced).toHaveLength(0);
   });
 
-  it("accepts the aggregate limit exactly and rejects one more write without history", () => {
-    const params = new URLSearchParams();
-    for (let index = 0; index < 15; index += 1) {
-      params.set(`panel.workspace.panel--value-${String(index)}`, "v".repeat(4_096));
-    }
-    const existingLength = [...params].reduce((total, [key, value]) => total + key.length + value.length, 0);
-    const exactKey = "panel.workspace.panel--last";
-    const exactValueLength = 65_536 - existingLength - exactKey.length;
-    expect(exactValueLength).toBeGreaterThan(0);
-    expect(exactValueLength).toBeLessThanOrEqual(4_096);
-    const browser = installWindow(`https://example.test/app?${params.toString()}`);
+  it("accepts the caller aggregate limit exactly and rejects one more byte without history", () => {
+    const canonicalKey = "panel.workspace.panel--last";
+    const exactValues = Array.from({ length: 16 }, () => "v".repeat(4_096));
+    exactValues[exactValues.length - 1] = "v".repeat(4_096 - canonicalKey.length);
+    expect(canonicalKey.length + exactValues.reduce((total, value) => total + value.length, 0)).toBe(65_536);
+    const browser = installWindow("https://example.test/app?project=p1#viewer");
 
-    expect(setContributionQueryKey("panel:workspace.panel", [], "last", "v".repeat(exactValueLength))).toBe(true);
+    expect(setContributionQueryKey("panel:workspace.panel", [], "last", exactValues)).toBe(true);
     expect(browser.pushed).toHaveLength(1);
+    expect(browser.url.searchParams.getAll(canonicalKey)).toEqual(exactValues);
     const exactUrl = browser.url.href;
 
-    expect(() => setContributionQueryKey("panel:workspace.panel", [], "overflow", "x"))
+    const overflowValues = [...exactValues];
+    overflowValues[overflowValues.length - 1] = `${overflowValues.at(-1) ?? ""}x`;
+    expect(() => setContributionQueryKey("panel:workspace.panel", [], "last", overflowValues))
       .toThrow("Contribution navigation record is too long");
     expect(browser.url.href).toBe(exactUrl);
     expect(browser.pushed).toHaveLength(1);
@@ -156,6 +205,23 @@ describe("contribution-scoped query helpers", () => {
   });
 
 });
+
+function contributionEntries(source: URL | URLSearchParams): [string, string][] {
+  const params = source instanceof URL ? source.searchParams : source;
+  return [...params].filter(([key]) => isContributionQueryParameter(key));
+}
+
+function contributionRecordLength(source: URLSearchParams): number {
+  const seenKeys = new Set<string>();
+  let length = 0;
+  for (const [key, value] of contributionEntries(source)) {
+    length += value.length;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    length += key.length;
+  }
+  return length;
+}
 
 function installWindow(href: string): {
   readonly url: URL;

@@ -164,10 +164,46 @@ describe("Files panel component boundary", () => {
     panel.requestUpdate();
     await panel.updateComplete;
     expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
+  });
 
+  it("drops chooser results that arrive after responsive layout hides the panel", async () => {
+    const panel = await mountPanel(createContext());
+    const upload = buttonWithText(panel.shadowRoot, "Upload");
+    const input = requiredElement(panel.shadowRoot?.querySelector<HTMLInputElement>("#workspace-upload-input"), "upload input");
+    const focus = vi.spyOn(upload, "focus");
+
+    upload.click();
+    Object.defineProperty(panel, "getClientRects", { configurable: true, value: () => [] });
+    window.dispatchEvent(new Event("resize"));
     Object.defineProperty(input, "files", { configurable: true, value: [new File(["later"], "later.txt")] });
     input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-    window.dispatchEvent(new Event("resize"));
+    await panel.updateComplete;
+    await panel.updateComplete;
+
+    expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    Object.defineProperty(panel, "getClientRects", { configurable: true, value: visibleClientRects });
+    panel.requestUpdate();
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
+  });
+
+  it("renders a many-file review with native close, cancel, and submit controls", async () => {
+    const panel = await mountPanel(createContext());
+    const input = requiredElement(panel.shadowRoot?.querySelector<HTMLInputElement>("#workspace-upload-input"), "upload input");
+    const files = Array.from({ length: 20 }, (_value, index) => new File(["content"], `file-${String(index)}.txt`));
+    Object.defineProperty(input, "files", { configurable: true, value: files });
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    await panel.updateComplete;
+    await panel.updateComplete;
+
+    const dialog = requiredElement(panel.shadowRoot?.querySelector<HTMLDialogElement>("dialog.upload-dialog"), "upload dialog");
+    expect(dialog.open).toBe(true);
+    expect(dialog.querySelectorAll(".review-file")).toHaveLength(20);
+    expect(requiredElement(dialog.querySelector<HTMLButtonElement>(".close-button"), "close button").getAttribute("aria-label")).toBe("Cancel upload");
+    expect(requiredElement(dialog.querySelector<HTMLButtonElement>("button[type='submit']"), "upload submit button").textContent).toContain("Upload");
+
+    buttonWithText(dialog, "Cancel").click();
     await panel.updateComplete;
     expect(panel.shadowRoot?.querySelector("dialog.upload-dialog")).toBeNull();
   });
@@ -236,6 +272,9 @@ async function mountPanel(context: WorkspacePanelContext, runtime = new FilesRun
   const panel = new WorkspaceFilesPanel();
   panel.context = context;
   panel.runtime = runtime;
+  // happy-dom has no layout engine; component visibility is an explicit
+  // browser boundary for the responsive native-modal guard.
+  Object.defineProperty(panel, "getClientRects", { configurable: true, value: visibleClientRects });
   document.body.append(panel);
   await panel.updateComplete;
   return panel;
@@ -317,6 +356,10 @@ function uploadBatch(patch: Partial<WorkspaceUploadBatchState> = {}): WorkspaceU
     startedAt: "now",
     ...patch,
   };
+}
+
+function visibleClientRects(): DOMRect[] {
+  return [new DOMRect(0, 0, 800, 600)];
 }
 
 function buttonWithText(root: ParentNode | null | undefined, text: string): HTMLButtonElement {

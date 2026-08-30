@@ -4,7 +4,7 @@ import { css, html, LitElement } from "lit";
 import { property, query } from "lit/decorators.js";
 import { loadFilesViewerDependencies, type FilesViewerDependencies } from "./viewerLoader";
 
-/** Synchronously registered shell that loads CodeMirror only when raw code is shown. */
+/** Synchronously registered shell that initializes CodeMirror only when raw code is shown. */
 export class FilesCodeViewer extends LitElement {
   @property() content = "";
   @property() language: string | undefined;

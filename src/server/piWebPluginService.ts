@@ -39,6 +39,8 @@ export interface PiWebPluginManifestEntry {
   backendRevision?: string;
   /** Versioned direct paired-request capability exposed as `context.backend.capabilityVersion`. */
   backendCapabilityVersion?: 1;
+  /** Versioned bounded channel capability exposed as `context.backend.channelVersion`. */
+  channelVersion?: 1;
   source: string;
   scope: PiWebPluginScope;
   machineSpecific: boolean;
@@ -83,7 +85,7 @@ export class PiWebPluginService {
   async manifest(): Promise<PiWebPluginManifest> {
     const lifecycle = await this.lifecycle();
     const plugins: PiWebPluginManifestEntry[] = [];
-    for (const { plugin, backendRevision, backendCapabilityVersion } of lifecycle.browserPlugins) {
+    for (const { plugin, backendRevision, backendCapabilityVersion, channelVersion } of lifecycle.browserPlugins) {
       const artifact = await this.captureBrowserArtifact(plugin, backendRevision);
       if (artifact === undefined) continue;
       plugins.push({
@@ -91,6 +93,7 @@ export class PiWebPluginService {
         module: browserModuleUrl(plugin),
         ...(backendRevision === undefined ? {} : { backendRevision }),
         ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
+        ...(channelVersion === undefined ? {} : { channelVersion }),
         source: plugin.source,
         scope: plugin.scope,
         machineSpecific: plugin.machineSpecific,

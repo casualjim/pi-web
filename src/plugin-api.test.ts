@@ -10,6 +10,9 @@ import type {
   PluginContributions,
   Workspace,
   WorkspaceBackend,
+  WorkspaceBackendChannel,
+  WorkspaceBackendChannelOptions,
+  WorkspaceBackendChannelV1,
   WorkspaceBackendRequestOptions,
   WorkspaceBackendV1,
   WorkspaceFiles,
@@ -105,8 +108,13 @@ describe("public browser plugin API", () => {
     expectTypeOf<ExistingV2WorkspaceBackend>().toExtend<WorkspaceBackend>();
     expectTypeOf<WorkspaceBackendV1>().toExtend<WorkspaceBackend>();
     expectTypeOf<WorkspaceBackendV1["capabilityVersion"]>().toEqualTypeOf<1>();
-    expectTypeOf<ReadonlyKeys<WorkspaceBackendV1>>().toEqualTypeOf<"capabilityVersion">();
+    expectTypeOf<WorkspaceBackendChannelV1>().toExtend<WorkspaceBackendV1>();
+    expectTypeOf<WorkspaceBackendChannelV1["channelVersion"]>().toEqualTypeOf<1>();
+    expectTypeOf<WorkspaceBackendChannelV1["openChannel"]>().toBeFunction();
+    expectTypeOf<ReadonlyKeys<WorkspaceBackendV1>>().toEqualTypeOf<"capabilityVersion" | "channelVersion">();
     expectTypeOf<ReadonlyKeys<WorkspaceBackendRequestOptions>>().toEqualTypeOf<"signal">();
+    expectTypeOf<ReadonlyKeys<WorkspaceBackendChannelOptions>>().toEqualTypeOf<keyof WorkspaceBackendChannelOptions>();
+    expectTypeOf<ReadonlyKeys<Pick<WorkspaceBackendChannel, "closed">>>().toEqualTypeOf<"closed">();
   });
 
   it("adds optional versioned panel navigation without changing browser API v2 compatibility", () => {

@@ -214,10 +214,10 @@ describe("PiWebPluginService", () => {
       packageProvider: false,
       configProvider: () => ({ plugins: { "server-only": { enabled: false } } }),
     });
-    const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog, ["dual"]) });
+    const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog, ["dual"], ["dual"]) });
 
     const manifest = await service.manifest();
-    expect(manifest).toMatchObject({ plugins: [{ id: "dual", machineSpecific: true, backendCapabilityVersion: 1 }] });
+    expect(manifest).toMatchObject({ plugins: [{ id: "dual", machineSpecific: true, backendCapabilityVersion: 1, channelVersion: 1 }] });
     expect(manifest.plugins[0]?.backendRevision).toMatch(/^sha256:[a-f\d]{64}$/u);
     const plugins = await service.plugins();
     expect(plugins.plugins[0]).toMatchObject({ id: "dual", enabled: true, machineSpecific: true });
@@ -703,6 +703,7 @@ async function writePlugin(root: string, options: { packageJson: unknown; files:
 function activeRuntimeProvider(
   catalog: PiWebPluginCatalog,
   backendCapabilityPluginIds: readonly string[] = [],
+  channelPluginIds: readonly string[] = [],
 ): WorkspaceProviderRuntimeReader {
   const activeSnapshot = catalog.snapshot().then((snapshot) => {
     const records = snapshot.plugins.flatMap((plugin) => plugin.serverModule === undefined ? [] : [{
@@ -714,6 +715,7 @@ function activeRuntimeProvider(
       settingsRevision: plugin.settingsRevision,
       machineSpecific: plugin.machineSpecific,
       ...(backendCapabilityPluginIds.includes(plugin.id) ? { backendCapabilityVersion: 1 as const } : {}),
+      ...(channelPluginIds.includes(plugin.id) ? { channelVersion: 1 as const } : {}),
       state: plugin.enabled ? "active" as const : "disabled" as const,
       ...(plugin.enabled ? { name: plugin.id } : { message: "disabled in PI WEB config" }),
     }]);

@@ -18,7 +18,11 @@ describe("server plugin runtime", () => {
     const modules = new Map<string, unknown>([
       ["alpha", pluginModule("Alpha", {
         workspaceProvider: provider,
-        pairedBackend: { version: 1, request: () => ({ ready: true }) },
+        pairedBackend: {
+          version: 1,
+          request: () => ({ ready: true }),
+          openChannel: () => ({ receive: () => undefined }),
+        },
         start: () => { events.push("start:alpha"); },
         stop: () => { events.push("stop:alpha"); },
       })],
@@ -61,7 +65,7 @@ describe("server plugin runtime", () => {
     expect(imported).toEqual(["alpha", "bad-activate", "bad-api", "bad-import", "bad-start", "omega"]);
     expect(events).toEqual(["start:alpha", "start:bad-start", "rollback:bad-start", "start:omega"]);
     expect(runtime.healthRecords()).toEqual([
-      expect.objectContaining({ pluginId: "alpha", state: "active", name: "Alpha", browserRevision: "browser-7", settingsRevision: "settings-1", machineSpecific: true, backendCapabilityVersion: 1 }),
+      expect.objectContaining({ pluginId: "alpha", state: "active", name: "Alpha", browserRevision: "browser-7", settingsRevision: "settings-1", machineSpecific: true, backendCapabilityVersion: 1, channelVersion: 1 }),
       expect.objectContaining({ pluginId: "bad-activate", state: "failed", phase: "activate", message: "activate exploded" }),
       expect.objectContaining({ pluginId: "bad-api", state: "incompatible", phase: "validate", message: "Unsupported server plugin API version: 2" }),
       expect.objectContaining({ pluginId: "bad-import", state: "failed", phase: "import", message: "import exploded" }),
@@ -288,7 +292,11 @@ describe("server plugin runtime", () => {
     const provider = testProvider();
     const mutableActivation: Record<string, unknown> = {
       workspaceProvider: provider,
-      pairedBackend: { version: 1, request: () => ({ captured: true }) },
+      pairedBackend: {
+        version: 1,
+        request: () => ({ captured: true }),
+        openChannel: () => ({ receive: () => undefined }),
+      },
     };
     mutableActivation["start"] = () => {
       mutableActivation["workspaceProvider"] = {};
@@ -319,6 +327,7 @@ describe("server plugin runtime", () => {
     expect(runtime.providerContributions().map((contribution) => contribution.pluginId)).toEqual(["mutable"]);
     expect(runtime.pairedBackendContributions().map((contribution) => contribution.pluginId)).toEqual(["mutable"]);
     expect(Object.isFrozen(runtime.pairedBackendContributions()[0]?.backend)).toBe(true);
+    expect(runtime.healthRecords().find(({ pluginId }) => pluginId === "mutable")).toMatchObject({ channelVersion: 1 });
     await expect(Promise.resolve(runtime.pairedBackendContributions()[0]?.backend.request({
       project: { id: "p", name: "P", path: "/p" },
       workspace: { id: "w", projectId: "p", path: "/p", label: "P", isMain: true },
@@ -326,6 +335,16 @@ describe("server plugin runtime", () => {
       input: null,
       signal: new AbortController().signal,
     }))).resolves.toEqual({ captured: true });
+    const channel = await runtime.pairedBackendContributions()[0]?.backend.openChannel?.({
+      project: { id: "p", name: "P", path: "/p" },
+      workspace: { id: "w", projectId: "p", path: "/p", label: "P", isMain: true },
+      operation: "attach",
+      input: null,
+      signal: new AbortController().signal,
+      send: () => undefined,
+    });
+    expect(channel).toBeDefined();
+    expect(Object.isFrozen(channel)).toBe(true);
     await expect(runtime.providerContributions()[0]?.provider.probe(
       { id: "p", name: "P", path: "/p" },
       new AbortController().signal,
@@ -345,13 +364,16 @@ describe("server plugin runtime", () => {
       const pluginId = pluginIdFromUrl(url);
       const activation = pluginId === "plural"
         ? pluralActivation
-        : pluginId === "invalid-backend" ? { pairedBackend: { version: 2, request: () => null } } : {};
+        : pluginId === "invalid-backend" ? { pairedBackend: { version: 2, request: () => null } }
+          : pluginId === "invalid-channel" ? { pairedBackend: { version: 1, request: () => null, openChannel: true } }
+            : {};
       return Promise.resolve(pluginModule("Plural", activation));
     };
     const runtime = await createServerPluginRuntime({
       catalog: { snapshot: () => Promise.resolve(testSnapshot([
         entry("plural"),
         entry("invalid-backend"),
+        entry("invalid-channel"),
         entry("invalid-settings", { settings: circular }),
       ])) },
       importer,
@@ -362,12 +384,14 @@ describe("server plugin runtime", () => {
     const records = runtime.healthRecords();
     expect(records.map((record) => [record.pluginId, record.state, record.phase])).toEqual([
       ["invalid-backend", "incompatible", "validate"],
+      ["invalid-channel", "incompatible", "validate"],
       ["invalid-settings", "incompatible", "validate"],
       ["plural", "incompatible", "validate"],
     ]);
     expect(records[0]?.message).toContain("pairedBackend must be a version 1 request backend");
-    expect(records[1]?.message).toContain("must not contain cycles");
-    expect(records[2]?.message).toBe("Server plugins may contribute only one workspaceProvider");
+    expect(records[1]?.message).toContain("optional channel opener");
+    expect(records[2]?.message).toContain("must not contain cycles");
+    expect(records[3]?.message).toBe("Server plugins may contribute only one workspaceProvider");
   });
 });
 

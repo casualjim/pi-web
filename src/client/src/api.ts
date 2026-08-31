@@ -1,5 +1,12 @@
 export { api, configApi, filesApi, machinesApi, machineStatusApi, piPackagesApi, piWebApi, pluginsApi, projectsApi, SessionTreeForkUnavailableError, sessionsApi, terminalsApi, trustApi, workspacesApi } from "./api/clients";
-export { pluginBackendRequestPath, pluginBackendRequestUrl, requestPluginBackend } from "./api/pluginBackends";
+export {
+  openPluginBackendChannel,
+  pluginBackendChannelPath,
+  pluginBackendChannelUrl,
+  pluginBackendRequestPath,
+  pluginBackendRequestUrl,
+  requestPluginBackend,
+} from "./api/pluginBackends";
 export { globalSessionEvents, realtimeEvents, sessionEvents, terminalSocket } from "./api/sockets";
 export { DEFAULT_WORKSPACE_UPLOADS_FOLDER, effectiveWorkspaceUploadFolder, uploadWorkspaceFile, workspaceEffectiveUploadFolder, workspaceUploadPath, WorkspaceUploadCancelledError } from "./api/workspaceUploads";
 export { DEFAULT_WORKSPACE_ATTACHMENTS_FOLDER, effectiveWorkspaceAttachmentsFolder, workspaceEffectiveAttachmentsFolder } from "./api/workspaceAttachments";

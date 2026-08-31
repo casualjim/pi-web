@@ -52,6 +52,7 @@ import {
 import { runSessionDaemonShutdown } from "./sessiond/sessionDaemonShutdown.js";
 import { sessionServiceDependencies } from "./sessiond/sessionServiceDependencies.js";
 import { registerWorkspaceCatalogRoutes } from "./sessiond/workspaceCatalogRoutes.js";
+import { registerPluginBackendChannelRoutes } from "./sessiond/pluginBackendChannelRoutes.js";
 import { registerPluginBackendRoutes } from "./sessiond/pluginBackendRoutes.js";
 import { registerWorkspaceRemovalRoutes } from "./sessiond/workspaceRemovalRoutes.js";
 import { createWorkspaceProviderRuntimeSnapshot } from "./workspaces/workspaceCatalog.js";
@@ -227,6 +228,7 @@ async function createSessionDaemonRuntime() {
     const pluginBackends = new PluginBackendRegistry({
       contributions: eligiblePluginBackendContributions(serverPlugins.pairedBackendContributions(), providerHealth),
       workspaces: workspaceProviders,
+      logger: app.log,
     });
     const workspaceProviderRuntime = createWorkspaceProviderRuntimeSnapshot(
       serverPlugins.healthRecords(),
@@ -317,6 +319,7 @@ async function createSessionDaemonRuntime() {
           auth,
           sessions,
           unreadStore,
+          pluginBackends,
           closeServer: () => app.close(),
         },
         onFailure: () => { process.exitCode = 1; },
@@ -352,6 +355,7 @@ function registerSessionDaemonRoutes({ eventHub, machineStatus, statusAttributio
     backends: pluginBackends,
     onWorkspacesMutated: () => { statusAttribution.invalidate(); },
   });
+  registerPluginBackendChannelRoutes(app, { projects, backends: pluginBackends });
   registerWorkspaceRemovalRoutes(app, {
     projects,
     removals: workspaceRemovals,

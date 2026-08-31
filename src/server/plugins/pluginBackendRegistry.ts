@@ -2,6 +2,8 @@ import { isAbsolute, resolve } from "node:path";
 import type {
   JsonObject,
   JsonValue,
+  PairedPluginChannel,
+  PairedPluginChannelOpenContext,
   PairedPluginRequestContext,
   PairedPluginWorkspace,
   ProjectInput,
@@ -9,7 +11,15 @@ import type {
 } from "../../server-plugin-api.js";
 import { isPiWebPluginId } from "../../shared/pluginIds.js";
 import {
+  boundedPluginBackendChannelCloseReason,
   cloneBoundedPluginBackendJson,
+  PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS,
+  PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_MAX_LIFETIME_MS,
+  PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN,
+  PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE,
+  PLUGIN_BACKEND_CHANNEL_MAX_TOTAL,
+  PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
   PLUGIN_BACKEND_DISPATCH_TIMEOUT_MS,
   PLUGIN_BACKEND_REQUEST_TIMEOUT_MS,
   PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES,
@@ -35,6 +45,64 @@ export interface PluginBackendRegistryOptions {
   workspaces: Pick<WorkspaceProviderRegistry, "resolve" | "request">;
   callbackTimeoutMs?: number;
   dispatchTimeoutMs?: number;
+  channelCallbackTimeoutMs?: number;
+  channelOpenTimeoutMs?: number;
+  channelLifetimeMs?: number;
+  channelMaxTotal?: number;
+  channelMaxPerPlugin?: number;
+  channelMaxPerPluginWorkspace?: number;
+  logger?: {
+    error(details: Record<string, unknown>, message: string): void;
+  };
+}
+
+export interface PluginBackendChannelTransport {
+  /** Queue one validated plugin-authored JSON payload for the browser. */
+  send(data: JsonValue): void;
+  /** Send one attributed host error envelope when the transport still permits it. */
+  sendError(code: string, message: string): void;
+  /** Close the host transport with one bounded reason. */
+  close(code: number, reason: string): void;
+}
+
+export interface PluginBackendChannelSession {
+  readonly pluginId: string;
+  readonly workspaceId: string;
+  receive(data: unknown): Promise<void>;
+  close(code?: number, reason?: string): Promise<void>;
+}
+
+export type PluginBackendChannelErrorCode =
+  | "inactive-plugin"
+  | "stale-plugin-revision"
+  | "invalid-operation"
+  | "invalid-input"
+  | "workspace-not-found"
+  | "invalid-scope"
+  | "resolution-failed"
+  | "channel-unavailable"
+  | "admission-denied"
+  | "open-failed"
+  | "open-timeout"
+  | "receive-failed"
+  | "receive-timeout"
+  | "channel-closed"
+  | "send-failed"
+  | "close-failed"
+  | "lifetime-expired"
+  | "shutdown";
+
+export class PluginBackendChannelError extends Error {
+  override name = "PluginBackendChannelError";
+
+  constructor(
+    readonly code: PluginBackendChannelErrorCode,
+    readonly closeCode: number,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(message, options);
+  }
 }
 
 /** Keep active paired backends whose bounded startup health is not unhealthy. */
@@ -58,6 +126,19 @@ export class PluginBackendRegistry {
   private readonly contributions: readonly ServerPluginPairedBackendContribution[];
   private readonly callbackTimeoutMs: number;
   private readonly dispatchTimeoutMs: number;
+  private readonly channelCallbackTimeoutMs: number;
+  private readonly channelOpenTimeoutMs: number;
+  private readonly channelLifetimeMs: number;
+  private readonly channelMaxTotal: number;
+  private readonly channelMaxPerPlugin: number;
+  private readonly channelMaxPerPluginWorkspace: number;
+  private readonly channels = new Set<ManagedPluginBackendChannel>();
+  private readonly openingChannelControllers = new Set<AbortController>();
+  private readonly openingChannelTasks = new Set<Promise<void>>();
+  private channelAdmissionCount = 0;
+  private channelShutdown = false;
+  private readonly channelsByPlugin = new Map<string, number>();
+  private readonly channelsByPluginWorkspace = new Map<string, number>();
 
   constructor(private readonly options: PluginBackendRegistryOptions) {
     this.contributions = snapshotContributions(options.contributions);
@@ -71,6 +152,12 @@ export class PluginBackendRegistry {
       PLUGIN_BACKEND_DISPATCH_TIMEOUT_MS,
       "dispatchTimeoutMs",
     );
+    this.channelCallbackTimeoutMs = positiveInteger(options.channelCallbackTimeoutMs, PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS, "channelCallbackTimeoutMs");
+    this.channelOpenTimeoutMs = positiveInteger(options.channelOpenTimeoutMs, PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS, "channelOpenTimeoutMs");
+    this.channelLifetimeMs = positiveInteger(options.channelLifetimeMs, PLUGIN_BACKEND_CHANNEL_MAX_LIFETIME_MS, "channelLifetimeMs");
+    this.channelMaxTotal = positiveInteger(options.channelMaxTotal, PLUGIN_BACKEND_CHANNEL_MAX_TOTAL, "channelMaxTotal");
+    this.channelMaxPerPlugin = positiveInteger(options.channelMaxPerPlugin, PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN, "channelMaxPerPlugin");
+    this.channelMaxPerPluginWorkspace = positiveInteger(options.channelMaxPerPluginWorkspace, PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE, "channelMaxPerPluginWorkspace");
   }
 
   async request(request: PluginBackendRequest, signal?: AbortSignal): Promise<JsonValue> {
@@ -96,6 +183,190 @@ export class PluginBackendRegistry {
       }
       throw error;
     }
+  }
+
+  async openChannel(
+    request: PluginBackendRequest,
+    transport: PluginBackendChannelTransport,
+    signal?: AbortSignal,
+  ): Promise<PluginBackendChannelSession> {
+    if (this.channelsAreShuttingDown()) throw channelError("shutdown", 1012, "Plugin backend channels are shutting down");
+    const pluginId = parsePluginId(request.pluginId);
+    const operation = parseOperation(request.operation);
+    const moduleRevision = parseRevision(request.moduleRevision, operation);
+    const input = parseInput(request.input, pluginId, operation, "channel open input");
+    const contribution = this.contributions.find((candidate) => candidate.pluginId === pluginId);
+    const openChannel = contribution?.backend.openChannel?.bind(contribution.backend);
+    if (contribution === undefined || openChannel === undefined) {
+      throw channelError("channel-unavailable", 1008, `Server plugin ${pluginId} does not expose channel operation ${operation}`);
+    }
+    if (contribution.moduleRevision !== moduleRevision) {
+      throw channelError(
+        "stale-plugin-revision",
+        1008,
+        `Server plugin ${pluginId} backend revision is stale for channel operation ${operation}; reload after the session daemon restarts`,
+      );
+    }
+
+    const releaseAdmission = this.reserveChannel(pluginId, request.project.id, request.workspaceId);
+    const lifetimeController = new AbortController();
+    this.openingChannelControllers.add(lifetimeController);
+    let resolveOpeningTask: () => void = () => undefined;
+    const openingTask = new Promise<void>((resolve) => { resolveOpeningTask = resolve; });
+    this.openingChannelTasks.add(openingTask);
+    const finishOpeningTask = (): void => {
+      this.openingChannelControllers.delete(lifetimeController);
+      this.openingChannelTasks.delete(openingTask);
+      resolveOpeningTask();
+    };
+    const abortFromCaller = (): void => {
+      if (!lifetimeController.signal.aborted) lifetimeController.abort(abortError(signal ?? lifetimeController.signal));
+    };
+    if (signal?.aborted === true) abortFromCaller();
+    else signal?.addEventListener("abort", abortFromCaller, { once: true });
+
+    let managed: ManagedPluginBackendChannel | undefined;
+    let openingChannel: Promise<PairedPluginChannel> | undefined;
+    let sendFailure: Error | undefined;
+    const send = (data: JsonValue): void => {
+      if (lifetimeController.signal.aborted) throw channelError("channel-closed", 1008, `Server plugin ${pluginId} channel ${operation} is closed`);
+      try {
+        const cloned = cloneBoundedPluginBackendJson(
+          data,
+          `Server plugin ${pluginId} channel ${operation} data`,
+          PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES,
+        );
+        transport.send(cloned);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        sendFailure = failure;
+        if (managed !== undefined) {
+          void managed.fail("send-failed", `Server plugin ${pluginId} channel ${operation} send failed: ${boundedErrorMessage(failure)}`, 1011).catch(() => undefined);
+        }
+        throw failure;
+      }
+    };
+
+    try {
+      const channel = await runBoundedPluginBackendOperation(
+        pluginId,
+        `channel ${operation} open`,
+        this.channelOpenTimeoutMs,
+        async (openSignal) => {
+          const { project, workspace } = await resolveDirectScope(this.options.workspaces, request, pluginId, operation, openSignal);
+          const context: PairedPluginChannelOpenContext = Object.freeze({
+            project,
+            workspace,
+            operation,
+            input,
+            signal: lifetimeController.signal,
+            send,
+          });
+          openingChannel = Promise.resolve().then(() => openChannel(context));
+          return await openingChannel;
+        },
+        lifetimeController.signal,
+      );
+      if (sendFailure !== undefined) throw sendFailure;
+      managed = new ManagedPluginBackendChannel({
+        pluginId,
+        workspaceId: request.workspaceId,
+        operation,
+        channel,
+        transport,
+        lifetimeController,
+        callbackTimeoutMs: this.channelCallbackTimeoutMs,
+        lifetimeMs: this.channelLifetimeMs,
+        onReleased: (released) => {
+          this.channels.delete(released);
+          releaseAdmission();
+          signal?.removeEventListener("abort", abortFromCaller);
+        },
+        onCleanupFailure: (error) => {
+          this.options.logger?.error({ err: error, pluginId, operation }, "plugin backend channel cleanup failed");
+        },
+      });
+      finishOpeningTask();
+      this.channels.add(managed);
+      return managed;
+    } catch (error) {
+      signal?.removeEventListener("abort", abortFromCaller);
+      finishOpeningTask();
+      if (!lifetimeController.signal.aborted) lifetimeController.abort(error);
+      releaseAdmission();
+      if (openingChannel !== undefined) {
+        void openingChannel.then(async (channel) => {
+          await closeUnpublishedChannel(channel, pluginId, operation, this.channelCallbackTimeoutMs);
+        }).catch((cleanupError: unknown) => {
+          this.options.logger?.error({ err: cleanupError, pluginId, operation }, "unpublished plugin backend channel cleanup failed");
+        });
+      }
+      if (error instanceof PluginBackendChannelError) throw error;
+      if (error instanceof PluginBackendTimeoutError) {
+        throw channelError("open-timeout", 1011, boundedErrorMessage(error), error);
+      }
+      if (this.channelsAreShuttingDown()) {
+        throw channelError("shutdown", 1012, `Server plugin ${pluginId} channel ${operation} was interrupted by shutdown`, error);
+      }
+      if (signal?.aborted === true) {
+        throw channelError("channel-closed", 1008, `Server plugin ${pluginId} channel ${operation} was cancelled`, error);
+      }
+      throw channelError(
+        "open-failed",
+        1011,
+        `Server plugin ${pluginId} channel ${operation} failed to open: ${boundedErrorMessage(error)}`,
+        error,
+      );
+    }
+  }
+
+  async closeAll(reason = "Session daemon shutdown"): Promise<void> {
+    this.channelShutdown = true;
+    for (const controller of this.openingChannelControllers) {
+      if (!controller.signal.aborted) controller.abort(new DOMException(reason, "AbortError"));
+    }
+    await Promise.allSettled([...this.openingChannelTasks]);
+    const channels = [...this.channels];
+    const results = await Promise.allSettled(channels.map(async (channel) => {
+      await channel.fail("shutdown", reason, 1012);
+    }));
+    const failures: unknown[] = [];
+    for (const result of results) {
+      if (result.status === "rejected") {
+        const reason: unknown = result.reason;
+        failures.push(reason);
+      }
+    }
+    if (failures.length !== 0) throw new AggregateError(failures, "One or more plugin backend channels failed to close");
+  }
+
+  activeChannelCount(): number {
+    return this.channels.size;
+  }
+
+  private channelsAreShuttingDown(): boolean {
+    return this.channelShutdown;
+  }
+
+  private reserveChannel(pluginId: string, projectId: string, workspaceId: string): () => void {
+    if (workspaceId === "") throw channelError("workspace-not-found", 1008, `Workspace not found for server plugin ${pluginId} channel`);
+    const pluginCount = this.channelsByPlugin.get(pluginId) ?? 0;
+    const scopeKey = channelScopeKey(pluginId, projectId, workspaceId);
+    const scopeCount = this.channelsByPluginWorkspace.get(scopeKey) ?? 0;
+    if (this.channelAdmissionCount >= this.channelMaxTotal || pluginCount >= this.channelMaxPerPlugin || scopeCount >= this.channelMaxPerPluginWorkspace) {
+      throw channelError("admission-denied", 1013, `Server plugin ${pluginId} channel admission limit was reached`);
+    }
+    this.channelAdmissionCount += 1;
+    this.channelsByPlugin.set(pluginId, pluginCount + 1);
+    this.channelsByPluginWorkspace.set(scopeKey, scopeCount + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.channelAdmissionCount -= 1;
+      decrementCount(this.channelsByPlugin, pluginId);
+      decrementCount(this.channelsByPluginWorkspace, scopeKey);
+    };
   }
 
   private async dispatch(request: PluginBackendRequest, dispatchSignal: AbortSignal): Promise<JsonValue> {
@@ -203,6 +474,222 @@ export class PluginBackendRegistry {
   }
 }
 
+interface ManagedPluginBackendChannelOptions {
+  pluginId: string;
+  workspaceId: string;
+  operation: string;
+  channel: PairedPluginChannel;
+  transport: PluginBackendChannelTransport;
+  lifetimeController: AbortController;
+  callbackTimeoutMs: number;
+  lifetimeMs: number;
+  onReleased: (channel: ManagedPluginBackendChannel) => void;
+  onCleanupFailure: (error: unknown) => void;
+}
+
+class ManagedPluginBackendChannel implements PluginBackendChannelSession {
+  readonly pluginId: string;
+  readonly workspaceId: string;
+  private readonly lifetimeTimer: ReturnType<typeof setTimeout>;
+  private closePromise: Promise<void> | undefined;
+  private failureSignalled = false;
+
+  constructor(private readonly options: ManagedPluginBackendChannelOptions) {
+    this.pluginId = options.pluginId;
+    this.workspaceId = options.workspaceId;
+    this.lifetimeTimer = setTimeout(() => {
+      void this.fail(
+        "lifetime-expired",
+        `Server plugin ${this.pluginId} channel ${options.operation} reached its maximum lifetime`,
+        1001,
+      ).catch(() => undefined);
+    }, options.lifetimeMs);
+    this.lifetimeTimer.unref();
+  }
+
+  async receive(data: unknown): Promise<void> {
+    if (this.isClosed()) {
+      throw channelError("channel-closed", 1008, `Server plugin ${this.pluginId} channel ${this.options.operation} is closed`);
+    }
+    let cloned: JsonValue;
+    try {
+      cloned = cloneBoundedPluginBackendJson(
+        data,
+        `Server plugin ${this.pluginId} channel ${this.options.operation} data`,
+        PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES,
+      );
+    } catch (error) {
+      throw channelError("invalid-input", 1008, boundedErrorMessage(error), error);
+    }
+    try {
+      await runBoundedPluginBackendOperation(
+        this.pluginId,
+        `channel ${this.options.operation} receive`,
+        this.options.callbackTimeoutMs,
+        (signal) => this.options.channel.receive(cloned, signal),
+        this.options.lifetimeController.signal,
+      );
+    } catch (error) {
+      if (this.isClosed()) {
+        throw channelError("channel-closed", 1008, `Server plugin ${this.pluginId} channel ${this.options.operation} closed during receive`, error);
+      }
+      if (error instanceof PluginBackendTimeoutError) {
+        throw channelError("receive-timeout", 1011, boundedErrorMessage(error), error);
+      }
+      throw channelError(
+        "receive-failed",
+        1011,
+        `Server plugin ${this.pluginId} channel ${this.options.operation} receive failed: ${boundedErrorMessage(error)}`,
+        error,
+      );
+    }
+  }
+
+  private isClosed(): boolean {
+    return this.closePromise !== undefined || this.options.lifetimeController.signal.aborted;
+  }
+
+  close(code = 1000, reason = "Channel closed"): Promise<void> {
+    this.closePromise ??= this.performClose(code, boundedPluginBackendChannelCloseReason(reason));
+    return this.closePromise;
+  }
+
+  async fail(code: PluginBackendChannelErrorCode, message: string, closeCode: number): Promise<void> {
+    if (!this.failureSignalled) {
+      this.failureSignalled = true;
+      try {
+        this.options.transport.sendError(code, message);
+      } catch {
+        // The transport may already be gone; cleanup and admission release remain authoritative.
+      }
+    }
+    try {
+      await this.close(closeCode, message);
+    } finally {
+      try {
+        this.options.transport.close(closeCode, boundedPluginBackendChannelCloseReason(message));
+      } catch {
+        // Closing an already-disconnected transport is expected and does not change cleanup ownership.
+      }
+    }
+  }
+
+  private async performClose(code: number, reason: string): Promise<void> {
+    clearTimeout(this.lifetimeTimer);
+    if (!this.options.lifetimeController.signal.aborted) {
+      this.options.lifetimeController.abort(new DOMException(reason || "Plugin backend channel closed", "AbortError"));
+    }
+    try {
+      const close = this.options.channel.close?.bind(this.options.channel);
+      if (close !== undefined) {
+        await runBoundedPluginBackendOperation(
+          this.pluginId,
+          `channel ${this.options.operation} close`,
+          this.options.callbackTimeoutMs,
+          (signal) => close(Object.freeze({ code, reason, signal })),
+        );
+      }
+    } catch (error) {
+      this.options.onCleanupFailure(error);
+      throw channelError(
+        "close-failed",
+        1011,
+        `Server plugin ${this.pluginId} channel ${this.options.operation} close failed: ${boundedErrorMessage(error)}`,
+        error,
+      );
+    } finally {
+      this.options.onReleased(this);
+    }
+  }
+}
+
+async function closeUnpublishedChannel(
+  channel: PairedPluginChannel,
+  pluginId: string,
+  operation: string,
+  callbackTimeoutMs: number,
+): Promise<void> {
+  const close = channel.close?.bind(channel);
+  if (close === undefined) return;
+  await runBoundedPluginBackendOperation(
+    pluginId,
+    `channel ${operation} abandoned-open close`,
+    callbackTimeoutMs,
+    (signal) => close(Object.freeze({
+      code: 1011,
+      reason: "Channel open did not complete",
+      signal,
+    })),
+  );
+}
+
+async function resolveDirectScope(
+  workspaces: Pick<WorkspaceProviderRegistry, "resolve">,
+  request: PluginBackendRequest,
+  pluginId: string,
+  operation: string,
+  signal: AbortSignal,
+): Promise<{ project: ProjectInput; workspace: PairedPluginWorkspace }> {
+  if (request.workspaceId === "") {
+    throw channelError("workspace-not-found", 1008, `Workspace not found for server plugin ${pluginId} channel ${operation}`);
+  }
+  let project: ProjectInput;
+  try {
+    project = snapshotProject(request.project);
+  } catch (error) {
+    throw channelError("invalid-scope", 1011, boundedErrorMessage(error), error);
+  }
+  let target: WorkspaceListing | undefined;
+  try {
+    const resolution = await workspaces.resolve(request.project, signal);
+    target = resolution.workspaces.find((workspace) => workspace.id === request.workspaceId);
+  } catch (error) {
+    if (signal.aborted) throw abortError(signal);
+    throw channelError(
+      "resolution-failed",
+      1011,
+      `Server plugin ${pluginId} could not resolve workspace scope for channel ${operation}: ${boundedErrorMessage(error)}`,
+      error,
+    );
+  }
+  if (target === undefined) {
+    throw channelError(
+      "workspace-not-found",
+      1008,
+      `Workspace ${request.workspaceId} is stale or unavailable for server plugin ${pluginId} channel ${operation}`,
+    );
+  }
+  try {
+    return { project, workspace: snapshotWorkspace(target, project.id) };
+  } catch (error) {
+    throw channelError(
+      "invalid-scope",
+      1011,
+      `Server plugin ${pluginId} received an invalid host workspace scope for channel ${operation}: ${boundedErrorMessage(error)}`,
+      error,
+    );
+  }
+}
+
+function channelScopeKey(pluginId: string, projectId: string, workspaceId: string): string {
+  return `${pluginId}\u0000${projectId}\u0000${workspaceId}`;
+}
+
+function decrementCount(map: Map<string, number>, key: string): void {
+  const count = map.get(key);
+  if (count === undefined || count <= 1) map.delete(key);
+  else map.set(key, count - 1);
+}
+
+function channelError(
+  code: PluginBackendChannelErrorCode,
+  closeCode: number,
+  message: string,
+  cause?: unknown,
+): PluginBackendChannelError {
+  return new PluginBackendChannelError(code, closeCode, message, cause === undefined ? {} : { cause });
+}
+
 function snapshotContributions(
   contributions: readonly ServerPluginPairedBackendContribution[],
 ): readonly ServerPluginPairedBackendContribution[] {
@@ -243,9 +730,9 @@ function parseRevision(value: string, operation: string): string {
   }
 }
 
-function parseInput(value: unknown, pluginId: string, operation: string): JsonValue {
+function parseInput(value: unknown, pluginId: string, operation: string, suffix = "input"): JsonValue {
   try {
-    return cloneBoundedPluginBackendJson(value, `Server plugin ${pluginId} operation ${operation} input`);
+    return cloneBoundedPluginBackendJson(value, `Server plugin ${pluginId} operation ${operation} ${suffix}`);
   } catch (error) {
     throw backendError("invalid-input", 400, boundedErrorMessage(error), error);
   }

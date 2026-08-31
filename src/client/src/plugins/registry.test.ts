@@ -782,6 +782,7 @@ describe("PluginRegistry", () => {
       sourcePluginId: "board-tools",
       backendRevision: "server-r7",
       backendCapabilityVersion: 1,
+      channelVersion: 1,
       plugin: {
         apiVersion: 2,
         name: "Board Tools",
@@ -833,8 +834,8 @@ describe("PluginRegistry", () => {
     expect(registry.getWorkspaceLabelItems(labelContext)).toEqual([{ type: "text", text: "2 cards" }]);
 
     expect(observedBindings).toEqual([
-      { registrationPluginId, sourcePluginId: "board-tools", backendRevision: "server-r7", backendCapabilityVersion: 1 },
-      { registrationPluginId, sourcePluginId: "board-tools", backendRevision: "server-r7", backendCapabilityVersion: 1 },
+      { registrationPluginId, sourcePluginId: "board-tools", backendRevision: "server-r7", backendCapabilityVersion: 1, channelVersion: 1 },
+      { registrationPluginId, sourcePluginId: "board-tools", backendRevision: "server-r7", backendCapabilityVersion: 1, channelVersion: 1 },
     ]);
     expect(observedRequests).toEqual([
       {

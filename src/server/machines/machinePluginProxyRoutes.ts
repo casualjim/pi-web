@@ -11,6 +11,7 @@ interface RemotePluginManifestEntry {
   module: string;
   backendRevision?: string;
   backendCapabilityVersion?: 1;
+  channelVersion?: 1;
   source?: string;
   scope?: string;
   machineSpecific?: boolean;
@@ -170,7 +171,11 @@ function parseRemoteManifest(value: unknown): RemotePluginManifest {
     }
     const backendRevision = parseRemoteBackendRevision(entry["backendRevision"]);
     const backendCapabilityVersion = parseRemoteBackendCapabilityVersion(entry["backendCapabilityVersion"]);
-    if (backendCapabilityVersion !== undefined && backendRevision === undefined) {
+    const channelVersion = parseRemoteChannelVersion(entry["channelVersion"]);
+    if ((backendCapabilityVersion !== undefined || channelVersion !== undefined) && backendRevision === undefined) {
+      throw new Error("Invalid remote PI WEB plugin manifest entry");
+    }
+    if (channelVersion !== undefined && backendCapabilityVersion === undefined) {
       throw new Error("Invalid remote PI WEB plugin manifest entry");
     }
     return {
@@ -178,6 +183,7 @@ function parseRemoteManifest(value: unknown): RemotePluginManifest {
       module: entry["module"],
       ...(backendRevision === undefined ? {} : { backendRevision }),
       ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
+      ...(channelVersion === undefined ? {} : { channelVersion }),
       ...(typeof entry["source"] === "string" ? { source: entry["source"] } : {}),
       ...(typeof entry["scope"] === "string" ? { scope: entry["scope"] } : {}),
       ...(parseRemoteMachineSpecific(entry["machineSpecific"])),
@@ -215,6 +221,12 @@ function parseRemoteBackendRevision(value: unknown): string | undefined {
 }
 
 function parseRemoteBackendCapabilityVersion(value: unknown): 1 | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 1) throw new Error("Invalid remote PI WEB plugin manifest entry");
+  return value;
+}
+
+function parseRemoteChannelVersion(value: unknown): 1 | undefined {
   if (value === undefined) return undefined;
   if (value !== 1) throw new Error("Invalid remote PI WEB plugin manifest entry");
   return value;

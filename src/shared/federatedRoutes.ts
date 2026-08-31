@@ -1,4 +1,5 @@
 import {
+  PLUGIN_BACKEND_CHANNEL_ROUTE_PATH,
   PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS,
   PLUGIN_BACKEND_REQUEST_BODY_MAX_BYTES,
   PLUGIN_BACKEND_RESPONSE_BODY_MAX_BYTES,
@@ -175,6 +176,7 @@ export const FEDERATED_HTTP_ROUTES = [
 ] as const satisfies readonly FederatedHttpRouteSpec[];
 
 export const FEDERATED_WEBSOCKET_ROUTES = [
+  PLUGIN_BACKEND_CHANNEL_ROUTE_PATH,
   "/events",
   "/sessions/events",
   "/sessions/:sessionId/events",

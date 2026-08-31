@@ -10,6 +10,7 @@ export interface SessionDaemonShutdownDependencies {
   auth: { dispose(): void | Promise<void> };
   sessions: { dispose(): void | Promise<void> };
   unreadStore: { flush(): void | Promise<void> };
+  pluginBackends: { closeAll(): void | Promise<void> };
   closeServer(): void | Promise<void>;
 }
 
@@ -27,6 +28,7 @@ export async function runSessionDaemonShutdown(options: SessionDaemonShutdownOpt
     ["dispose terminals", () => dependencies.terminals.dispose()],
     ["dispose catalog refresher", () => dependencies.catalogRefresher.dispose()],
     ["dispose sessions", () => dependencies.sessions.dispose()],
+    ["close plugin backend channels", () => dependencies.pluginBackends.closeAll()],
     ["close server", () => dependencies.closeServer()],
     ["stop server plugins", () => dependencies.serverPlugins.stop()],
     ["dispose auth", () => dependencies.auth.dispose()],

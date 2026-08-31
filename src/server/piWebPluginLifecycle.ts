@@ -24,6 +24,7 @@ export interface ReconciledBrowserPlugin {
   plugin: PiWebPluginCatalogEntry;
   backendRevision?: string;
   backendCapabilityVersion?: 1;
+  channelVersion?: 1;
 }
 
 export interface PiWebPluginLifecycleReconciliation {
@@ -63,6 +64,7 @@ export function reconcilePiWebPluginLifecycle(
           plugin,
           ...(server?.activeRevision === undefined ? {} : { backendRevision: server.activeRevision }),
           ...(record?.backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion: record.backendCapabilityVersion }),
+          ...(record?.channelVersion === undefined ? {} : { channelVersion: record.channelVersion }),
         });
       }
 

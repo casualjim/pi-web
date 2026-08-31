@@ -16,6 +16,7 @@ export interface PiWebPluginRegistration {
   sourcePluginId?: PluginId;
   backendRevision?: string;
   backendCapabilityVersion?: 1;
+  channelVersion?: 1;
   machineSpecific?: boolean;
 }
 
@@ -24,6 +25,7 @@ export interface WorkspacePluginBinding {
   sourcePluginId: PluginId;
   backendRevision?: string;
   backendCapabilityVersion?: 1;
+  channelVersion?: 1;
 }
 
 export interface PiWebPlugin {
@@ -117,9 +119,29 @@ export interface WorkspaceBackendRequestOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface WorkspaceBackendChannelOptions {
+  readonly signal?: AbortSignal;
+  readonly onData: (data: JsonValue) => void;
+}
+
+export interface WorkspaceBackendChannelClose {
+  readonly code: number;
+  readonly reason: string;
+  readonly wasClean: boolean;
+  readonly error?: Readonly<{ code: string; message: string }>;
+}
+
+export interface WorkspaceBackendChannel {
+  readonly closed: Promise<WorkspaceBackendChannelClose>;
+  send(data: JsonValue): void;
+  close(reason?: string): void;
+}
+
 export interface WorkspaceBackend {
   readonly capabilityVersion?: 1;
+  readonly channelVersion?: 1;
   request(operation: string, input: JsonValue, options?: WorkspaceBackendRequestOptions): Promise<JsonValue>;
+  openChannel?(operation: string, input: JsonValue, options: WorkspaceBackendChannelOptions): Promise<WorkspaceBackendChannel>;
 }
 
 export interface WorkspaceHost {

@@ -1,9 +1,17 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
 import { FEDERATED_HTTP_ROUTES, FEDERATED_WEBSOCKET_ROUTES, WORKSPACE_FILE_PREVIEW_ROUTE_PATH, type FederatedHttpRouteSpec } from "../../shared/federatedRoutes.js";
+import {
+  boundedPluginBackendChannelCloseReason,
+  parsePluginBackendChannelClientEnvelope,
+  PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES,
+  PLUGIN_BACKEND_CHANNEL_ROUTE_PATH,
+  utf8ByteLength,
+} from "../../shared/pluginBackendProtocol.js";
 import { mergeSelectedMachineConfig, parsePiWebConfigResponseBody, parseSelectedMachineConfigRequest, selectedMachineConfigResponse } from "../configRoutes.js";
 import { requestCancellation } from "../requestCancellation.js";
-import { bridgeSockets } from "../webSocketBridge.js";
+import { bridgePluginBackendChannelSockets, bridgeSockets } from "../webSocketBridge.js";
 import { applyWorkspaceFilePreviewErrorResponsePolicy, applyWorkspaceFilePreviewResponsePolicy } from "../workspaces/filePreviewResponseHeaders.js";
 import { workspaceFilePreviewErrorResponsePolicy, workspaceFilePreviewResponsePolicy, type WorkspaceFilePreviewResponsePolicy } from "../workspaces/filePreviewResponsePolicy.js";
 import { DEFAULT_REMOTE_REQUEST_TIMEOUT_MS, RemoteMachineRequestError, type MachineClient, type MachineJsonResponse, type MachineRequestOptions } from "./machineClient.js";
@@ -23,7 +31,9 @@ const SAFE_RESPONSE_HEADERS = new Set([
   "x-content-type-options",
 ]);
 
-export function registerMachineProxyRoutes(app: FastifyInstance, machines = new MachineService()): void {
+type MachineProxyService = Pick<MachineService, "remoteClient">;
+
+export function registerMachineProxyRoutes(app: FastifyInstance, machines: MachineProxyService = new MachineService()): void {
   for (const spec of REMOTE_HTTP_ROUTES) {
     app.route<{ Params: { machineId: string }; Body: unknown }>({
       method: spec.method,
@@ -54,13 +64,13 @@ export function registerMachineProxyRoutes(app: FastifyInstance, machines = new 
 
   for (const path of REMOTE_WEBSOCKET_ROUTES) {
     app.get<{ Params: { machineId: string } }>(`/api/machines/:machineId${path}`, { websocket: true }, async (socket, request) => {
-      await proxyWebSocket(machines, request.params.machineId, request.url, socket);
+      await proxyWebSocket(machines, request.params.machineId, request.url, socket, path === PLUGIN_BACKEND_CHANNEL_ROUTE_PATH);
     });
   }
 }
 
 async function proxyHttpRequest(
-  machines: MachineService,
+  machines: MachineProxyService,
   spec: FederatedHttpRouteSpec,
   machineId: string,
   method: string,
@@ -170,9 +180,20 @@ function isSuccessfulStatus(statusCode: number): boolean {
   return statusCode >= 200 && statusCode < 300;
 }
 
-async function proxyWebSocket(machines: MachineService, machineId: string, requestUrl: string, socket: WebSocket): Promise<void> {
+async function proxyWebSocket(
+  machines: MachineProxyService,
+  machineId: string,
+  requestUrl: string,
+  socket: WebSocket,
+  boundedPluginChannel: boolean,
+): Promise<void> {
   if (machineId === "local") {
     socket.close(1011, "Local machine route is not registered for this endpoint");
+    return;
+  }
+
+  if (boundedPluginChannel) {
+    await proxyBoundedPluginChannel(machines, machineId, requestUrl, socket);
     return;
   }
 
@@ -187,6 +208,94 @@ async function proxyWebSocket(machines: MachineService, machineId: string, reque
   } catch {
     socket.close(1011, "Remote machine unavailable");
   }
+}
+
+async function proxyBoundedPluginChannel(
+  machines: MachineProxyService,
+  machineId: string,
+  requestUrl: string,
+  socket: WebSocket,
+): Promise<void> {
+  const prelude = capturePluginChannelPrelude(socket);
+  try {
+    const client = await machines.remoteClient(machineId);
+    if (prelude.closed()) return;
+    if (client === undefined) {
+      closePluginChannelSocket(socket, 1008, "Machine not found");
+      return;
+    }
+    const upstream = client.connectWebSocket(remoteApiPath(machineId, requestUrl));
+    bridgePluginBackendChannelSockets(socket, upstream, { initialClientFrames: prelude.frames });
+  } catch {
+    closePluginChannelSocket(socket, 1011, "Remote machine unavailable");
+  } finally {
+    prelude.dispose();
+  }
+}
+
+interface PluginChannelPrelude {
+  readonly frames: readonly string[];
+  closed(): boolean;
+  dispose(): void;
+}
+
+function capturePluginChannelPrelude(socket: WebSocket): PluginChannelPrelude {
+  const frames: string[] = [];
+  let bytes = 0;
+  let closed = false;
+  const fail = (code: number, reason: string): void => {
+    if (closed) return;
+    closed = true;
+    closePluginChannelSocket(socket, code, reason);
+  };
+  const onMessage = (data: RawData, isBinary: boolean): void => {
+    try {
+      if (isBinary) {
+        fail(1003, "Plugin backend channels accept text JSON frames only");
+        return;
+      }
+      const text = decodePluginChannelText(data);
+      parsePluginBackendChannelClientEnvelope(text);
+      const frameBytes = utf8ByteLength(text);
+      if (frames.length >= PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES || bytes + frameBytes > PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES) {
+        fail(1013, "Plugin backend channel federation queue limit was exceeded");
+        return;
+      }
+      frames.push(text);
+      bytes += frameBytes;
+    } catch (error) {
+      fail(1008, errorMessage(error));
+    }
+  };
+  const onClose = (): void => { closed = true; };
+  const onError = (): void => { closed = true; };
+  socket.on("message", onMessage);
+  socket.once("close", onClose);
+  socket.once("error", onError);
+  return {
+    frames,
+    closed: () => closed,
+    dispose() {
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    },
+  };
+}
+
+function decodePluginChannelText(data: RawData): string {
+  const value = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : Array.isArray(data)
+      ? Buffer.concat(data)
+      : data;
+  return typeof value === "string"
+    ? value
+    : new TextDecoder("utf-8", { fatal: true }).decode(value);
+}
+
+function closePluginChannelSocket(socket: WebSocket, code: number, reason: string): void {
+  if (socket.readyState === 1) socket.close(code, boundedPluginBackendChannelCloseReason(reason));
 }
 
 function remoteApiPath(machineId: string, requestUrl: string): string {

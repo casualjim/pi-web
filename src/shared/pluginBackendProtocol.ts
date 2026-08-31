@@ -17,13 +17,61 @@ export const PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS = 30_000;
 export const PLUGIN_BACKEND_OPERATION_MAX_LENGTH = 128;
 export const PLUGIN_BACKEND_REVISION_MAX_LENGTH = 512;
 
+/** Host-envelope allowance around the existing bounded request-sized channel open input. */
+export const PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES = PLUGIN_BACKEND_JSON_MAX_BYTES + 4 * 1024;
+/** Maximum JSON payload carried by one channel data envelope. */
+export const PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES = 64 * 1024;
+/** Host-envelope allowance around one bounded channel data payload. */
+export const PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES = PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES + 4 * 1024;
+export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES = 128;
+export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES = 1024 * 1024;
+export const PLUGIN_BACKEND_CHANNEL_MAX_TOTAL = 128;
+export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN = 32;
+export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE = 8;
+export const PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS = 10_000;
+export const PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS = 10_000;
+export const PLUGIN_BACKEND_CHANNEL_MAX_LIFETIME_MS = 12 * 60 * 60_000;
+export const PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES = 120;
+export const PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES = 2_048;
+export const PLUGIN_BACKEND_CHANNEL_ERROR_CODE_MAX_LENGTH = 64;
+export const PLUGIN_BACKEND_CHANNEL_ROUTE_PATH = "/plugin-backends/:pluginId/projects/:projectId/workspaces/:workspaceId/channels/:operation";
+
 const OPERATION_PATTERN = /^[a-z][a-z0-9.-]*$/u;
+const CHANNEL_ERROR_CODE_PATTERN = /^[a-z][a-z0-9.-]*$/u;
 const MAX_JSON_DEPTH = 64;
 
 export interface PluginBackendRequestEnvelope {
   revision: string;
   input: JsonValue;
 }
+
+export interface PluginBackendChannelOpenEnvelope {
+  readonly version: 1;
+  readonly kind: "open";
+  readonly revision: string;
+  readonly input: JsonValue;
+}
+
+export interface PluginBackendChannelReadyEnvelope {
+  readonly version: 1;
+  readonly kind: "ready";
+}
+
+export interface PluginBackendChannelDataEnvelope {
+  readonly version: 1;
+  readonly kind: "data";
+  readonly data: JsonValue;
+}
+
+export interface PluginBackendChannelErrorEnvelope {
+  readonly version: 1;
+  readonly kind: "error";
+  readonly code: string;
+  readonly message: string;
+}
+
+export type PluginBackendChannelClientEnvelope = PluginBackendChannelOpenEnvelope | PluginBackendChannelDataEnvelope;
+export type PluginBackendChannelServerEnvelope = PluginBackendChannelReadyEnvelope | PluginBackendChannelDataEnvelope | PluginBackendChannelErrorEnvelope;
 
 export function isPluginBackendOperation(value: string): boolean {
   return value.length <= PLUGIN_BACKEND_OPERATION_MAX_LENGTH && OPERATION_PATTERN.test(value);
@@ -90,8 +138,140 @@ export function parsePluginBackendRequestEnvelope(value: unknown): PluginBackend
   });
 }
 
+export function serializePluginBackendChannelOpenEnvelope(revision: unknown, input: unknown): string {
+  return serializePluginBackendChannelEnvelope({
+    version: 1,
+    kind: "open",
+    revision: requirePluginBackendRevision(revision),
+    input: cloneBoundedPluginBackendJson(input, "Plugin backend channel open input", PLUGIN_BACKEND_JSON_MAX_BYTES),
+  }, "Plugin backend channel open envelope", PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES);
+}
+
+export function serializePluginBackendChannelReadyEnvelope(): string {
+  return JSON.stringify({ version: 1, kind: "ready" });
+}
+
+export function serializePluginBackendChannelDataEnvelope(data: unknown): string {
+  return serializePluginBackendChannelEnvelope({
+    version: 1,
+    kind: "data",
+    data: cloneBoundedPluginBackendJson(data, "Plugin backend channel data", PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES),
+  }, "Plugin backend channel data envelope", PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES);
+}
+
+export function serializePluginBackendChannelErrorEnvelope(code: unknown, message: unknown): string {
+  const parsedCode = requirePluginBackendChannelErrorCode(code);
+  const parsedMessage = requirePluginBackendChannelErrorMessage(message);
+  return serializePluginBackendChannelEnvelope({ version: 1, kind: "error", code: parsedCode, message: parsedMessage }, "Plugin backend channel error envelope", PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES);
+}
+
+export function parsePluginBackendChannelClientEnvelope(text: string): PluginBackendChannelClientEnvelope {
+  const value = parseChannelEnvelopeRecord(text, "Plugin backend channel client frame");
+  requireChannelEnvelopeVersion(value);
+  if (value["kind"] === "open") {
+    requireFrameByteLimit(text, PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES, "Plugin backend channel open frame");
+    return Object.freeze({
+      version: 1,
+      kind: "open",
+      revision: requirePluginBackendRevision(value["revision"]),
+      input: cloneBoundedPluginBackendJson(value["input"], "Plugin backend channel open input", PLUGIN_BACKEND_JSON_MAX_BYTES),
+    });
+  }
+  if (value["kind"] === "data") return parseChannelDataEnvelope(value, text);
+  throw new Error("Plugin backend channel client frame kind is invalid");
+}
+
+export function parsePluginBackendChannelServerEnvelope(text: string): PluginBackendChannelServerEnvelope {
+  const value = parseChannelEnvelopeRecord(text, "Plugin backend channel server frame");
+  requireChannelEnvelopeVersion(value);
+  if (value["kind"] === "ready") {
+    requireFrameByteLimit(text, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, "Plugin backend channel ready frame");
+    return Object.freeze({ version: 1, kind: "ready" });
+  }
+  if (value["kind"] === "data") return parseChannelDataEnvelope(value, text);
+  if (value["kind"] === "error") {
+    requireFrameByteLimit(text, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, "Plugin backend channel error frame");
+    return Object.freeze({
+      version: 1,
+      kind: "error",
+      code: requirePluginBackendChannelErrorCode(value["code"]),
+      message: requirePluginBackendChannelErrorMessage(value["message"]),
+    });
+  }
+  throw new Error("Plugin backend channel server frame kind is invalid");
+}
+
+export function requirePluginBackendChannelCloseReason(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Plugin backend channel close reason must be a string");
+  if (utf8ByteLength(value) > PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES) {
+    throw new Error(`Plugin backend channel close reason exceeds the ${String(PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES)} byte limit`);
+  }
+  return value;
+}
+
+export function boundedPluginBackendChannelCloseReason(value: unknown): string {
+  const input = typeof value === "string" ? value : String(value);
+  if (utf8ByteLength(input) <= PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES) return input;
+  let output = "";
+  for (const character of input) {
+    if (utf8ByteLength(`${output}${character}`) > PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES) break;
+    output += character;
+  }
+  return output;
+}
+
 export function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function serializePluginBackendChannelEnvelope(value: JsonValue, label: string, maxBytes: number): string {
+  const serialized = JSON.stringify(value);
+  requireFrameByteLimit(serialized, maxBytes, label);
+  return serialized;
+}
+
+function parseChannelEnvelopeRecord(text: string, label: string): Record<string, unknown> {
+  requireFrameByteLimit(text, PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES, label);
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label} must be valid JSON`, { cause: error });
+  }
+  if (!isPlainRecord(value)) throw new Error(`${label} must be an object`);
+  return value;
+}
+
+function parseChannelDataEnvelope(value: Record<string, unknown>, text: string): PluginBackendChannelDataEnvelope {
+  requireFrameByteLimit(text, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, "Plugin backend channel data frame");
+  return Object.freeze({
+    version: 1,
+    kind: "data",
+    data: cloneBoundedPluginBackendJson(value["data"], "Plugin backend channel data", PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES),
+  });
+}
+
+function requireChannelEnvelopeVersion(value: Record<string, unknown>): void {
+  if (value["version"] !== 1) throw new Error("Plugin backend channel frame version is unsupported");
+}
+
+function requirePluginBackendChannelErrorCode(value: unknown): string {
+  if (typeof value !== "string" || value.length > PLUGIN_BACKEND_CHANNEL_ERROR_CODE_MAX_LENGTH || !CHANNEL_ERROR_CODE_PATTERN.test(value)) {
+    throw new Error("Plugin backend channel error code is invalid");
+  }
+  return value;
+}
+
+function requirePluginBackendChannelErrorMessage(value: unknown): string {
+  if (typeof value !== "string" || value === "") throw new Error("Plugin backend channel error message must be a non-empty string");
+  if (utf8ByteLength(value) > PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES) {
+    throw new Error(`Plugin backend channel error message exceeds the ${String(PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES)} byte limit`);
+  }
+  return value;
+}
+
+function requireFrameByteLimit(text: string, maxBytes: number, label: string): void {
+  if (utf8ByteLength(text) > maxBytes) throw new Error(`${label} exceeds the ${String(maxBytes)} byte limit`);
 }
 
 function cloneJsonValue(value: unknown, ancestors: Set<object>, label: string, depth: number): JsonValue {

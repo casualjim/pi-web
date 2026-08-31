@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  JsonValue,
+  PairedPluginChannelOpenContext,
   PairedPluginRequestContext,
   WorkspaceProvider,
 } from "../../server-plugin-api.js";
@@ -298,6 +300,217 @@ describe("PluginBackendRegistry", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("opens a scoped duplex channel, bounds callbacks, and cleans up exactly once", async () => {
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    let openContext: PairedPluginChannelOpenContext | undefined;
+    let closeSignal: AbortSignal | undefined;
+    const receive = vi.fn((data: JsonValue, signal: AbortSignal) => {
+      expect(data).toEqual({ type: "input", value: "hello" });
+      expect(signal.aborted).toBe(false);
+    });
+    const close = vi.fn((context: { code: number; reason: string; signal: AbortSignal }) => {
+      closeSignal = context.signal;
+    });
+    const transport = channelTransport();
+    const registry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", (context) => {
+        openContext = context;
+        context.send({ type: "output", value: "ready" });
+        return { receive, close };
+      })],
+      workspaces,
+    });
+
+    const session = await registry.openChannel({
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: { terminalId: "t1" },
+    }, transport.value);
+
+    if (openContext === undefined) throw new Error("Expected channel context");
+    expect(openContext.workspace).toMatchObject({ id: workspaceId, projectId: project.id, path: "/repo" });
+    expect(Object.isFrozen(openContext)).toBe(true);
+    expect(Object.isFrozen(openContext.input)).toBe(true);
+    expect(openContext.signal.aborted).toBe(false);
+    expect(transport.sent).toEqual([{ type: "output", value: "ready" }]);
+    await session.receive({ type: "input", value: "hello" });
+    expect(receive).toHaveBeenCalledOnce();
+    expect(receive.mock.calls[0]?.[1].aborted).toBe(true);
+
+    await Promise.all([session.close(1000, "done"), session.close(1001, "ignored")]);
+    expect(openContext.signal.aborted).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledWith(expect.objectContaining({ code: 1000, reason: "done" }));
+    expect(closeSignal?.aborted).toBe(true);
+    expect(registry.activeChannelCount()).toBe(0);
+  });
+
+  it("enforces channel revision, workspace, and admission bounds with reusable release", async () => {
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    const registry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => ({ receive: () => undefined }))],
+      workspaces,
+      channelMaxTotal: 1,
+      channelMaxPerPlugin: 1,
+      channelMaxPerPluginWorkspace: 1,
+    });
+    const request = {
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    };
+
+    await expect(registry.openChannel({ ...request, moduleRevision: "old" }, channelTransport().value))
+      .rejects.toMatchObject({ code: "stale-plugin-revision", closeCode: 1008 });
+    await expect(registry.openChannel({ ...request, workspaceId: "missing" }, channelTransport().value))
+      .rejects.toMatchObject({ code: "workspace-not-found", closeCode: 1008 });
+
+    const first = await registry.openChannel(request, channelTransport().value);
+    await expect(registry.openChannel(request, channelTransport().value))
+      .rejects.toMatchObject({ code: "admission-denied", closeCode: 1013 });
+    await first.close();
+    const replacement = await registry.openChannel(request, channelTransport().value);
+    expect(registry.activeChannelCount()).toBe(1);
+    await registry.closeAll();
+    await replacement.close();
+    expect(registry.activeChannelCount()).toBe(0);
+  });
+
+  it("times out receive callbacks and cleans up channels that resolve after an open timeout", async () => {
+    vi.useFakeTimers();
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    let receiveSignal: AbortSignal | undefined;
+    const receiveRegistry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => ({
+        receive: (_data, signal) => new Promise((_resolve, rejectPromise) => {
+          receiveSignal = signal;
+          signal.addEventListener("abort", () => {
+            const reason: unknown = signal.reason;
+            rejectPromise(reason instanceof Error ? reason : new Error("Receive aborted", { cause: reason }));
+          }, { once: true });
+        }),
+      }))],
+      workspaces,
+      channelCallbackTimeoutMs: 50,
+    });
+    const receiveSession = await receiveRegistry.openChannel({
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    }, channelTransport().value);
+    const receiving = receiveSession.receive({ type: "input" });
+    const receiveAssertion = expect(receiving).rejects.toMatchObject({ code: "receive-timeout", closeCode: 1011 });
+    await vi.advanceTimersByTimeAsync(50);
+    await receiveAssertion;
+    expect(receiveSignal?.aborted).toBe(true);
+    await receiveSession.close();
+
+    let resolveOpen: ((channel: { receive(): void; close(): void }) => void) | undefined;
+    let resolveStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolvePromise) => { resolveStarted = resolvePromise; });
+    const lateClose = vi.fn();
+    const openRegistry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => new Promise((resolvePromise) => {
+        resolveOpen = resolvePromise;
+        resolveStarted?.();
+      }))],
+      workspaces,
+      channelOpenTimeoutMs: 50,
+    });
+    const opening = openRegistry.openChannel({
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    }, channelTransport().value);
+    await started;
+    const openAssertion = expect(opening).rejects.toMatchObject({ code: "open-timeout", closeCode: 1011 });
+    await vi.advanceTimersByTimeAsync(50);
+    await openAssertion;
+    resolveOpen?.({ receive: () => undefined, close: lateClose });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lateClose).toHaveBeenCalledOnce();
+  });
+
+  it("aborts in-flight opens and rejects new admissions during shutdown", async () => {
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    let resolveOpen: ((channel: { receive(): void; close(): void }) => void) | undefined;
+    let resolveStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolvePromise) => { resolveStarted = resolvePromise; });
+    const lateClose = vi.fn();
+    const registry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => new Promise((resolvePromise) => {
+        resolveOpen = resolvePromise;
+        resolveStarted?.();
+      }))],
+      workspaces,
+    });
+    const request = {
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    };
+    const opening = registry.openChannel(request, channelTransport().value);
+    await started;
+
+    const shuttingDown = registry.closeAll();
+    await expect(opening).rejects.toMatchObject({ code: "shutdown", closeCode: 1012 });
+    await shuttingDown;
+    await expect(registry.openChannel(request, channelTransport().value)).rejects.toMatchObject({ code: "shutdown" });
+    resolveOpen?.({ receive: () => undefined, close: lateClose });
+    await vi.waitFor(() => { expect(lateClose).toHaveBeenCalledOnce(); });
+  });
+
+  it("expires channel lifetimes and releases admission after plugin cleanup", async () => {
+    vi.useFakeTimers();
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    const close = vi.fn();
+    const transport = channelTransport();
+    const registry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => ({ receive: () => undefined, close }))],
+      workspaces,
+      channelLifetimeMs: 50,
+    });
+    await registry.openChannel({
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    }, transport.value);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+    expect(close).toHaveBeenCalledOnce();
+    expect(transport.errors).toEqual([expect.objectContaining({ code: "lifetime-expired" })]);
+    expect(transport.closes).toEqual([expect.objectContaining({ code: 1001 })]);
+  });
+
   it("excludes unhealthy direct contributions while keeping degraded ones", () => {
     const contributions = [
       backendContribution("degraded", () => null),
@@ -345,5 +558,31 @@ function backendContribution(
     scope: "local",
     moduleRevision: `${pluginId}-r1`,
     backend: Object.freeze({ version: 1, request }),
+  };
+}
+
+function channelContribution(
+  pluginId: string,
+  openChannel: NonNullable<ServerPluginPairedBackendContribution["backend"]["openChannel"]>,
+): ServerPluginPairedBackendContribution {
+  return {
+    ...backendContribution(pluginId, () => null),
+    backend: Object.freeze({ version: 1, request: () => null, openChannel }),
+  };
+}
+
+function channelTransport() {
+  const sent: JsonValue[] = [];
+  const errors: { code: string; message: string }[] = [];
+  const closes: { code: number; reason: string }[] = [];
+  return {
+    sent,
+    errors,
+    closes,
+    value: {
+      send: (data: JsonValue) => { sent.push(data); },
+      sendError: (code: string, message: string) => { errors.push({ code, message }); },
+      close: (code: number, reason: string) => { closes.push({ code, reason }); },
+    },
   };
 }

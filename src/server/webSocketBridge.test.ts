@@ -1,6 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { bridgeSockets, createBufferedSender } from "./webSocketBridge.js";
+import {
+  serializePluginBackendChannelOpenEnvelope,
+  serializePluginBackendChannelReadyEnvelope,
+} from "../shared/pluginBackendProtocol.js";
+import {
+  bridgePluginBackendChannelSockets,
+  bridgeSockets,
+  createBoundedTextWebSocketSender,
+  createBufferedSender,
+} from "./webSocketBridge.js";
 
 const servers = new Set<WebSocketServer>();
 const sockets = new Set<WebSocket>();
@@ -43,6 +52,54 @@ describe("bridgeSockets", () => {
     const clientClosed = nextClose(errorCaseClientSide.peerSocket);
     errorCaseUpstreamSide.bridgeSocket.emit("error", new Error("upstream failed"));
     await clientClosed;
+  });
+});
+
+describe("bounded plugin backend channel bridge", () => {
+  it("validates and forwards host envelopes in both directions", async () => {
+    const clientSide = await createSocketPair();
+    const upstreamSide = await createSocketPair();
+    bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
+
+    const open = serializePluginBackendChannelOpenEnvelope("server-r1", { terminalId: "t1" });
+    const forwardedOpen = nextMessage(upstreamSide.peerSocket);
+    clientSide.peerSocket.send(open);
+    await expect(forwardedOpen).resolves.toBe(open);
+
+    const ready = serializePluginBackendChannelReadyEnvelope();
+    const forwardedReady = nextMessage(clientSide.peerSocket);
+    upstreamSide.peerSocket.send(ready);
+    await expect(forwardedReady).resolves.toBe(ready);
+  });
+
+  it("closes both directions for binary or invalid-direction frames", async () => {
+    const binaryClientSide = await createSocketPair();
+    const binaryUpstreamSide = await createSocketPair();
+    bridgePluginBackendChannelSockets(binaryClientSide.bridgeSocket, binaryUpstreamSide.bridgeSocket);
+    const clientClosed = nextClose(binaryClientSide.peerSocket);
+    const upstreamClosed = nextClose(binaryUpstreamSide.peerSocket);
+    binaryClientSide.peerSocket.send(Buffer.from("binary"), { binary: true });
+    await Promise.all([clientClosed, upstreamClosed]);
+
+    const invalidClientSide = await createSocketPair();
+    const invalidUpstreamSide = await createSocketPair();
+    bridgePluginBackendChannelSockets(invalidClientSide.bridgeSocket, invalidUpstreamSide.bridgeSocket);
+    const invalidClosed = nextClose(invalidClientSide.peerSocket);
+    invalidUpstreamSide.peerSocket.send(serializePluginBackendChannelOpenEnvelope("server-r1", null));
+    await invalidClosed;
+  });
+
+  it("rejects sender queue overflow while a socket is connecting", async () => {
+    const socketServer = createServer();
+    await waitForListening(socketServer);
+    const client = new WebSocket(serverUrl(socketServer));
+    sockets.add(client);
+    const onOverflow = vi.fn();
+    const send = createBoundedTextWebSocketSender(client, { maxFrames: 1, maxBytes: 1024, onOverflow });
+
+    send("first");
+    expect(() => { send("second"); }).toThrow("queue limit");
+    expect(onOverflow).toHaveBeenCalledOnce();
   });
 });
 
@@ -100,8 +157,10 @@ function createServer(): WebSocketServer {
 }
 
 function closeSocket(socket: WebSocket): void {
-  if (socket.readyState !== WebSocket.CONNECTING && socket.readyState !== WebSocket.OPEN) return;
-  socket.close();
+  if (socket.readyState === WebSocket.CONNECTING) {
+    socket.on("error", () => undefined);
+    socket.terminate();
+  } else if (socket.readyState === WebSocket.OPEN) socket.close();
 }
 
 function closeSocketServer(socketServer: WebSocketServer): Promise<void> {

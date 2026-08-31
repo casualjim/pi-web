@@ -78,7 +78,7 @@ export interface ServerPluginExecFileResult {
  */
 export interface ServerPluginActivation {
   workspaceProvider?: WorkspaceProvider;
-  /** Serve bounded requests from this package's paired browser entry. */
+  /** Serve bounded requests and optional duplex channels from this package's paired browser entry. */
   pairedBackend?: PairedPluginBackendV1;
   /** Initialize resources within one host-bounded start invocation. */
   start?(signal: AbortSignal): MaybePromise<void>;
@@ -98,6 +98,23 @@ export interface ServerPluginHealth {
 export interface PairedPluginBackendV1 {
   readonly version: 1;
   request(context: PairedPluginRequestContext): MaybePromise<JsonValue>;
+  /** Open one finite-lived, host-bounded duplex channel. */
+  openChannel?(context: PairedPluginChannelOpenContext): MaybePromise<PairedPluginChannel>;
+}
+
+/** Channel instance returned by `openChannel()` after the host validates scope. */
+export interface PairedPluginChannel {
+  /** Consume one browser-authored JSON frame within a host-bounded invocation. */
+  receive(data: JsonValue, signal: AbortSignal): MaybePromise<void>;
+  /** Release channel resources once after disconnect, failure, expiry, or shutdown. */
+  close?(context: PairedPluginChannelCloseContext): MaybePromise<void>;
+}
+
+export interface PairedPluginChannelCloseContext {
+  readonly code: number;
+  readonly reason: string;
+  /** Signal for this bounded close invocation, not the already-ended channel lifetime. */
+  readonly signal: AbortSignal;
 }
 
 /** Host-resolved, browser-visible workspace projection without provider-private data. */
@@ -121,6 +138,21 @@ export interface PairedPluginRequestContext {
   readonly operation: string;
   readonly input: JsonValue;
   readonly signal: AbortSignal;
+}
+
+/**
+ * Host-resolved channel scope. `signal` remains live for the channel lifetime
+ * and is aborted on disconnect, failure, expiry, or shutdown. `send()` clones
+ * and bounds one JSON frame synchronously; it throws and closes the channel on
+ * invalid data or host queue overflow.
+ */
+export interface PairedPluginChannelOpenContext {
+  readonly project: ProjectInput;
+  readonly workspace: PairedPluginWorkspace;
+  readonly operation: string;
+  readonly input: JsonValue;
+  readonly signal: AbortSignal;
+  readonly send: (data: JsonValue) => void;
 }
 
 /**

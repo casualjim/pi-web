@@ -3,6 +3,9 @@ import type {
   JsonObject,
   JsonValue,
   PairedPluginBackendV1,
+  PairedPluginChannel,
+  PairedPluginChannelCloseContext,
+  PairedPluginChannelOpenContext,
   PairedPluginRequestContext,
   PiWebServerPlugin,
   ProjectInput,
@@ -39,6 +42,8 @@ export interface ServerPluginRuntimeRecord {
   machineSpecific: boolean;
   /** Additive browser feature detection for a direct paired request backend. */
   backendCapabilityVersion?: 1;
+  /** Additive browser feature detection for bounded paired channels. */
+  channelVersion?: 1;
   state: ServerPluginRuntimeState;
   name?: string;
   phase?: ServerPluginLifecyclePhase;
@@ -226,6 +231,7 @@ export class ServerPluginRuntime {
           phase: "stop",
           message: errorMessage(error),
           ...(active.activation.pairedBackend === undefined ? {} : { backendCapabilityVersion: 1 }),
+          ...(active.activation.pairedBackend?.openChannel === undefined ? {} : { channelVersion: 1 }),
         }));
         this.logger.error({ err: error, pluginId: active.entry.id, phase: "stop" }, "server plugin stop failed");
       }
@@ -311,6 +317,7 @@ export class ServerPluginRuntime {
         state: "active",
         name: loadedPlugin.name,
         ...(pairedBackendContribution === undefined ? {} : { backendCapabilityVersion: 1 }),
+        ...(pairedBackendContribution?.backend.openChannel === undefined ? {} : { channelVersion: 1 }),
       }));
       this.logger.info({ pluginId: entry.id, pluginName: loadedPlugin.name }, "server plugin activated");
     } catch (error) {
@@ -357,7 +364,7 @@ function disabledReason(entry: PiWebPluginCatalogEntry, safeStart: ServerPluginS
 
 function recordFor(
   entry: PiWebPluginCatalogEntry,
-  status: Pick<ServerPluginRuntimeRecord, "state"> & Partial<Pick<ServerPluginRuntimeRecord, "name" | "phase" | "message" | "backendCapabilityVersion">>,
+  status: Pick<ServerPluginRuntimeRecord, "state"> & Partial<Pick<ServerPluginRuntimeRecord, "name" | "phase" | "message" | "backendCapabilityVersion" | "channelVersion">>,
 ): ServerPluginRuntimeRecord {
   return Object.freeze({
     pluginId: entry.id,
@@ -368,6 +375,7 @@ function recordFor(
     settingsRevision: entry.settingsRevision,
     machineSpecific: entry.machineSpecific,
     ...(status.backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion: status.backendCapabilityVersion }),
+    ...(status.channelVersion === undefined ? {} : { channelVersion: status.channelVersion }),
     state: status.state,
     ...(status.name === undefined ? {} : { name: status.name }),
     ...(status.phase === undefined ? {} : { phase: status.phase }),
@@ -472,17 +480,42 @@ function isServerPluginActivation(value: unknown): value is ServerPluginActivati
 
 function snapshotPairedPluginBackend(value: unknown): PairedPluginBackendV1 {
   if (!isPairedPluginBackend(value)) {
-    throw new IncompatibleServerPluginError("Server plugin pairedBackend must be a version 1 request backend");
+    throw new IncompatibleServerPluginError("Server plugin pairedBackend must be a version 1 request backend with an optional channel opener");
   }
   const request = value.request.bind(value);
+  const openChannel = value.openChannel?.bind(value);
   return Object.freeze({
     version: 1,
     request: (context: PairedPluginRequestContext) => request(context),
+    ...(openChannel === undefined ? {} : {
+      openChannel: async (context: PairedPluginChannelOpenContext) => snapshotPairedPluginChannel(await openChannel(context)),
+    }),
   });
 }
 
 function isPairedPluginBackend(value: unknown): value is PairedPluginBackendV1 {
-  return isRecord(value) && value["version"] === 1 && typeof value["request"] === "function";
+  return isRecord(value)
+    && value["version"] === 1
+    && typeof value["request"] === "function"
+    && (value["openChannel"] === undefined || typeof value["openChannel"] === "function");
+}
+
+function snapshotPairedPluginChannel(value: unknown): PairedPluginChannel {
+  if (!isPairedPluginChannel(value)) {
+    throw new Error("Server plugin openChannel must return a channel with receive and optional close callbacks");
+  }
+  const receive = value.receive.bind(value);
+  const close = value.close?.bind(value);
+  return Object.freeze({
+    receive: (data: JsonValue, signal: AbortSignal) => receive(data, signal),
+    ...(close === undefined ? {} : { close: (context: PairedPluginChannelCloseContext) => close(context) }),
+  });
+}
+
+function isPairedPluginChannel(value: unknown): value is PairedPluginChannel {
+  return isRecord(value)
+    && typeof value["receive"] === "function"
+    && (value["close"] === undefined || typeof value["close"] === "function");
 }
 
 function snapshotWorkspaceProvider(value: unknown): WorkspaceProvider {

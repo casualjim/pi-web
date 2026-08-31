@@ -25,7 +25,7 @@ describe("external plugin manifests", () => {
   it("loads manifest-relative modules from a nested deployment", async () => {
     const manifestUrl = "https://pi.example.test/test/ai/pi-web-plugins/manifest.json";
     const fetchMock = vi.fn(() => Promise.resolve(new Response(JSON.stringify({
-      plugins: [{ id: "info", module: "./info/pi-web-plugin.js?v=1", backendRevision: "server-r1", backendCapabilityVersion: 1, machineSpecific: false }],
+      plugins: [{ id: "info", module: "./info/pi-web-plugin.js?v=1", backendRevision: "server-r1", backendCapabilityVersion: 1, channelVersion: 1, machineSpecific: false }],
     }))));
     const moduleLoader = vi.fn(() => Promise.resolve({
       default: { apiVersion: 2, name: "Info", activate: () => ({ contributions: {} }) },
@@ -37,12 +37,15 @@ describe("external plugin manifests", () => {
     expect(fetchMock).toHaveBeenCalledWith(manifestUrl, { cache: "no-store" });
     expect(moduleLoader).toHaveBeenCalledWith("https://pi.example.test/test/ai/pi-web-plugins/info/pi-web-plugin.js?v=1");
     expect(result.failures).toEqual([]);
-    expect(result.registrations).toMatchObject([{ id: "info", backendRevision: "server-r1", backendCapabilityVersion: 1, machineSpecific: false, plugin: { apiVersion: 2, name: "Info" } }]);
+    expect(result.registrations).toMatchObject([{ id: "info", backendRevision: "server-r1", backendCapabilityVersion: 1, channelVersion: 1, machineSpecific: false, plugin: { apiVersion: 2, name: "Info" } }]);
   });
 
   it.each([
     { backendCapabilityVersion: 2, backendRevision: "server-r1" },
     { backendCapabilityVersion: 1 },
+    { channelVersion: 2, backendRevision: "server-r1" },
+    { channelVersion: 1 },
+    { channelVersion: 1, backendRevision: "server-r1" },
   ])("rejects invalid paired backend capability metadata before module import", async (backend) => {
     const moduleLoader = vi.fn(() => Promise.resolve({
       default: { apiVersion: 2, name: "Info", activate: () => ({ contributions: {} }) },

@@ -3,6 +3,9 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import type {
   JsonObject,
   PairedPluginBackendV1,
+  PairedPluginChannel,
+  PairedPluginChannelCloseContext,
+  PairedPluginChannelOpenContext,
   PairedPluginRequestContext,
   PairedPluginWorkspace,
   PiWebServerPlugin,
@@ -125,7 +128,10 @@ describe("public server plugin API", () => {
     expectTypeOf<keyof WorkspaceProvider>().toEqualTypeOf<
       "fallback" | "probe" | "list" | "request" | "prepareRemove"
     >();
-    expectTypeOf<keyof PairedPluginBackendV1>().toEqualTypeOf<"version" | "request">();
+    expectTypeOf<keyof PairedPluginBackendV1>().toEqualTypeOf<"version" | "request" | "openChannel">();
+    expectTypeOf<keyof PairedPluginChannel>().toEqualTypeOf<"receive" | "close">();
+    expectTypeOf<keyof PairedPluginChannelOpenContext>().toEqualTypeOf<"project" | "workspace" | "operation" | "input" | "signal" | "send">();
+    expectTypeOf<keyof PairedPluginChannelCloseContext>().toEqualTypeOf<"code" | "reason" | "signal">();
     expectTypeOf<keyof PairedPluginRequestContext>().toEqualTypeOf<
       "project" | "workspace" | "operation" | "input" | "signal"
     >();
@@ -138,6 +144,8 @@ describe("public server plugin API", () => {
     expectTypeOf<ReadonlyKeys<ProviderRequestContext>>().toEqualTypeOf<keyof ProviderRequestContext>();
     expectTypeOf<ReadonlyKeys<ProviderRemoveContext>>().toEqualTypeOf<keyof ProviderRemoveContext>();
     expectTypeOf<ReadonlyKeys<PairedPluginRequestContext>>().toEqualTypeOf<keyof PairedPluginRequestContext>();
+    expectTypeOf<ReadonlyKeys<PairedPluginChannelOpenContext>>().toEqualTypeOf<keyof PairedPluginChannelOpenContext>();
+    expectTypeOf<ReadonlyKeys<PairedPluginChannelCloseContext>>().toEqualTypeOf<keyof PairedPluginChannelCloseContext>();
     expectTypeOf<ReadonlyKeys<PairedPluginWorkspace>>().toEqualTypeOf<keyof PairedPluginWorkspace>();
     expectTypeOf<ReadonlyKeys<ProviderRequestContext["workspace"]>>().toEqualTypeOf<keyof ProviderWorkspace>();
     expectTypeOf<ReadonlyKeys<WorkspaceRemovalPresentation>>().toEqualTypeOf<keyof WorkspaceRemovalPresentation>();

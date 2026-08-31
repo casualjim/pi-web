@@ -9,6 +9,7 @@ export interface PluginManifestEntry {
   module: string;
   backendRevision?: string;
   backendCapabilityVersion?: 1;
+  channelVersion?: 1;
   machineSpecific: boolean;
 }
 
@@ -51,6 +52,7 @@ export async function loadExternalPlugins(manifestUrl = "pi-web-plugins/manifest
         machineSpecific: entry.machineSpecific,
         ...(entry.backendRevision === undefined ? {} : { backendRevision: entry.backendRevision }),
         ...(entry.backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion: entry.backendCapabilityVersion }),
+        ...(entry.channelVersion === undefined ? {} : { channelVersion: entry.channelVersion }),
         ...(options.machineId === undefined ? {} : { machineId: options.machineId, sourcePluginId: entry.id }),
       });
     } catch (error) {
@@ -85,12 +87,15 @@ function parseManifest(value: unknown): PluginManifest {
     if (isReservedPiWebPluginId(id)) throw new Error(`Reserved plugin manifest id: ${id}`);
     const backendRevision = parseBackendRevision(entry["backendRevision"]);
     const backendCapabilityVersion = parseBackendCapabilityVersion(entry["backendCapabilityVersion"]);
-    if (backendCapabilityVersion !== undefined && backendRevision === undefined) throw new Error("Invalid plugin manifest entry");
+    const channelVersion = parseChannelVersion(entry["channelVersion"]);
+    if ((backendCapabilityVersion !== undefined || channelVersion !== undefined) && backendRevision === undefined) throw new Error("Invalid plugin manifest entry");
+    if (channelVersion !== undefined && backendCapabilityVersion === undefined) throw new Error("Invalid plugin manifest entry");
     return {
       id,
       module: entry["module"],
       ...(backendRevision === undefined ? {} : { backendRevision }),
       ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
+      ...(channelVersion === undefined ? {} : { channelVersion }),
       machineSpecific: parseMachineSpecific(entry["machineSpecific"]),
     };
   });
@@ -130,6 +135,12 @@ function parseBackendRevision(value: unknown): string | undefined {
 }
 
 function parseBackendCapabilityVersion(value: unknown): 1 | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 1) throw new Error("Invalid plugin manifest entry");
+  return value;
+}
+
+function parseChannelVersion(value: unknown): 1 | undefined {
   if (value === undefined) return undefined;
   if (value !== 1) throw new Error("Invalid plugin manifest entry");
   return value;

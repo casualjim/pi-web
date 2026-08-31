@@ -91,8 +91,11 @@ const MIN_RESIZABLE_CHAT_WIDTH_PX = 320;
 const PANEL_EDGE_COLUMNS_WIDTH_PX = 2;
 const DESKTOP_SIDE_BY_SIDE_MEDIA_QUERY = "(min-width: 1181px)";
 
+type WorkspaceRouteUrlPublication = "current-url" | "deferred";
+
 interface WorkspaceRouteFinishOptions {
   updateUrl: boolean;
+  urlPublication: WorkspaceRouteUrlPublication;
   normalizeUnavailableRoute: boolean;
   unavailablePanelViewRoute: boolean;
   requestedTool: AppRoute["tool"];
@@ -545,7 +548,13 @@ export class PiWebApp extends LitElement {
     this.rememberCurrentMachineNavigation();
   }
 
-  private async restoreRouteFor(parsedRoute: ParsedAppRoute, updateUrl: boolean, surface = this.readWorkspaceRouteSurface(parsedRoute), restoredMainView?: AppState["mainView"]) {
+  private async restoreRouteFor(
+    parsedRoute: ParsedAppRoute,
+    updateUrl: boolean,
+    surface = this.readWorkspaceRouteSurface(parsedRoute),
+    restoredMainView?: AppState["mainView"],
+    urlPublication: WorkspaceRouteUrlPublication = "current-url",
+  ) {
     const machineBeforeRestore = selectedMachineId(this.state);
     const routeSurface = parsedRoute.projectId === undefined || parsedRoute.projectId === "" ? emptyWorkspaceRouteSurface() : surface;
     const restoreSeq = ++this.routeRestoreSeq;
@@ -561,6 +570,7 @@ export class PiWebApp extends LitElement {
       const restoredWorkspaceIdentity = workspaceRouteIdentity(route);
       const finishOptions: WorkspaceRouteFinishOptions = {
         updateUrl,
+        urlPublication,
         normalizeUnavailableRoute: unavailableToolRoute || unavailablePanelViewRoute,
         unavailablePanelViewRoute,
         requestedTool: route.tool,
@@ -619,9 +629,22 @@ export class PiWebApp extends LitElement {
       ? undefined
       : { identity: options.restoredWorkspaceIdentity, query: surface.contributionQuery ?? {} };
     await this.refreshRestoredWorkspaceTool(this.state.workspaceTool, contributionQueryRestore);
-    if (options.updateUrl || selectionChanged || normalizeUnavailableRoute) {
-      this.updateUrl(selectionChanged || normalizeUnavailableRoute ? { replace: true } : undefined, surface.contributionQuery);
+    if (options.urlPublication === "current-url" && (options.updateUrl || selectionChanged || normalizeUnavailableRoute)) {
+      const contributionQuery = this.restoredContributionQueryForSelectedWorkspace(surface, options.restoredWorkspaceIdentity);
+      this.updateUrl(selectionChanged || normalizeUnavailableRoute ? { replace: true } : undefined, contributionQuery);
     }
+  }
+
+  private restoredContributionQueryForSelectedWorkspace(
+    surface: WorkspaceRouteSurface,
+    restoredWorkspaceIdentity: WorkspaceRouteIdentity | undefined,
+  ): Readonly<ContributionQueryRecord> {
+    const selectedIdentity = this.selectedWorkspaceRouteIdentity();
+    return restoredWorkspaceIdentity !== undefined
+      && selectedIdentity !== undefined
+      && sameWorkspaceRouteIdentity(restoredWorkspaceIdentity, selectedIdentity)
+      ? surface.contributionQuery ?? {}
+      : {};
   }
 
   private isCurrentRouteRestore(restoreSeq: number): boolean {
@@ -863,7 +886,13 @@ export class PiWebApp extends LitElement {
     if (options.rememberCurrent !== false && !this.routeRestoreInProgress) this.rememberCurrentMachineNavigation();
     const seq = ++this.machineNavigationRestoreSeq;
     const snapshot = this.machineNavigation.latest(machine.id) ?? emptyMachineNavigationSnapshot(machine.id);
-    await this.restoreRouteFor(routeFromMachineNavigationSnapshot(snapshot), false, snapshot.surface, snapshot.view);
+    await this.restoreRouteFor(
+      routeFromMachineNavigationSnapshot(snapshot),
+      false,
+      snapshot.surface,
+      snapshot.view,
+      "deferred",
+    );
     if (seq !== this.machineNavigationRestoreSeq || this.state.selectedMachine?.id !== machine.id) return;
     if (this.shouldPreserveUnrestoredMachineNavigation(snapshot)) {
       this.machineNavigation.remember(snapshot);
@@ -920,7 +949,7 @@ export class PiWebApp extends LitElement {
         sessionId: undefined,
         tool: "core:workspace.terminal",
         view: "core:workspace.terminal",
-      }, false, { selectedTerminalId: options?.terminalId }, "core:workspace.terminal");
+      }, false, { selectedTerminalId: options?.terminalId }, "core:workspace.terminal", "deferred");
       if (selectedMachineId(this.state) !== machineId) {
         this.setState({ error: "Machine not found for terminal command run" });
         return;

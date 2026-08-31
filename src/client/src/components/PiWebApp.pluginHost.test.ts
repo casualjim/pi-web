@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FilesRuntime } from "../../../../pi-web-plugins/files/FilesRuntime";
 import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspacePanelContext } from "../../../plugin-api";
@@ -24,12 +26,15 @@ const workspace: Workspace = {
 };
 
 beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   vi.mocked(loadExternalPlugins).mockReset();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
+  window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 describe("PiWebApp plugin host", () => {
@@ -369,6 +374,199 @@ describe("PiWebApp plugin host", () => {
     expect(historyUrl(browser.replaced, 1).searchParams.has("files.workspace.files--file")).toBe(false);
   });
 
+  it("preserves the origin history entry when remembered Files is unavailable", async () => {
+    const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
+    const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
+    const projectB: Project = { id: "project-b", name: "Project B", path: "/repo-b", createdAt: "now" };
+    const workspaceA: Workspace = { id: "workspace-a", projectId: projectA.id, path: "/repo-a", label: "A", isMain: true, effectiveConfig: {} };
+    const workspaceB: Workspace = { id: "workspace-b", projectId: projectB.id, path: "/repo-b", label: "B", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const originUrl = browser.url.href;
+    const historyLength = window.history.length;
+    const app = new PiWebApp();
+    if (!Reflect.set(app, "schedulePiWebStatusRefresh", () => undefined)) throw new Error("Could not stub deferred status refresh");
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [machineA, machineB],
+      selectedMachine: machineA,
+      projects: [projectA],
+      selectedProject: projectA,
+      workspaces: [workspaceA],
+      selectedWorkspace: workspaceA,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    markPluginLoadingReady(app, [machineB.id]);
+    stubRouteMachineSelection(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedMachine: machineB,
+        projects: [projectB],
+        selectedProject: projectB,
+        workspaces: [workspaceB],
+        selectedWorkspace: workspaceB,
+        selectedSession: undefined,
+        error: "",
+      });
+    });
+    rememberMachineNavigationSnapshot(app, {
+      machineId: machineB.id,
+      projectId: projectB.id,
+      workspaceId: workspaceB.id,
+      tool: "files:workspace.files",
+      view: "files:workspace.files",
+      surface: { contributionQuery: { "files.workspace.files--file": "b.ts" } },
+    });
+
+    await callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
+
+    expect(appState(app)).toMatchObject({
+      selectedMachine: { id: machineB.id },
+      selectedWorkspace: { id: workspaceB.id },
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    expect(window.history.length).toBe(historyLength + 1);
+    expect(browser.pushed).toHaveLength(1);
+    expect(browser.replaced).toHaveLength(1);
+    expect([...browser.pushed, ...browser.replaced].every((href) => new URL(href).searchParams.get("machine") === machineB.id)).toBe(true);
+    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
+
+    window.history.back();
+    await vi.waitFor(() => { expect(window.location.href).toBe(originUrl); });
+  });
+
+  it("does not publish a missing workspace query under its fallback workspace identity", async () => {
+    const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
+    const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
+    const projectB: Project = { id: "project-b", name: "Project B", path: "/repo-b", createdAt: "now" };
+    const workspaceA: Workspace = { id: "workspace-a", projectId: projectA.id, path: "/repo-a", label: "A", isMain: true, effectiveConfig: {} };
+    const fallbackWorkspace: Workspace = { id: "workspace-fallback", projectId: projectB.id, path: "/repo-b", label: "Fallback", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const originUrl = browser.url.href;
+    const app = new PiWebApp();
+    if (!Reflect.set(app, "schedulePiWebStatusRefresh", () => undefined)) throw new Error("Could not stub deferred status refresh");
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [machineA, machineB],
+      selectedMachine: machineA,
+      projects: [projectA],
+      selectedProject: projectA,
+      workspaces: [workspaceA],
+      selectedWorkspace: workspaceA,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    markPluginLoadingReady(app, [machineB.id]);
+    stubRouteMachineSelection(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedMachine: machineB,
+        projects: [projectB],
+        selectedProject: undefined,
+        workspaces: [],
+        selectedWorkspace: undefined,
+        selectedSession: undefined,
+        error: "",
+      });
+    });
+    stubWorkspaceProjectSelection(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedProject: projectB,
+        workspaces: [fallbackWorkspace],
+        selectedWorkspace: fallbackWorkspace,
+        error: "",
+      });
+    });
+    rememberMachineNavigationSnapshot(app, {
+      machineId: machineB.id,
+      projectId: projectB.id,
+      workspaceId: "workspace-missing",
+      tool: "files:workspace.files",
+      view: "files:workspace.files",
+      surface: { contributionQuery: { "files.workspace.files--file": "missing.ts" } },
+    });
+
+    await callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
+
+    expect(appState(app).selectedWorkspace?.id).toBe(fallbackWorkspace.id);
+    expect(browser.url.searchParams.get("machine")).toBe(machineB.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(fallbackWorkspace.id);
+    expect(browser.url.searchParams.has("files.workspace.files--file")).toBe(false);
+    expect([...browser.pushed, ...browser.replaced].some((href) => {
+      const url = new URL(href);
+      return url.searchParams.get("workspace") === fallbackWorkspace.id
+        && url.searchParams.has("files.workspace.files--file");
+    })).toBe(false);
+
+    window.history.back();
+    await vi.waitFor(() => { expect(window.location.href).toBe(originUrl); });
+  });
+
+  it("keeps load-error preservation on the remembered identity without replacing its origin", async () => {
+    const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
+    const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
+    const fallbackProject: Project = { id: "project-fallback", name: "Fallback", path: "/fallback", createdAt: "now" };
+    const workspaceA: Workspace = { id: "workspace-a", projectId: projectA.id, path: "/repo-a", label: "A", isMain: true, effectiveConfig: {} };
+    const fallbackWorkspace: Workspace = { id: "workspace-fallback", projectId: fallbackProject.id, path: "/fallback", label: "Fallback", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const originUrl = browser.url.href;
+    const app = new PiWebApp();
+    if (!Reflect.set(app, "schedulePiWebStatusRefresh", () => undefined)) throw new Error("Could not stub deferred status refresh");
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [machineA, machineB],
+      selectedMachine: machineA,
+      projects: [projectA],
+      selectedProject: projectA,
+      workspaces: [workspaceA],
+      selectedWorkspace: workspaceA,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    markPluginLoadingReady(app, [machineB.id]);
+    stubRouteMachineSelection(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedMachine: machineB,
+        projects: [fallbackProject],
+        selectedProject: fallbackProject,
+        workspaces: [fallbackWorkspace],
+        selectedWorkspace: fallbackWorkspace,
+        selectedSession: undefined,
+        error: "Failed to load the remembered project",
+      });
+    });
+    rememberMachineNavigationSnapshot(app, {
+      machineId: machineB.id,
+      projectId: "project-missing",
+      workspaceId: "workspace-missing",
+      tool: "files:workspace.files",
+      view: "files:workspace.files",
+      surface: { contributionQuery: { "files.workspace.files--file": "missing.ts" } },
+    });
+
+    await callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
+
+    expect(browser.pushed).toHaveLength(1);
+    expect(browser.replaced).toHaveLength(1);
+    expect(browser.url.searchParams.get("project")).toBe("project-missing");
+    expect(browser.url.searchParams.get("workspace")).toBe("workspace-missing");
+    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("missing.ts");
+    expect([...browser.pushed, ...browser.replaced].some((href) => {
+      const url = new URL(href);
+      return url.searchParams.get("workspace") === fallbackWorkspace.id
+        && url.searchParams.has("files.workspace.files--file");
+    })).toBe(false);
+
+    window.history.back();
+    await vi.waitFor(() => { expect(window.location.href).toBe(originUrl); });
+  });
+
   it("waits for gateway contributions before choosing the first default workspace panel", () => {
     const app = createApp();
     const previous = initialAppState();
@@ -413,6 +611,7 @@ describe("PiWebApp plugin host", () => {
 
     await callAsyncAppMethod(app, "finishWorkspaceRouteRestore", { contributionQuery: {} }, {
       updateUrl: false,
+      urlPublication: "current-url",
       normalizeUnavailableRoute: false,
       unavailablePanelViewRoute: false,
       requestedTool: "core:workspace.files",
@@ -467,6 +666,37 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
     expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
     expect(browser.replaced.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes an unavailable panel on popstate without replacing the adjacent history entries", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&step=origin");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    markPluginLoadingReady(app);
+    window.history.pushState({}, "", "?project=project-1&workspace=workspace-1&tool=missing%3Aworkspace.panel&view=missing%3Aworkspace.panel&step=unavailable");
+    window.history.pushState({}, "", "?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&step=later");
+    browser.pushed.splice(0);
+    browser.replaced.splice(0);
+
+    window.history.back();
+    await vi.waitFor(() => { expect(browser.url.searchParams.get("step")).toBe("unavailable"); });
+    callAppMethod(app, "onPopState");
+    await vi.waitFor(() => {
+      expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
+      expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+    });
+
+    expect(browser.replaced).toHaveLength(1);
+    expect(browser.url.searchParams.get("step")).toBe("unavailable");
+    window.history.back();
+    await vi.waitFor(() => { expect(browser.url.searchParams.get("step")).toBe("origin"); });
   });
 
   it("keeps the generic shell and host files available when the Files module fails to load", async () => {
@@ -595,37 +825,28 @@ function installBrowserWindow(href: string): {
   readonly replaced: string[];
   navigate(next: string): void;
 } {
-  let current = new URL(href);
+  const originalPush = window.history.pushState.bind(window.history);
+  const originalReplace = window.history.replaceState.bind(window.history);
+  const appRelativeUrl = (target: string) => {
+    const url = new URL(target, window.location.href);
+    return `${url.pathname}${url.search}${url.hash}`;
+  };
+  originalPush({}, "", appRelativeUrl(href));
   const pushed: string[] = [];
   const replaced: string[] = [];
-  const storage = {
-    getItem: () => null,
-    setItem: () => undefined,
-    removeItem: () => undefined,
-  };
-  const location = {
-    get href() { return current.href; },
-    get pathname() { return current.pathname; },
-    get search() { return current.search; },
-    get hash() { return current.hash; },
-  };
-  const commit = (target: URL | string, entries: string[]) => {
-    current = new URL(String(target), current);
-    entries.push(current.href);
-  };
-  vi.stubGlobal("window", {
-    location,
-    localStorage: storage,
-    history: {
-      pushState: vi.fn((_state: object, _title: string, next: URL | string) => { commit(next, pushed); }),
-      replaceState: vi.fn((_state: object, _title: string, next: URL | string) => { commit(next, replaced); }),
-    },
+  vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+    originalPush(state, title, next);
+    pushed.push(window.location.href);
+  });
+  vi.spyOn(window.history, "replaceState").mockImplementation((state, title, next) => {
+    originalReplace(state, title, next);
+    replaced.push(window.location.href);
   });
   return {
-    get url() { return current; },
+    get url() { return new URL(window.location.href); },
     pushed,
     replaced,
-    navigate: (next) => { current = new URL(next, current); },
+    navigate: (next) => { originalReplace({}, "", appRelativeUrl(next)); },
   };
 }
 
@@ -774,6 +995,22 @@ function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string
   const loaded: unknown = Reflect.get(app, "loadedMachinePluginIds");
   if (!(loaded instanceof Set)) throw new Error("PiWebApp loaded-machine plugin set was unavailable");
   for (const machineId of loadedMachineIds) loaded.add(machineId);
+}
+
+function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {
+  if (!Reflect.set(app, "restoreRouteMachine", () => {
+    applySelection();
+    return Promise.resolve();
+  })) throw new Error("Could not stub machine route selection");
+}
+
+function stubWorkspaceProjectSelection(app: PiWebApp, applySelection: () => void): void {
+  const controller: unknown = Reflect.get(app, "workspaces");
+  if (typeof controller !== "object" || controller === null) throw new Error("PiWebApp workspace controller was unavailable");
+  if (!Reflect.set(controller, "selectProject", () => {
+    applySelection();
+    return Promise.resolve();
+  })) throw new Error("Could not stub workspace project selection");
 }
 
 function rememberMachineNavigationSnapshot(app: PiWebApp, snapshot: MachineNavigationSnapshot): void {

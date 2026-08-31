@@ -10,7 +10,8 @@ Plugins can currently:
 - call browser APIs and documented PI WEB plugin context helpers;
 - read workspace files and start workspace terminal commands through documented helpers;
 - serve browser-public files from an explicitly declared `browserRoot`;
-- contribute one server-side workspace provider, with optional JSON backend requests and workspace-removal planning.
+- contribute one server-side workspace provider with optional owner-backed JSON requests and workspace-removal planning; and
+- contribute one bounded paired JSON backend that its matching browser entry can call for any host-resolved workspace.
 
 Browser entries run in the PI WEB page through browser plugin API v2. Declared server entries run in the session daemon through the separate server-plugin API v1. Plugins do not get raw Fastify access, arbitrary routes, concrete core services, a generic event bus, Pi model-provider registration, or a general server-hook API. Neither entry is sandboxed.
 
@@ -20,7 +21,7 @@ Browser entries run in the PI WEB page through browser plugin API v2. Declared s
 
 **Pi extensions** are runtime modules loaded by the session daemon. They can register Pi tools, hooks, commands, and model providers. They are not PI WEB plugins and use a different API and lifecycle.
 
-**PI WEB plugins** are packages discovered from bundled, local, dev, and installed Pi-package sources. A plugin can declare a browser `module`, a sessiond `serverModule`, or both. A server entry can participate only in the documented PI WEB plugin lifecycle and workspace-provider contract; it cannot register Pi model providers or arbitrary hooks.
+**PI WEB plugins** are packages discovered from bundled, local, dev, and installed Pi-package sources. A plugin can declare a browser `module`, a sessiond `serverModule`, or both. A server entry can participate only in the documented PI WEB plugin lifecycle, paired-backend, and workspace-provider contracts; it cannot register Pi model providers or arbitrary hooks.
 
 Pi loads ordinary Pi resources from installed Pi packages and from its user and project resource locations. PI WEB plugin discovery loads only the browser and server entries declared in `piWeb.plugins`; enabling or disabling a PI WEB plugin does not add or remove the package's Pi extensions, skills, prompt templates, themes, or context/system prompt files.
 
@@ -215,7 +216,7 @@ When [machine federation](https://pi-web.dev/machines) is enabled, PI WEB loads 
 
 - actions, workspace panels, and workspace labels appear only for the applicable selected machine;
 - file and terminal helpers run against that machine;
-- `context.backend.request()` is routed through the gateway to the current workspace owner on that machine;
+- `context.backend.request()` is routed through the gateway to the matching server entry on that machine, with direct paired dispatch or the legacy owner-backed fallback as advertised;
 - a server-backed browser module is published only when its package source, scope, settings fingerprint, browser revision, and backend revision match the active sessiond snapshot and the backend is not unhealthy;
 - if gateway and remote packages share an original id, `machineSpecific` controls whether the portable gateway copy is reused or the selected machine's own copy is required;
 - remote theme contributions are ignored for now because themes are app-wide.
@@ -326,7 +327,7 @@ Legacy `files` / `core:workspace.files` routes, namespaced query state, and save
 ### Git
 
 **Plugin id:** `git`
-**What it does:** claims Git projects as a fallback workspace provider, discovers worktrees, supplies provider-owned removal plans, and adds the Git status/diff workspace panel through its paired backend.
+**What it does:** claims Git projects as a fallback workspace provider, discovers worktrees, supplies provider-owned removal plans, and adds the Git status/diff workspace panel through the legacy owner-backed backend helper.
 
 Git is enabled by default and is the only production workspace provider bundled with PI WEB. An enabled primary third-party provider can claim a project before Git. Disabling `git` and restarting sessiond leaves the kernel project-folder workspace available; reload the browser afterward so Git contributions disappear. The generic Files, Terminal, and Session features continue to work in that folder workspace.
 
@@ -494,7 +495,7 @@ Discovery hashes the package (without traversing `.git` or `node_modules`) to pr
 
 ### Manifest and assets
 
-The manifest contains a lifecycle version and each publishable browser module. Current PI WEB releases emit `module` as a leading application-root reference and include `backendRevision` only for a paired active server entry:
+The manifest contains a lifecycle version and each publishable browser module. Current PI WEB releases emit `module` as a leading application-root reference, include `backendRevision` only for a paired active server entry, and add `backendCapabilityVersion: 1` when that server entry contributes the direct paired-request contract:
 
 ```json
 {
@@ -504,6 +505,7 @@ The manifest contains a lifecycle version and each publishable browser module. C
       "id": "workspaces",
       "module": "/pi-web-plugins/workspaces/dist/browser/index.js?v=<content-revision>",
       "backendRevision": "<active-server-revision>",
+      "backendCapabilityVersion": 1,
       "source": "local",
       "scope": "local",
       "machineSpecific": true
@@ -612,15 +614,23 @@ Contribution ids authored in arrays remain local to the plugin. PI WEB qualifies
 
 For a local plugin the runtime and source ids are normally equal. A federated registration may machine-scope `runtimePluginId`, while `pluginId` and `workspace.provider.pluginId` remain the same source id.
 
-## Server module and workspace provider shape
+## Server module, paired backend, and workspace provider shape
 
 TypeScript server entries import the separately published Node declarations with `import type`:
 
 ```ts
 import type {
+  PairedPluginBackendV1,
   PiWebServerPlugin,
   WorkspaceProvider,
 } from "@jmfederico/pi-web/server-plugin-api";
+
+const pairedBackend: PairedPluginBackendV1 = {
+  version: 1,
+  async request({ project, workspace, operation, input, signal }) {
+    return await handlePairedOperation({ project, workspace, operation, input, signal });
+  },
+};
 
 const provider: WorkspaceProvider = {
   async probe(project, signal) {
@@ -640,6 +650,7 @@ const plugin: PiWebServerPlugin = {
   name: "My Workspace Provider",
   activate(context) {
     return {
+      pairedBackend,
       workspaceProvider: provider,
       health: async (signal) => ({ status: "healthy" }),
       stop: async (signal) => { /* release plugin-owned resources */ },
@@ -655,17 +666,44 @@ The default export has `apiVersion: 1`, a non-empty `name`, and `activate(contex
 ```ts
 interface ServerPluginActivation {
   workspaceProvider?: WorkspaceProvider;
+  pairedBackend?: PairedPluginBackendV1;
   start?(signal: AbortSignal): void | Promise<void>;
   stop?(signal: AbortSignal): void | Promise<void>;
   health?(signal: AbortSignal): ServerPluginHealth | Promise<ServerPluginHealth>;
 }
 ```
 
-A server plugin may contribute at most one `workspaceProvider`. The host-owned frozen activation context contains its `pluginId`, `packageRoot`, JSON settings snapshot, scoped logger, activation `AbortSignal`, and an argv-based `execFile()` helper. `execFile()` has host-owned timeout/output bounds; pass the current callback's signal into every command request. The API exposes no shell parser, Fastify instance, route registration, concrete service, event bus, or service locator.
+A server plugin may contribute at most one `workspaceProvider` and one version-1 `pairedBackend`. Either contribution is optional and independent: a paired backend does not need to own or provide workspaces. The host-owned frozen activation context contains its `pluginId`, `packageRoot`, JSON settings snapshot, scoped logger, activation `AbortSignal`, and an argv-based `execFile()` helper. `execFile()` has host-owned timeout/output bounds; pass the current callback's signal into every command request. The API exposes no shell parser, Fastify instance, route registration, concrete service, event bus, or service locator.
 
 Every activation, lifecycle, provider, and request signal is scoped to that one invocation. The host aborts it when the invocation times out or settles. Do not retain a signal as a plugin-lifetime shutdown notification; release plugin-owned resources in the explicit `stop()` callback. Deadlines remain cooperative, so plugins must observe each supplied signal.
 
-Sessiond resolves the enabled catalog once per process start. It imports, validates, activates, and starts each server entry before publishing its contribution. A failed entry is attributed and skipped without aborting ordinary activation of other plugins; a failed `start` is rolled back with `stop` when available. Successful plugins stop in reverse activation order. Sessiond inspects each optional `health()` callback once while building the startup workspace authority; an unhealthy provider is excluded, a degraded provider remains eligible, and that inspection is not polled again during the process lifetime. Server entries are never hot-reloaded or unloaded after config/package edits.
+Sessiond resolves the enabled catalog once per process start. It imports, validates, activates, and starts each server entry before publishing its contributions. A failed entry is attributed and skipped without aborting ordinary activation of other plugins; a failed `start` is rolled back with `stop` when available. Successful plugins stop in reverse activation order. Sessiond inspects each optional `health()` callback once while building the startup workspace authority; an unhealthy provider is excluded, a degraded provider remains eligible, and that inspection is not polled again during the process lifetime. Server entries are never hot-reloaded or unloaded after config/package edits.
+
+### Paired backend contract
+
+```ts
+interface PairedPluginBackendV1 {
+  readonly version: 1;
+  request(context: {
+    readonly project: ProjectInput;
+    readonly workspace: {
+      readonly id: string;
+      readonly projectId: string;
+      readonly path: string;
+      readonly label: string;
+      readonly isMain: boolean;
+      readonly provider?: WorkspaceProviderMetadata;
+    };
+    readonly operation: string;
+    readonly input: JsonValue;
+    readonly signal: AbortSignal;
+  }): JsonValue | Promise<JsonValue>;
+}
+```
+
+`pairedBackend.request()` is available only to the same package's revision-matched browser entry. Before invoking it, the host authenticates and resolves the selected machine, project, and current workspace, then supplies cloned, frozen project/workspace/JSON values. The workspace projection may describe the kernel folder or a workspace owned by another provider; it includes only browser-visible provider metadata, never provider-private `data`. The callback receives no route, socket, registry, or other plugin handle.
+
+The host limits JSON input to 256 KiB, JSON output to 8 MiB, each callback to 10 seconds, sessiond dispatch to 25 seconds, and federation to 30 seconds. Caller cancellation propagates to the operation-scoped signal. Observe that signal in nested work and do not retain it after the callback settles.
 
 ### Workspace provider contract
 
@@ -881,7 +919,12 @@ interface WorkspacePanelContext {
   state?: PluginRuntimeState;
   files: WorkspaceFilesContextValue;
   backend?: {
-    request(operation: string, input: JsonValue): Promise<JsonValue>;
+    readonly capabilityVersion?: 1;
+    request(
+      operation: string,
+      input: JsonValue,
+      options?: { readonly signal?: AbortSignal },
+    ): Promise<JsonValue>;
   };
   prompt: PluginPromptEditor;
   terminal: {
@@ -902,7 +945,7 @@ interface WorkspacePanelContext {
 
 `icon` is optional and is used in the compact mobile tab bar. Prefer an SVG rendered with the `svg` helper from `PluginActivationContext`; use `currentColor` so PI WEB themes can style it. If `icon` is omitted, mobile tabs fall back to initials from the panel title, or to the full title when initials collide.
 
-`machine`, `workspace`, `files`, optional `backend`, `prompt`, `terminal`, optional `navigation`, and `host` are documented as stable for panel callbacks. The base `files` methods are covered under [Reading workspace files](#reading-workspace-files), [Listing workspace files](#listing-workspace-files), and [Writing, deleting, and moving workspace files](#writing-deleting-and-moving-workspace-files); feature-detect the [workspace-files capability v1](#workspace-files-capability-v1) additions. A browser entry with a paired active provider uses `backend.request()` instead of constructing API routes — see [Calling paired workspace backends](#calling-paired-workspace-backends). The `prompt` helper supports panel interactions that insert workspace context into the current prompt — see [Prompt editor API](#prompt-editor-api). Use `terminal.open()` to switch to the built-in terminal panel; pass `{ terminalId }` to deep-link to a specific terminal.
+`machine`, `workspace`, `files`, optional `backend`, `prompt`, `terminal`, optional `navigation`, and `host` are documented as stable for panel callbacks. The base `files` methods are covered under [Reading workspace files](#reading-workspace-files), [Listing workspace files](#listing-workspace-files), and [Writing, deleting, and moving workspace files](#writing-deleting-and-moving-workspace-files); feature-detect the [workspace-files capability v1](#workspace-files-capability-v1) additions. A browser entry with a paired active server entry uses `backend.request()` instead of constructing API routes — see [Calling paired workspace backends](#calling-paired-workspace-backends). The `prompt` helper supports panel interactions that insert workspace context into the current prompt — see [Prompt editor API](#prompt-editor-api). Use `terminal.open()` to switch to the built-in terminal panel; pass `{ terminalId }` to deep-link to a specific terminal.
 
 `routeAliases` migrates former URL tool/view values. `navigationAliases` migrates former qualified query namespaces; use the scoped `navigation` helper for current deep-link state. `invalidationResources` opts a panel into automatic resource events. Implement `onInvalidate()` to refresh plugin-owned state, then call `host.requestRender()` when async changes should make PI WEB re-evaluate `badge`, `visible`, or `render`.
 
@@ -1108,7 +1151,12 @@ interface WorkspaceLabelContext {
   state?: PluginRuntimeState;
   files: WorkspaceFilesContextValue;
   backend?: {
-    request(operation: string, input: JsonValue): Promise<JsonValue>;
+    readonly capabilityVersion?: 1;
+    request(
+      operation: string,
+      input: JsonValue,
+      options?: { readonly signal?: AbortSignal },
+    ): Promise<JsonValue>;
   };
   host: {
     requestRender(): void;
@@ -1116,7 +1164,7 @@ interface WorkspaceLabelContext {
 }
 ```
 
-`machine`, `workspace`, `files`, optional `backend`, and `host` are documented as stable for label callbacks. The `files` helper includes the compatible base operations plus the feature-detected [workspace-files capability v1](#workspace-files-capability-v1) additions. A browser entry with a paired active provider can call `backend.request()` from a label-owned async cache after checking that the optional helper is present. Include `machine.id` in caches that depend on workspace data. Call `host.requestRender()` when async plugin-owned state changes should make PI WEB re-evaluate label `visible` or `items` callbacks.
+`machine`, `workspace`, `files`, optional `backend`, and `host` are documented as stable for label callbacks. The `files` helper includes the compatible base operations plus the feature-detected [workspace-files capability v1](#workspace-files-capability-v1) additions. A browser entry with a paired active server entry can call `backend.request()` from a label-owned async cache after checking that the optional helper is present. Include `machine.id` in caches that depend on workspace data. Call `host.requestRender()` when async plugin-owned state changes should make PI WEB re-evaluate label `visible` or `items` callbacks.
 
 Items are sorted by `order` and then id. Return an empty array to render nothing. Keep callbacks synchronous and lightweight; start async work from the callback, return cached items, then call `host.requestRender()` when the cache changes.
 
@@ -1178,20 +1226,23 @@ export default {
 
 ## Calling paired workspace backends
 
-Workspace panel and label contexts include an optional JSON-only backend helper. It is present only for a browser entry paired with an active server backend:
+Workspace panel and label contexts include an optional JSON-only backend helper. It is present only for a browser entry paired with an active server backend. Feature-detect the direct paired-request contract with `capabilityVersion`:
 
 ```js
-if (context.backend === undefined) throw new Error("Workspace backend unavailable");
+if (context.backend?.capabilityVersion !== 1) {
+  throw new Error("Direct paired backend unavailable");
+}
+const controller = new AbortController();
 const result = await context.backend.request("summary", {
   includeIgnored: false,
-});
+}, { signal: controller.signal });
 ```
 
-PI WEB binds the request to the browser module's original package id and active backend revision, plus the callback's selected machine, project, and workspace. The host resolves the current workspace owner again before dispatch. The call succeeds only when that same active plugin still owns the workspace and implements `WorkspaceProvider.request()`.
+PI WEB binds the request to the browser module's original package id and active backend revision, plus the callback's selected machine, project, and workspace. A version-1 direct backend can serve any current host-resolved workspace without becoming its provider. For compatibility, an active server entry without `capabilityVersion: 1` still uses the legacy path: the same plugin must currently own the workspace and implement `WorkspaceProvider.request()`.
 
-Operation ids must match `^[a-z][a-z0-9.-]*$` and be at most 128 characters. Inputs and results must contain only finite JSON values; functions, classes, `undefined`, cycles, and non-finite numbers are rejected. Requests, responses, owner resolution, and provider callbacks are size- and time-bounded.
+Operation ids must match `^[a-z][a-z0-9.-]*$` and be at most 128 characters. Inputs and results must contain only finite JSON values; functions, classes, `undefined`, cycles, and non-finite numbers are rejected. Requests, responses, workspace resolution, and callbacks are size- and time-bounded. Passing an `AbortSignal` cancels the local/sessiond/federated operation cooperatively.
 
-The same helper works locally and through machine federation. It preserves machine scoping and active frontend/backend revision pairing, so browser plugins must not construct `/api/plugin-backends/...` or `/api/machines/...` URLs themselves. Missing/inactive backends, stale revisions/workspaces, ownership changes/conflicts, unsupported operations, invalid JSON, failures, and timeouts reject the promise with an attributed error.
+The same helper works locally and through machine federation. It preserves machine scoping and active frontend/backend revision pairing, so browser plugins must not construct `/api/plugin-backends/...` or `/api/machines/...` URLs themselves. Missing/inactive backends, stale revisions/workspaces, resolution or legacy ownership conflicts, unsupported operations, cancellation, invalid JSON, failures, and timeouts reject the promise with an attributed error.
 
 ## Reading workspace files
 
@@ -1432,10 +1483,10 @@ If you are an AI agent building or editing a PI WEB plugin, follow this checklis
 5. In a browser entry, use source `pluginId` for ownership and `runtimePluginId` for qualified contribution references; return contributions synchronously and use the activation context's `html`/`svg` tags.
 6. Add actions for command-palette operations, panels for larger workspace UI, and labels for compact inline metadata.
 7. Return arrays synchronously from workspace label `items()`; return an empty array to render nothing.
-8. Use documented browser helpers first: `files`, `terminal`, `backend`, `host.requestRender`, `workspace`, `machine`, `state`, and `prompt`. Feature-detect versioned `files` and `navigation` helpers, and never construct PI WEB backend, file-preview, federation, or absolute plugin-asset URLs.
-9. In a server entry, return only the demonstrated lifecycle callbacks and at most one `workspaceProvider`; treat every supplied `AbortSignal` as operation-scoped and forward it to bounded work.
+8. Use documented browser helpers first: `files`, `terminal`, `backend`, `host.requestRender`, `workspace`, `machine`, `state`, and `prompt`. Feature-detect versioned `files`, direct `backend`, and `navigation` helpers, and never construct PI WEB backend, file-preview, federation, or absolute plugin-asset URLs.
+9. In a server entry, return only the demonstrated lifecycle callbacks, at most one `workspaceProvider`, and at most one version-1 `pairedBackend`; treat every supplied `AbortSignal` as operation-scoped and forward it to bounded work.
 10. Make provider claims conservative. Return exactly one main workspace, stable keys, absolute accessible directories, JSON data/metadata, and optional request/removal capabilities.
-11. Keep backend operations JSON-only, bounded, and provider-owned. Put no secrets in `publicMetadata`, browser responses, removal wording, or diagnostics.
+11. Keep backend operations JSON-only and bounded. Provider requests remain owner-scoped; direct paired requests may use any host-resolved workspace. Put no secrets in `publicMetadata`, browser responses, removal wording, or diagnostics.
 12. Keep the installed package at or below 4,096 entries and 16 MiB. Use a narrow, self-contained `browserRoot` that includes every emitted runtime dependency, style, chunk, and asset without private PI WEB imports.
 13. Treat both entries as trusted code. A server module shares sessiond's process and user permissions.
 14. For browser-only edits, reload or hard-reload the page. For a server-backed edit, restart sessiond and then reload the page.

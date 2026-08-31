@@ -8,6 +8,7 @@ export interface PluginManifestEntry {
   id: string;
   module: string;
   backendRevision?: string;
+  backendCapabilityVersion?: 1;
   machineSpecific: boolean;
 }
 
@@ -49,6 +50,7 @@ export async function loadExternalPlugins(manifestUrl = "pi-web-plugins/manifest
         plugin,
         machineSpecific: entry.machineSpecific,
         ...(entry.backendRevision === undefined ? {} : { backendRevision: entry.backendRevision }),
+        ...(entry.backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion: entry.backendCapabilityVersion }),
         ...(options.machineId === undefined ? {} : { machineId: options.machineId, sourcePluginId: entry.id }),
       });
     } catch (error) {
@@ -81,10 +83,14 @@ function parseManifest(value: unknown): PluginManifest {
     const id = entry["id"];
     if (!isPiWebPluginId(id)) throw new Error(`Invalid plugin manifest id: ${id}`);
     if (isReservedPiWebPluginId(id)) throw new Error(`Reserved plugin manifest id: ${id}`);
+    const backendRevision = parseBackendRevision(entry["backendRevision"]);
+    const backendCapabilityVersion = parseBackendCapabilityVersion(entry["backendCapabilityVersion"]);
+    if (backendCapabilityVersion !== undefined && backendRevision === undefined) throw new Error("Invalid plugin manifest entry");
     return {
       id,
       module: entry["module"],
-      ...(parseBackendRevision(entry["backendRevision"])),
+      ...(backendRevision === undefined ? {} : { backendRevision }),
+      ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
       machineSpecific: parseMachineSpecific(entry["machineSpecific"]),
     };
   });
@@ -114,13 +120,19 @@ async function pluginManifestResponseError(response: Response): Promise<string> 
   return `Failed to load plugin manifest (${status})${detail === undefined ? "" : `: ${detail}`}`;
 }
 
-function parseBackendRevision(value: unknown): { backendRevision?: string } {
-  if (value === undefined) return {};
+function parseBackendRevision(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
   try {
-    return { backendRevision: requirePluginBackendRevision(value) };
+    return requirePluginBackendRevision(value);
   } catch {
     throw new Error("Invalid plugin manifest entry");
   }
+}
+
+function parseBackendCapabilityVersion(value: unknown): 1 | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 1) throw new Error("Invalid plugin manifest entry");
+  return value;
 }
 
 function parseMachineSpecific(value: unknown): boolean {

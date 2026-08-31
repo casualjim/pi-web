@@ -256,6 +256,7 @@ function parseRuntimeRecord(value: unknown, index: number): ServerPluginRuntimeR
   const name = optionalString(value, "name", label);
   const message = optionalString(value, "message", label);
   const browserRevision = optionalString(value, "browserRevision", label);
+  const backendCapabilityVersion = parseBackendCapabilityVersion(value["backendCapabilityVersion"], label);
   return Object.freeze({
     pluginId: requirePluginId(value, "pluginId", label),
     source: requireString(value, "source", label),
@@ -264,11 +265,18 @@ function parseRuntimeRecord(value: unknown, index: number): ServerPluginRuntimeR
     ...(browserRevision === undefined ? {} : { browserRevision }),
     settingsRevision: requireString(value, "settingsRevision", label),
     machineSpecific: requireBoolean(value, "machineSpecific", label),
+    ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
     state,
     ...(name === undefined ? {} : { name }),
     ...(phase === undefined ? {} : { phase }),
     ...(message === undefined ? {} : { message }),
   });
+}
+
+function parseBackendCapabilityVersion(value: unknown, label: string): 1 | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 1) throw protocolError(`${label} backendCapabilityVersion is invalid`);
+  return value;
 }
 
 function parseCatalogDiagnostic(value: unknown, index: number): PiWebPluginCatalogDiagnostic {

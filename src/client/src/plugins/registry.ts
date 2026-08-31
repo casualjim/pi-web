@@ -44,6 +44,11 @@ export class PluginRegistry {
     this.validatePluginId(sourcePluginId);
     const machineSpecific = this.parseMachineSpecific(runtimePluginId, registration.machineSpecific);
     const backendRevision = this.parseBackendRevision(runtimePluginId, registration.backendRevision);
+    const backendCapabilityVersion = this.parseBackendCapabilityVersion(
+      runtimePluginId,
+      registration.backendCapabilityVersion,
+      backendRevision,
+    );
     if (this.pluginIds.has(runtimePluginId) || this.registeringPluginIds.has(runtimePluginId)) throw new Error(`Duplicate plugin id: ${runtimePluginId}`);
     if (this.isRemoteDuplicateHiddenByGateway(registration.sourcePluginId, registration.machineId, machineSpecific)) return;
 
@@ -60,8 +65,8 @@ export class PluginRegistry {
       })).contributions;
       const contributionIds = new Set<QualifiedContributionId>();
       const actions = (contributions.actions ?? []).map((action) => this.qualifyAction(runtimePluginId, action, registration.machineId, registration.sourcePluginId, contributionIds));
-      const workspacePanels = (contributions.workspacePanels ?? []).map((panel) => this.qualifyWorkspacePanel(runtimePluginId, panel, registration.machineId, registration.sourcePluginId, backendRevision, contributionIds));
-      const workspaceLabels = (contributions.workspaceLabels ?? []).map((contribution) => this.qualifyWorkspaceLabelContribution(runtimePluginId, contribution, registration.machineId, registration.sourcePluginId, backendRevision, contributionIds));
+      const workspacePanels = (contributions.workspacePanels ?? []).map((panel) => this.qualifyWorkspacePanel(runtimePluginId, panel, registration.machineId, registration.sourcePluginId, backendRevision, backendCapabilityVersion, contributionIds));
+      const workspaceLabels = (contributions.workspaceLabels ?? []).map((contribution) => this.qualifyWorkspaceLabelContribution(runtimePluginId, contribution, registration.machineId, registration.sourcePluginId, backendRevision, backendCapabilityVersion, contributionIds));
       const themes = registration.machineId === undefined
         ? (contributions.themes ?? []).map((theme) => this.qualifyTheme(runtimePluginId, theme, contributionIds))
         : [];
@@ -209,13 +214,14 @@ export class PluginRegistry {
     machineId: string | undefined,
     sourcePluginId: string | undefined,
     backendRevision: string | undefined,
+    backendCapabilityVersion: 1 | undefined,
     contributionIds: Set<QualifiedContributionId>,
   ): QualifiedWorkspacePanelContribution {
     const id = this.qualify(pluginId, panel.id, contributionIds);
     const badge = panel.badge;
     const visible = panel.visible;
     const onInvalidate = panel.onInvalidate;
-    const binding = workspacePluginBinding(pluginId, sourcePluginId, backendRevision);
+    const binding = workspacePluginBinding(pluginId, sourcePluginId, backendRevision, backendCapabilityVersion);
     const sourceId = `${sourcePluginId ?? pluginId}:${panel.id}`;
     const routeAliases = this.parseRouteAliases(id, panel.routeAliases, sourceId);
     const navigationAliases = this.parseNavigationAliases(id, panel.navigationAliases, sourceId);
@@ -248,12 +254,13 @@ export class PluginRegistry {
     machineId: string | undefined,
     sourcePluginId: string | undefined,
     backendRevision: string | undefined,
+    backendCapabilityVersion: 1 | undefined,
     contributionIds: Set<QualifiedContributionId>,
   ): QualifiedWorkspaceLabelContribution {
     const id = this.qualify(pluginId, contribution.id, contributionIds);
     const visible = contribution.visible;
     const items = contribution.items;
-    const binding = workspacePluginBinding(pluginId, sourcePluginId, backendRevision);
+    const binding = workspacePluginBinding(pluginId, sourcePluginId, backendRevision, backendCapabilityVersion);
     return {
       ...contribution,
       id,
@@ -372,6 +379,18 @@ export class PluginRegistry {
     }
   }
 
+  private parseBackendCapabilityVersion(
+    pluginId: string,
+    value: unknown,
+    backendRevision: string | undefined,
+  ): 1 | undefined {
+    if (value === undefined) return undefined;
+    if (value !== 1 || backendRevision === undefined) {
+      throw new Error(`Invalid plugin backend capability version for ${pluginId}`);
+    }
+    return value;
+  }
+
   private parseMachineSpecific(pluginId: string, value: unknown): boolean {
     if (value === undefined) return false;
     if (typeof value !== "boolean") throw new Error(`Invalid plugin machineSpecific value for ${pluginId}: ${formatUnknownValue(value)}`);
@@ -421,11 +440,13 @@ function workspacePluginBinding(
   registrationPluginId: string,
   sourcePluginId: string | undefined,
   backendRevision: string | undefined,
+  backendCapabilityVersion: 1 | undefined,
 ): WorkspacePluginBinding {
   return Object.freeze({
     registrationPluginId,
     sourcePluginId: sourcePluginId ?? registrationPluginId,
     ...(backendRevision === undefined ? {} : { backendRevision }),
+    ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
   });
 }
 

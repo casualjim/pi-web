@@ -55,6 +55,7 @@ export const FEDERATED_HTTP_ROUTES = [
     timeoutMs: PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS,
     bodyLimit: PLUGIN_BACKEND_REQUEST_BODY_MAX_BYTES,
     responseBodyLimit: PLUGIN_BACKEND_RESPONSE_BODY_MAX_BYTES,
+    propagateCancellation: true,
   },
   {
     method: "DELETE",

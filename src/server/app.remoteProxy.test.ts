@@ -122,7 +122,7 @@ describe("buildApp remote machine proxy routes", () => {
     expect(request).toHaveBeenCalledWith("POST", "/api/sessions/s1/tree/fork", forkBody, { timeoutMs: SESSION_TREE_FORK_PROXY_TIMEOUT_MS });
   });
 
-  it("proxies only the allowlisted workspace provider backend shape with its bounded deadline", async () => {
+  it("proxies only the allowlisted paired backend shape with its bounded cancellable deadline", async () => {
     const addResponse = await appTestContext.app.inject({ method: "POST", url: "/api/machines", payload: { name: "Remote", baseUrl: "https://remote.example.test/" } });
     const remote = addResponse.json<{ id: string }>();
     const request = vi.fn<MachineClient["request"]>((method, path, body) => Promise.resolve({
@@ -145,12 +145,14 @@ describe("buildApp remote machine proxy routes", () => {
       path: "/api/plugin-backends/board-tools/projects/p%201/workspaces/w%201/cards.summary",
       body: payload,
     });
-    expect(request).toHaveBeenCalledWith(
+    expect(request.mock.calls[0]?.slice(0, 3)).toEqual([
       "POST",
       "/api/plugin-backends/board-tools/projects/p%201/workspaces/w%201/cards.summary",
       payload,
-      { timeoutMs: PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS },
-    );
+    ]);
+    expect(request.mock.calls[0]?.[3]?.timeoutMs).toBe(PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS);
+    expect(request.mock.calls[0]?.[3]?.signal).toBeInstanceOf(AbortSignal);
+    expect(request.mock.calls[0]?.[3]?.signal?.aborted).toBe(false);
   });
 
   it("maps an old remote provider-backend route to an explicit lifecycle compatibility error", async () => {

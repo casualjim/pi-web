@@ -37,6 +37,8 @@ export interface PiWebPluginManifestEntry {
   module: string;
   /** Active compatible server revision from sessiond's immutable startup snapshot. */
   backendRevision?: string;
+  /** Versioned direct paired-request capability exposed as `context.backend.capabilityVersion`. */
+  backendCapabilityVersion?: 1;
   source: string;
   scope: PiWebPluginScope;
   machineSpecific: boolean;
@@ -81,13 +83,14 @@ export class PiWebPluginService {
   async manifest(): Promise<PiWebPluginManifest> {
     const lifecycle = await this.lifecycle();
     const plugins: PiWebPluginManifestEntry[] = [];
-    for (const { plugin, backendRevision } of lifecycle.browserPlugins) {
+    for (const { plugin, backendRevision, backendCapabilityVersion } of lifecycle.browserPlugins) {
       const artifact = await this.captureBrowserArtifact(plugin, backendRevision);
       if (artifact === undefined) continue;
       plugins.push({
         id: plugin.id,
         module: browserModuleUrl(plugin),
         ...(backendRevision === undefined ? {} : { backendRevision }),
+        ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
         source: plugin.source,
         scope: plugin.scope,
         machineSpecific: plugin.machineSpecific,

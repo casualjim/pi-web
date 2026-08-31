@@ -9,6 +9,9 @@ import type {
   PluginActivationResult,
   PluginContributions,
   Workspace,
+  WorkspaceBackend,
+  WorkspaceBackendRequestOptions,
+  WorkspaceBackendV1,
   WorkspaceFiles,
   WorkspaceFilesCapabilityV1,
   WorkspaceFilesContextValue,
@@ -39,6 +42,10 @@ type ReadonlyKeys<Value> = {
 
 type WritableKeys<Value> = Exclude<keyof Value, ReadonlyKeys<Value>>;
 type IsOptional<Value, Key extends keyof Value> = Pick<Value, Key> extends Required<Pick<Value, Key>> ? false : true;
+
+interface ExistingV2WorkspaceBackend {
+  request(operation: string, input: import("@jmfederico/pi-web/plugin-api").JsonValue): Promise<import("@jmfederico/pi-web/plugin-api").JsonValue>;
+}
 
 interface ExistingV2WorkspaceFiles {
   readFile(path: string): Promise<FileContentResponse>;
@@ -92,6 +99,14 @@ describe("public browser plugin API", () => {
       .toEqualTypeOf<WorkspaceFilesCapabilityV1>();
     expectTypeOf<WorkspaceFilesCapabilityV1["capabilityVersion"]>().toEqualTypeOf<1>();
     expectTypeOf<ReadonlyKeys<Pick<WorkspaceFilesCapabilityV1, "capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">>>().toEqualTypeOf<"capabilityVersion" | "defaultUploadFolder" | "maxInlinePreviewBytes">();
+  });
+
+  it("adds cancellable direct paired backend feature detection without breaking v2 request implementations", () => {
+    expectTypeOf<ExistingV2WorkspaceBackend>().toExtend<WorkspaceBackend>();
+    expectTypeOf<WorkspaceBackendV1>().toExtend<WorkspaceBackend>();
+    expectTypeOf<WorkspaceBackendV1["capabilityVersion"]>().toEqualTypeOf<1>();
+    expectTypeOf<ReadonlyKeys<WorkspaceBackendV1>>().toEqualTypeOf<"capabilityVersion">();
+    expectTypeOf<ReadonlyKeys<WorkspaceBackendRequestOptions>>().toEqualTypeOf<"signal">();
   });
 
   it("adds optional versioned panel navigation without changing browser API v2 compatibility", () => {

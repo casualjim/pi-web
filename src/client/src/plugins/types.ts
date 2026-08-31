@@ -15,6 +15,7 @@ export interface PiWebPluginRegistration {
   machineId?: string;
   sourcePluginId?: PluginId;
   backendRevision?: string;
+  backendCapabilityVersion?: 1;
   machineSpecific?: boolean;
 }
 
@@ -22,6 +23,7 @@ export interface WorkspacePluginBinding {
   registrationPluginId: PluginId;
   sourcePluginId: PluginId;
   backendRevision?: string;
+  backendCapabilityVersion?: 1;
 }
 
 export interface PiWebPlugin {
@@ -111,8 +113,13 @@ export interface WorkspaceFilesCapabilityV1 extends WorkspaceFiles {
 
 export type WorkspaceFilesContextValue = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
 
+export interface WorkspaceBackendRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface WorkspaceBackend {
-  request(operation: string, input: JsonValue): Promise<JsonValue>;
+  readonly capabilityVersion?: 1;
+  request(operation: string, input: JsonValue, options?: WorkspaceBackendRequestOptions): Promise<JsonValue>;
 }
 
 export interface WorkspaceHost {

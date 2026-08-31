@@ -168,9 +168,19 @@ export interface WorkspaceFilesCapabilityV1 extends WorkspaceFiles {
 /** Host context value used to feature-detect versioned workspace-file additions. */
 export type WorkspaceFilesContextValue = LegacyWorkspaceFiles | WorkspaceFilesCapabilityV1;
 export type WorkspacePanelFiles = WorkspaceFiles;
-/** JSON-only request path to the server module that currently owns this workspace. */
+export interface WorkspaceBackendRequestOptions {
+    /** Cancels this bounded request through local or federated host transport. */
+    readonly signal?: AbortSignal;
+}
+/** JSON-only request path to this browser package's active server entry. */
 export interface WorkspaceBackend {
-    request(operation: string, input: JsonValue): Promise<JsonValue>;
+    /** Present as `1` only for a direct paired backend; absent on legacy owner-backed helpers. */
+    readonly capabilityVersion?: 1;
+    request(operation: string, input: JsonValue, options?: WorkspaceBackendRequestOptions): Promise<JsonValue>;
+}
+/** Feature-detected direct paired backend, independent of workspace ownership. */
+export interface WorkspaceBackendV1 extends WorkspaceBackend {
+    readonly capabilityVersion: 1;
 }
 export interface WorkspaceHost {
     requestRender(): void;

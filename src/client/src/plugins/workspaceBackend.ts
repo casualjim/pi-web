@@ -1,11 +1,16 @@
 import type { JsonValue, Workspace } from "../api";
-import { requestPluginBackend, type PluginBackendRequestTarget } from "../api/pluginBackends";
-import type { WorkspaceBackend, WorkspacePluginBinding } from "./types";
+import {
+  requestPluginBackend,
+  type PluginBackendRequestOptions,
+  type PluginBackendRequestTarget,
+} from "../api/pluginBackends";
+import type { WorkspaceBackend, WorkspaceBackendRequestOptions, WorkspacePluginBinding } from "./types";
 
 export type PluginBackendRequester = (
   target: PluginBackendRequestTarget,
   operation: string,
   input: JsonValue,
+  options?: PluginBackendRequestOptions,
 ) => Promise<JsonValue>;
 
 export function createPluginWorkspaceBackend(
@@ -17,12 +22,13 @@ export function createPluginWorkspaceBackend(
   const backendRevision = binding.backendRevision;
   if (backendRevision === undefined) return undefined;
   return {
-    request: (operation, input) => request({
+    ...(binding.backendCapabilityVersion === undefined ? {} : { capabilityVersion: binding.backendCapabilityVersion }),
+    request: (operation, input, options?: WorkspaceBackendRequestOptions) => request({
       pluginId: binding.sourcePluginId,
       backendRevision,
       machineId,
       projectId: workspace.projectId,
       workspaceId: workspace.id,
-    }, operation, input),
+    }, operation, input, options),
   };
 }

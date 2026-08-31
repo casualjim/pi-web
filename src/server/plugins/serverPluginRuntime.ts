@@ -2,6 +2,8 @@ import { pathToFileURL } from "node:url";
 import type {
   JsonObject,
   JsonValue,
+  PairedPluginBackendV1,
+  PairedPluginRequestContext,
   PiWebServerPlugin,
   ProjectInput,
   ProviderRemoveContext,
@@ -35,6 +37,8 @@ export interface ServerPluginRuntimeRecord {
   browserRevision?: string;
   settingsRevision: string;
   machineSpecific: boolean;
+  /** Additive browser feature detection for a direct paired request backend. */
+  backendCapabilityVersion?: 1;
   state: ServerPluginRuntimeState;
   name?: string;
   phase?: ServerPluginLifecyclePhase;
@@ -49,6 +53,16 @@ export interface ServerPluginProviderContribution {
   scope: PiWebPluginScope;
   moduleRevision: string;
   provider: WorkspaceProvider;
+}
+
+export interface ServerPluginPairedBackendContribution {
+  pluginId: string;
+  pluginName: string;
+  packageRoot: string;
+  source: string;
+  scope: PiWebPluginScope;
+  moduleRevision: string;
+  backend: PairedPluginBackendV1;
 }
 
 export interface ServerPluginHealthInspection {
@@ -81,7 +95,8 @@ interface ActiveServerPlugin {
   entry: PiWebPluginCatalogEntry;
   plugin: PiWebServerPlugin;
   activation: ServerPluginActivation;
-  contribution?: ServerPluginProviderContribution;
+  providerContribution?: ServerPluginProviderContribution;
+  pairedBackendContribution?: ServerPluginPairedBackendContribution;
 }
 
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000;
@@ -151,7 +166,11 @@ export class ServerPluginRuntime {
   }
 
   providerContributions(): readonly ServerPluginProviderContribution[] {
-    return Object.freeze(this.activePlugins.flatMap((active) => active.contribution === undefined ? [] : [active.contribution]));
+    return Object.freeze(this.activePlugins.flatMap((active) => active.providerContribution === undefined ? [] : [active.providerContribution]));
+  }
+
+  pairedBackendContributions(): readonly ServerPluginPairedBackendContribution[] {
+    return Object.freeze(this.activePlugins.flatMap((active) => active.pairedBackendContribution === undefined ? [] : [active.pairedBackendContribution]));
   }
 
   async inspectHealth(): Promise<readonly ServerPluginHealthInspection[]> {
@@ -206,6 +225,7 @@ export class ServerPluginRuntime {
           name: active.plugin.name,
           phase: "stop",
           message: errorMessage(error),
+          ...(active.activation.pairedBackend === undefined ? {} : { backendCapabilityVersion: 1 }),
         }));
         this.logger.error({ err: error, pluginId: active.entry.id, phase: "stop" }, "server plugin stop failed");
       }
@@ -258,7 +278,7 @@ export class ServerPluginRuntime {
         await runBounded(entry.id, phase, this.lifecycleTimeoutMs, (signal) => start(signal));
       }
 
-      const contribution = loadedActivation.workspaceProvider === undefined
+      const providerContribution = loadedActivation.workspaceProvider === undefined
         ? undefined
         : Object.freeze({
             pluginId: entry.id,
@@ -269,13 +289,29 @@ export class ServerPluginRuntime {
             moduleRevision: requireServerModule(entry).revision,
             provider: loadedActivation.workspaceProvider,
           });
+      const pairedBackendContribution = loadedActivation.pairedBackend === undefined
+        ? undefined
+        : Object.freeze({
+            pluginId: entry.id,
+            pluginName: loadedPlugin.name,
+            packageRoot: entry.packageRoot,
+            source: entry.source,
+            scope: entry.scope,
+            moduleRevision: requireServerModule(entry).revision,
+            backend: loadedActivation.pairedBackend,
+          });
       this.activePlugins.push(Object.freeze({
         entry,
         plugin: loadedPlugin,
         activation: loadedActivation,
-        ...(contribution === undefined ? {} : { contribution }),
+        ...(providerContribution === undefined ? {} : { providerContribution }),
+        ...(pairedBackendContribution === undefined ? {} : { pairedBackendContribution }),
       }));
-      this.recordsById.set(entry.id, recordFor(entry, { state: "active", name: loadedPlugin.name }));
+      this.recordsById.set(entry.id, recordFor(entry, {
+        state: "active",
+        name: loadedPlugin.name,
+        ...(pairedBackendContribution === undefined ? {} : { backendCapabilityVersion: 1 }),
+      }));
       this.logger.info({ pluginId: entry.id, pluginName: loadedPlugin.name }, "server plugin activated");
     } catch (error) {
       const rollbackError = phase === "start" && activation?.stop !== undefined
@@ -321,7 +357,7 @@ function disabledReason(entry: PiWebPluginCatalogEntry, safeStart: ServerPluginS
 
 function recordFor(
   entry: PiWebPluginCatalogEntry,
-  status: Pick<ServerPluginRuntimeRecord, "state"> & Partial<Pick<ServerPluginRuntimeRecord, "name" | "phase" | "message">>,
+  status: Pick<ServerPluginRuntimeRecord, "state"> & Partial<Pick<ServerPluginRuntimeRecord, "name" | "phase" | "message" | "backendCapabilityVersion">>,
 ): ServerPluginRuntimeRecord {
   return Object.freeze({
     pluginId: entry.id,
@@ -331,6 +367,7 @@ function recordFor(
     ...(entry.browserModule === undefined ? {} : { browserRevision: entry.browserModule.revision }),
     settingsRevision: entry.settingsRevision,
     machineSpecific: entry.machineSpecific,
+    ...(status.backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion: status.backendCapabilityVersion }),
     state: status.state,
     ...(status.name === undefined ? {} : { name: status.name }),
     ...(status.phase === undefined ? {} : { phase: status.phase }),
@@ -392,8 +429,10 @@ function parseActivation(value: unknown): ServerPluginActivation {
     throw new IncompatibleServerPluginError("Server plugins may contribute only one workspaceProvider");
   }
   const workspaceProviderValue = value["workspaceProvider"];
+  const pairedBackendValue = value["pairedBackend"];
   const candidate = {
     workspaceProvider: workspaceProviderValue === undefined ? undefined : snapshotWorkspaceProvider(workspaceProviderValue),
+    pairedBackend: pairedBackendValue === undefined ? undefined : snapshotPairedPluginBackend(pairedBackendValue),
     start: value["start"],
     stop: value["stop"],
     health: value["health"],
@@ -410,6 +449,7 @@ function parseActivation(value: unknown): ServerPluginActivation {
   const health = candidate.health?.bind(value);
   return Object.freeze({
     ...(candidate.workspaceProvider === undefined ? {} : { workspaceProvider: candidate.workspaceProvider }),
+    ...(candidate.pairedBackend === undefined ? {} : { pairedBackend: candidate.pairedBackend }),
     ...(start === undefined ? {} : { start: (signal: AbortSignal) => start(signal) }),
     ...(stop === undefined ? {} : { stop: (signal: AbortSignal) => stop(signal) }),
     ...(health === undefined ? {} : { health: (signal: AbortSignal) => health(signal) }),
@@ -419,13 +459,30 @@ function parseActivation(value: unknown): ServerPluginActivation {
 function isServerPluginActivation(value: unknown): value is ServerPluginActivation {
   if (!isRecord(value)) return false;
   const workspaceProvider = value["workspaceProvider"];
+  const pairedBackend = value["pairedBackend"];
   const start = value["start"];
   const stop = value["stop"];
   const health = value["health"];
   return (workspaceProvider === undefined || isWorkspaceProvider(workspaceProvider))
+    && (pairedBackend === undefined || isPairedPluginBackend(pairedBackend))
     && (start === undefined || typeof start === "function")
     && (stop === undefined || typeof stop === "function")
     && (health === undefined || typeof health === "function");
+}
+
+function snapshotPairedPluginBackend(value: unknown): PairedPluginBackendV1 {
+  if (!isPairedPluginBackend(value)) {
+    throw new IncompatibleServerPluginError("Server plugin pairedBackend must be a version 1 request backend");
+  }
+  const request = value.request.bind(value);
+  return Object.freeze({
+    version: 1,
+    request: (context: PairedPluginRequestContext) => request(context),
+  });
+}
+
+function isPairedPluginBackend(value: unknown): value is PairedPluginBackendV1 {
+  return isRecord(value) && value["version"] === 1 && typeof value["request"] === "function";
 }
 
 function snapshotWorkspaceProvider(value: unknown): WorkspaceProvider {

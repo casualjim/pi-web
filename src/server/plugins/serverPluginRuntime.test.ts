@@ -18,6 +18,7 @@ describe("server plugin runtime", () => {
     const modules = new Map<string, unknown>([
       ["alpha", pluginModule("Alpha", {
         workspaceProvider: provider,
+        pairedBackend: { version: 1, request: () => ({ ready: true }) },
         start: () => { events.push("start:alpha"); },
         stop: () => { events.push("stop:alpha"); },
       })],
@@ -60,7 +61,7 @@ describe("server plugin runtime", () => {
     expect(imported).toEqual(["alpha", "bad-activate", "bad-api", "bad-import", "bad-start", "omega"]);
     expect(events).toEqual(["start:alpha", "start:bad-start", "rollback:bad-start", "start:omega"]);
     expect(runtime.healthRecords()).toEqual([
-      expect.objectContaining({ pluginId: "alpha", state: "active", name: "Alpha", browserRevision: "browser-7", settingsRevision: "settings-1", machineSpecific: true }),
+      expect.objectContaining({ pluginId: "alpha", state: "active", name: "Alpha", browserRevision: "browser-7", settingsRevision: "settings-1", machineSpecific: true, backendCapabilityVersion: 1 }),
       expect.objectContaining({ pluginId: "bad-activate", state: "failed", phase: "activate", message: "activate exploded" }),
       expect.objectContaining({ pluginId: "bad-api", state: "incompatible", phase: "validate", message: "Unsupported server plugin API version: 2" }),
       expect.objectContaining({ pluginId: "bad-import", state: "failed", phase: "import", message: "import exploded" }),
@@ -68,6 +69,7 @@ describe("server plugin runtime", () => {
       expect.objectContaining({ pluginId: "omega", state: "active", name: "Omega" }),
     ]);
     expect(runtime.providerContributions().map((contribution) => contribution.pluginId)).toEqual(["alpha", "omega"]);
+    expect(runtime.pairedBackendContributions().map((contribution) => contribution.pluginId)).toEqual(["alpha"]);
 
     await runtime.stop();
     await runtime.stop();
@@ -81,6 +83,7 @@ describe("server plugin runtime", () => {
       "stop:alpha",
     ]);
     expect(runtime.providerContributions()).toEqual([]);
+    expect(runtime.pairedBackendContributions()).toEqual([]);
   });
 
   it("freezes activation inputs and scopes lifecycle signals to individual invocations", async () => {
@@ -283,8 +286,14 @@ describe("server plugin runtime", () => {
 
   it("publishes validated snapshots rather than mutable activation properties", async () => {
     const provider = testProvider();
-    const mutableActivation: Record<string, unknown> = { workspaceProvider: provider };
-    mutableActivation["start"] = () => { mutableActivation["workspaceProvider"] = {}; };
+    const mutableActivation: Record<string, unknown> = {
+      workspaceProvider: provider,
+      pairedBackend: { version: 1, request: () => ({ captured: true }) },
+    };
+    mutableActivation["start"] = () => {
+      mutableActivation["workspaceProvider"] = {};
+      mutableActivation["pairedBackend"] = {};
+    };
     const throwingActivation: Record<string, unknown> = {};
     Object.defineProperty(throwingActivation, "stop", {
       enumerable: true,
@@ -308,6 +317,15 @@ describe("server plugin runtime", () => {
     });
 
     expect(runtime.providerContributions().map((contribution) => contribution.pluginId)).toEqual(["mutable"]);
+    expect(runtime.pairedBackendContributions().map((contribution) => contribution.pluginId)).toEqual(["mutable"]);
+    expect(Object.isFrozen(runtime.pairedBackendContributions()[0]?.backend)).toBe(true);
+    await expect(Promise.resolve(runtime.pairedBackendContributions()[0]?.backend.request({
+      project: { id: "p", name: "P", path: "/p" },
+      workspace: { id: "w", projectId: "p", path: "/p", label: "P", isMain: true },
+      operation: "status",
+      input: null,
+      signal: new AbortController().signal,
+    }))).resolves.toEqual({ captured: true });
     await expect(runtime.providerContributions()[0]?.provider.probe(
       { id: "p", name: "P", path: "/p" },
       new AbortController().signal,
@@ -319,17 +337,21 @@ describe("server plugin runtime", () => {
     ]);
   });
 
-  it("rejects plural provider contributions and non-JSON settings before publication", async () => {
+  it("rejects plural providers, malformed paired backends, and non-JSON settings before publication", async () => {
     const pluralActivation = { workspaceProviders: [testProvider()] };
     const circular: Record<string, unknown> = {};
     circular["self"] = circular;
     const importer: ServerPluginModuleImporter = (url) => {
       const pluginId = pluginIdFromUrl(url);
-      return Promise.resolve(pluginModule("Plural", pluginId === "plural" ? pluralActivation : {}));
+      const activation = pluginId === "plural"
+        ? pluralActivation
+        : pluginId === "invalid-backend" ? { pairedBackend: { version: 2, request: () => null } } : {};
+      return Promise.resolve(pluginModule("Plural", activation));
     };
     const runtime = await createServerPluginRuntime({
       catalog: { snapshot: () => Promise.resolve(testSnapshot([
         entry("plural"),
+        entry("invalid-backend"),
         entry("invalid-settings", { settings: circular }),
       ])) },
       importer,
@@ -339,11 +361,13 @@ describe("server plugin runtime", () => {
     expect(runtime.providerContributions()).toEqual([]);
     const records = runtime.healthRecords();
     expect(records.map((record) => [record.pluginId, record.state, record.phase])).toEqual([
+      ["invalid-backend", "incompatible", "validate"],
       ["invalid-settings", "incompatible", "validate"],
       ["plural", "incompatible", "validate"],
     ]);
-    expect(records[0]?.message).toContain("must not contain cycles");
-    expect(records[1]?.message).toBe("Server plugins may contribute only one workspaceProvider");
+    expect(records[0]?.message).toContain("pairedBackend must be a version 1 request backend");
+    expect(records[1]?.message).toContain("must not contain cycles");
+    expect(records[2]?.message).toBe("Server plugins may contribute only one workspaceProvider");
   });
 });
 

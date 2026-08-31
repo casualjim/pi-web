@@ -114,13 +114,14 @@ describe("federated route contract", () => {
     }
   });
 
-  it("allowlists exactly one bounded workspace provider backend route", () => {
+  it("allowlists exactly one bounded cancellable paired backend route", () => {
     expect(FEDERATED_HTTP_ROUTES.filter((route) => route.path.includes("plugin-backends"))).toEqual([{
       method: "POST",
       path: "/plugin-backends/:pluginId/projects/:projectId/workspaces/:workspaceId/:operation",
       timeoutMs: PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS,
       bodyLimit: PLUGIN_BACKEND_REQUEST_BODY_MAX_BYTES,
       responseBodyLimit: PLUGIN_BACKEND_RESPONSE_BODY_MAX_BYTES,
+      propagateCancellation: true,
     }]);
     expect(FEDERATED_WEBSOCKET_ROUTES.some((path) => path.includes("plugin-backends"))).toBe(false);
   });

@@ -22,17 +22,31 @@ describe("plugin workspace backend", () => {
       registrationPluginId: "machine.remote.changes.owner",
       sourcePluginId: "changes.owner",
       backendRevision: "remote-r2",
+      backendCapabilityVersion: 1,
     }, workspace, "remote one", request);
     if (backend === undefined) throw new Error("Expected a paired workspace backend");
 
-    await expect(backend.request("status", null)).resolves.toEqual({ files: [] });
+    const controller = new AbortController();
+    expect(backend).toMatchObject({ capabilityVersion: 1 });
+    await expect(backend.request("status", null, { signal: controller.signal })).resolves.toEqual({ files: [] });
     expect(request).toHaveBeenCalledWith({
       pluginId: "changes.owner",
       backendRevision: "remote-r2",
       machineId: "remote one",
       projectId: "project one",
       workspaceId: "workspace one",
-    }, "status", null);
+    }, "status", null, { signal: controller.signal });
+  });
+
+  it("keeps legacy owner-backed helpers compatible without direct capability metadata", () => {
+    const backend = createPluginWorkspaceBackend({
+      registrationPluginId: "changes.owner",
+      sourcePluginId: "changes.owner",
+      backendRevision: "remote-r2",
+    }, workspace, "remote-1", () => Promise.resolve(null));
+
+    expect(backend).toBeDefined();
+    expect(backend).not.toHaveProperty("capabilityVersion");
   });
 
   it("omits the optional backend when the browser module has no paired server revision", () => {

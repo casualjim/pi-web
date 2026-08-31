@@ -1,6 +1,18 @@
-import type { JsonObject, JsonPrimitive, JsonValue, WorkspaceRemovalPresentation } from "./shared/pluginApiTypes.js";
+import type {
+  JsonObject,
+  JsonPrimitive,
+  JsonValue,
+  WorkspaceProviderMetadata,
+  WorkspaceRemovalPresentation,
+} from "./shared/pluginApiTypes.js";
 
-export type { JsonObject, JsonPrimitive, JsonValue, WorkspaceRemovalPresentation };
+export type {
+  JsonObject,
+  JsonPrimitive,
+  JsonValue,
+  WorkspaceProviderMetadata,
+  WorkspaceRemovalPresentation,
+};
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -66,6 +78,8 @@ export interface ServerPluginExecFileResult {
  */
 export interface ServerPluginActivation {
   workspaceProvider?: WorkspaceProvider;
+  /** Serve bounded requests from this package's paired browser entry. */
+  pairedBackend?: PairedPluginBackendV1;
   /** Initialize resources within one host-bounded start invocation. */
   start?(signal: AbortSignal): MaybePromise<void>;
   /** Release resources within one host-bounded stop invocation. */
@@ -78,6 +92,35 @@ export interface ServerPluginHealth {
   status: "healthy" | "degraded" | "unhealthy";
   message?: string;
   details?: JsonObject;
+}
+
+/** JSON request capability for this package's matching browser entry. */
+export interface PairedPluginBackendV1 {
+  readonly version: 1;
+  request(context: PairedPluginRequestContext): MaybePromise<JsonValue>;
+}
+
+/** Host-resolved, browser-visible workspace projection without provider-private data. */
+export interface PairedPluginWorkspace {
+  readonly id: string;
+  readonly projectId: string;
+  readonly path: string;
+  readonly label: string;
+  readonly isMain: boolean;
+  readonly provider?: WorkspaceProviderMetadata;
+}
+
+/**
+ * Every value is host-derived, cloned, and frozen. The signal belongs only to
+ * this callback and is aborted when the request times out, is cancelled, or
+ * settles.
+ */
+export interface PairedPluginRequestContext {
+  readonly project: ProjectInput;
+  readonly workspace: PairedPluginWorkspace;
+  readonly operation: string;
+  readonly input: JsonValue;
+  readonly signal: AbortSignal;
 }
 
 /**

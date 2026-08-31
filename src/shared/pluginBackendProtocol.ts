@@ -10,9 +10,9 @@ export const PLUGIN_BACKEND_REQUEST_BODY_MAX_BYTES = PLUGIN_BACKEND_JSON_MAX_BYT
 export const PLUGIN_BACKEND_RESPONSE_BODY_MAX_BYTES = PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES + 4 * 1024;
 /** Bounded provider callback deadline inside sessiond. */
 export const PLUGIN_BACKEND_REQUEST_TIMEOUT_MS = 10_000;
-/** End-to-end sessiond deadline, including owner re-resolution and validation. */
+/** End-to-end sessiond deadline, including workspace re-resolution and validation. */
 export const PLUGIN_BACKEND_DISPATCH_TIMEOUT_MS = 25_000;
-/** Remote gateway deadline, including workspace owner re-resolution. */
+/** Remote gateway deadline, including authoritative workspace re-resolution. */
 export const PLUGIN_BACKEND_FEDERATION_TIMEOUT_MS = 30_000;
 export const PLUGIN_BACKEND_OPERATION_MAX_LENGTH = 128;
 export const PLUGIN_BACKEND_REVISION_MAX_LENGTH = 512;

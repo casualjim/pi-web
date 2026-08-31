@@ -112,7 +112,7 @@ describe("buildApp PI WEB plugin routes", () => {
     const requestJson = vi.fn(() => Promise.resolve({
       statusCode: 200,
       headers: { "content-type": "application/json" },
-      body: { lifecycleVersion: 1, plugins: [{ id: "remote-tools", module: "/pi-web-plugins/remote-tools/pi-web-plugin.js?v=123", backendRevision: "server-r7", source: "local", scope: "local", machineSpecific: true }] },
+      body: { lifecycleVersion: 1, plugins: [{ id: "remote-tools", module: "/pi-web-plugins/remote-tools/pi-web-plugin.js?v=123", backendRevision: "server-r7", backendCapabilityVersion: 1, source: "local", scope: "local", machineSpecific: true }] },
     }));
     const request = vi.fn(() => Promise.resolve({
       statusCode: 200,
@@ -127,7 +127,7 @@ describe("buildApp PI WEB plugin routes", () => {
     expect(manifestResponse.statusCode).toBe(200);
     expect(manifestResponse.json()).toEqual({
       lifecycleVersion: 1,
-      plugins: [{ id: "remote-tools", module: rewrittenModule, backendRevision: "server-r7", source: "local", scope: "local", machineSpecific: true }],
+      plugins: [{ id: "remote-tools", module: rewrittenModule, backendRevision: "server-r7", backendCapabilityVersion: 1, source: "local", scope: "local", machineSpecific: true }],
     });
     expect(new URL(rewrittenModule, `https://gateway.example.test/api/machines/${remote.id}/pi-web-plugins/manifest.json`).toString())
       .toBe(`https://gateway.example.test/pi-web-plugins/${scopedPluginId}/pi-web-plugin.js?v=123`);

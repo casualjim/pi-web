@@ -10,6 +10,7 @@ interface RemotePluginManifestEntry {
   id: string;
   module: string;
   backendRevision?: string;
+  backendCapabilityVersion?: 1;
   source?: string;
   scope?: string;
   machineSpecific?: boolean;
@@ -167,10 +168,16 @@ function parseRemoteManifest(value: unknown): RemotePluginManifest {
     if (!isRecord(entry) || typeof entry["id"] !== "string" || !isPiWebPluginId(entry["id"]) || typeof entry["module"] !== "string" || entry["module"] === "") {
       throw new Error("Invalid remote PI WEB plugin manifest entry");
     }
+    const backendRevision = parseRemoteBackendRevision(entry["backendRevision"]);
+    const backendCapabilityVersion = parseRemoteBackendCapabilityVersion(entry["backendCapabilityVersion"]);
+    if (backendCapabilityVersion !== undefined && backendRevision === undefined) {
+      throw new Error("Invalid remote PI WEB plugin manifest entry");
+    }
     return {
       id: entry["id"],
       module: entry["module"],
-      ...(parseRemoteBackendRevision(entry["backendRevision"])),
+      ...(backendRevision === undefined ? {} : { backendRevision }),
+      ...(backendCapabilityVersion === undefined ? {} : { backendCapabilityVersion }),
       ...(typeof entry["source"] === "string" ? { source: entry["source"] } : {}),
       ...(typeof entry["scope"] === "string" ? { scope: entry["scope"] } : {}),
       ...(parseRemoteMachineSpecific(entry["machineSpecific"])),
@@ -198,13 +205,19 @@ class RemotePluginLifecycleCompatibilityError extends Error {
   override name = "RemotePluginLifecycleCompatibilityError";
 }
 
-function parseRemoteBackendRevision(value: unknown): { backendRevision?: string } {
-  if (value === undefined) return {};
+function parseRemoteBackendRevision(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
   try {
-    return { backendRevision: requirePluginBackendRevision(value) };
+    return requirePluginBackendRevision(value);
   } catch {
     throw new Error("Invalid remote PI WEB plugin manifest entry");
   }
+}
+
+function parseRemoteBackendCapabilityVersion(value: unknown): 1 | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 1) throw new Error("Invalid remote PI WEB plugin manifest entry");
+  return value;
 }
 
 function parseRemoteMachineSpecific(value: unknown): { machineSpecific?: boolean } {

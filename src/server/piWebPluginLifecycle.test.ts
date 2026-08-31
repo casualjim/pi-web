@@ -22,7 +22,7 @@ describe("PI WEB plugin desired/active lifecycle reconciliation", () => {
       entry("missing", { browser: "browser-1", server: "server-1" }),
     ]);
     const records = [
-      record("active-dual", "active"),
+      record("active-dual", "active", { backendCapabilityVersion: 1 }),
       record("became-browser-only", "active"),
       record("desired-off-active", "active"),
       record("stale-server", "active", { moduleRevision: "server-1", browserRevision: "browser-2" }),
@@ -49,7 +49,10 @@ describe("PI WEB plugin desired/active lifecycle reconciliation", () => {
     const reconciled = reconcilePiWebPluginLifecycle(desired, { status: "available", snapshot: runtime }, moduleUrl);
 
     expect(reconciled.browserPlugins.map(({ plugin }) => plugin.id)).toEqual(["active-dual", "browser-on", "desired-off-active"]);
-    expect(reconciled.browserPlugins.find(({ plugin }) => plugin.id === "active-dual")?.backendRevision).toBe("server-1");
+    expect(reconciled.browserPlugins.find(({ plugin }) => plugin.id === "active-dual")).toMatchObject({
+      backendRevision: "server-1",
+      backendCapabilityVersion: 1,
+    });
     expect(plugin(reconciled, "active-dual").server?.health).toEqual({ status: "healthy" });
     expect(plugin(reconciled, "became-browser-only")).toMatchObject({
       server: { state: "active", staleRevision: true, restartRequired: true },

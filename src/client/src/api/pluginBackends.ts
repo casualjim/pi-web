@@ -20,6 +20,10 @@ export interface PluginBackendRequestTarget {
   workspaceId: string;
 }
 
+export interface PluginBackendRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
 export function pluginBackendRequestPath(
   target: Pick<PluginBackendRequestTarget, "pluginId" | "machineId" | "projectId" | "workspaceId">,
   operation: string,
@@ -48,6 +52,7 @@ export async function requestPluginBackend(
   target: PluginBackendRequestTarget,
   operation: string,
   input: JsonValue,
+  options: PluginBackendRequestOptions = {},
 ): Promise<JsonValue> {
   const revision = requirePluginBackendRevision(target.backendRevision);
   const clonedInput = cloneBoundedPluginBackendJson(input, "Plugin backend request input");
@@ -62,8 +67,10 @@ export async function requestPluginBackend(
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
   } catch (error) {
+    if (options.signal?.aborted === true) throw abortError(options.signal);
     throw new Error(`Plugin backend request unavailable: ${errorMessage(error)}`, { cause: error });
   }
 
@@ -118,6 +125,11 @@ function pluginBackendErrorMessage(text: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new DOMException("Plugin backend request cancelled", "AbortError");
 }
 
 function errorMessage(error: unknown): string {

@@ -2,6 +2,9 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type {
   JsonObject,
+  PairedPluginBackendV1,
+  PairedPluginRequestContext,
+  PairedPluginWorkspace,
   PiWebServerPlugin,
   ProjectInput,
   ProviderRemoveContext,
@@ -43,7 +46,7 @@ type ReadonlyKeys<Value> = {
 type WritableKeys<Value> = Exclude<keyof Value, ReadonlyKeys<Value>>;
 
 describe("public server plugin API", () => {
-  it("supports one lifecycle-owned workspace provider with JSON request and removal capabilities", async () => {
+  it("supports lifecycle-owned workspace providers and direct paired JSON requests", async () => {
     const observedSignals: AbortSignal[] = [];
     const provider: WorkspaceProvider = {
       fallback: false,
@@ -77,6 +80,13 @@ describe("public server plugin API", () => {
       name: "Neutral contract fixture",
       activate: () => ({
         workspaceProvider: provider,
+        pairedBackend: {
+          version: 1,
+          request: (context) => {
+            observedSignals.push(context.signal);
+            return { operation: context.operation, workspaceId: context.workspace.id };
+          },
+        },
         start: (signal) => { observedSignals.push(signal); },
         stop: (signal) => { observedSignals.push(signal); },
         health: (signal) => {
@@ -104,7 +114,7 @@ describe("public server plugin API", () => {
 
     await exerciseActivation(activation, project, signal);
 
-    expect(observedSignals).toHaveLength(7);
+    expect(observedSignals).toHaveLength(8);
     expect(observedSignals.every((observed) => observed === signal)).toBe(true);
   });
 
@@ -115,6 +125,10 @@ describe("public server plugin API", () => {
     expectTypeOf<keyof WorkspaceProvider>().toEqualTypeOf<
       "fallback" | "probe" | "list" | "request" | "prepareRemove"
     >();
+    expectTypeOf<keyof PairedPluginBackendV1>().toEqualTypeOf<"version" | "request">();
+    expectTypeOf<keyof PairedPluginRequestContext>().toEqualTypeOf<
+      "project" | "workspace" | "operation" | "input" | "signal"
+    >();
     expectTypeOf<keyof ServerPluginExecFileRequest>().toEqualTypeOf<
       "file" | "args" | "cwd" | "env" | "unsetEnv" | "timeoutMs" | "signal"
     >();
@@ -123,6 +137,8 @@ describe("public server plugin API", () => {
     expectTypeOf<ReadonlyKeys<ProjectInput>>().toEqualTypeOf<keyof ProjectInput>();
     expectTypeOf<ReadonlyKeys<ProviderRequestContext>>().toEqualTypeOf<keyof ProviderRequestContext>();
     expectTypeOf<ReadonlyKeys<ProviderRemoveContext>>().toEqualTypeOf<keyof ProviderRemoveContext>();
+    expectTypeOf<ReadonlyKeys<PairedPluginRequestContext>>().toEqualTypeOf<keyof PairedPluginRequestContext>();
+    expectTypeOf<ReadonlyKeys<PairedPluginWorkspace>>().toEqualTypeOf<keyof PairedPluginWorkspace>();
     expectTypeOf<ReadonlyKeys<ProviderRequestContext["workspace"]>>().toEqualTypeOf<keyof ProviderWorkspace>();
     expectTypeOf<ReadonlyKeys<WorkspaceRemovalPresentation>>().toEqualTypeOf<keyof WorkspaceRemovalPresentation>();
     expectTypeOf<keyof WorkspaceRemovalPresentation>().toEqualTypeOf<"actionLabel" | "confirmation">();
@@ -148,6 +164,23 @@ async function exerciseActivation(activation: ServerPluginActivation, input: Pro
   const request: ProviderRequestContext = { project: input, workspace, operation: "status", input: { paths: [] }, signal };
   await provider.request?.(request);
   await provider.prepareRemove?.({ project: input, workspace, signal });
+  await activation.pairedBackend?.request({
+    project: input,
+    workspace: {
+      id: "workspace-1",
+      projectId: input.id,
+      path: workspace.path,
+      label: workspace.label,
+      isMain: workspace.isMain,
+      provider: {
+        pluginId: "neutral-fixture",
+        capabilities: { request: true, remove: false },
+      },
+    },
+    operation: "status",
+    input: null,
+    signal,
+  });
   await activation.health?.(signal);
   await activation.stop?.(signal);
 }

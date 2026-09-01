@@ -229,6 +229,7 @@ export function openPluginBackendChannel(
       }
     });
     socket.addEventListener("error", () => {
+      channelError ??= Object.freeze({ code: "transport-error", message: "Plugin backend channel transport failed" });
       if (!ready) reject(new Error("Plugin backend channel unavailable"));
       closeBrowserSocket(socket, "Channel transport error");
     });

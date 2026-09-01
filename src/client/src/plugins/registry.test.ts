@@ -21,12 +21,6 @@ function createContext(statePatch: Partial<AppState> = {}) {
       getSelection: vi.fn(() => null),
     },
     piWebUnstable: {
-      terminalCommandRuns: {
-        runCommand: vi.fn(),
-        listCommandRuns: vi.fn(),
-        getCommandRun: vi.fn(),
-        open: vi.fn((options?: { terminalId?: string | undefined }) => { calls.push(`terminal.open:${options?.terminalId ?? ""}`); }),
-      },
       openSettings: vi.fn(() => { calls.push("openSettings"); }),
     },
     openActionPalette: vi.fn(() => { calls.push("openActionPalette"); }),
@@ -64,7 +58,7 @@ describe("PluginRegistry", () => {
     registry.register({ id: "core", plugin: corePlugin });
 
     expect(registry.getActions(createContext().context).some((action) => action.id === "core:actions.show")).toBe(true);
-    expect(registry.getWorkspacePanels().map((panel) => panel.id)).toEqual(["core:workspace.terminal"]);
+    expect(registry.getWorkspacePanels()).toEqual([]);
     expect(registry.resolveWorkspacePanelRouteId("files", "local")).toBeUndefined();
     expect(registry.resolveWorkspacePanelRouteId("core:workspace.files", "local")).toBeUndefined();
   });
@@ -422,7 +416,7 @@ describe("PluginRegistry", () => {
     expect(registry.getWorkspacePanels()).toEqual([]);
   });
 
-  it("evaluates core action enablement against runtime state", () => {
+  it("evaluates core workspace action enablement against runtime state", () => {
     const registry = new PluginRegistry();
     registry.register({ id: "core", plugin: corePlugin });
 
@@ -430,9 +424,7 @@ describe("PluginRegistry", () => {
     const active = registry.getActions(createContext({ selectedWorkspace: testWorkspace() }).context);
 
     expect(inactive.find((action) => action.id === "core:view.files")).toBeUndefined();
-    expect(inactive.find((action) => action.id === "core:view.terminal")?.enabled).toBe(false);
     expect(active.find((action) => action.id === "core:view.files")).toBeUndefined();
-    expect(active.find((action) => action.id === "core:view.terminal")?.enabled).toBe(true);
     expect(active.find((action) => action.id === "core:workspace.delete")?.enabled).toBe(false);
 
     const deletable = registry.getActions(createContext({ selectedWorkspace: testWorkspace({
@@ -603,18 +595,6 @@ describe("PluginRegistry", () => {
     expect(calls).toEqual(["reloadPage", "openSettings"]);
   });
 
-  it("exposes terminal navigation as a shortcut-backed action", () => {
-    const registry = new PluginRegistry();
-    registry.register({ id: "core", plugin: corePlugin });
-    const { context, calls } = createContext({ selectedWorkspace: testWorkspace() });
-    const action = registry.getActions(context).find((candidate) => candidate.id === "core:view.terminal");
-
-    expect(action?.shortcut).toBe("mod+4");
-    if (action !== undefined) void action.run();
-
-    expect(calls).toEqual(["selectMainView:core:workspace.terminal"]);
-  });
-
   it("keeps built-in keyboard shortcuts unique and action-backed", () => {
     const registry = new PluginRegistry();
     registry.register({ id: "core", plugin: corePlugin });
@@ -627,7 +607,6 @@ describe("PluginRegistry", () => {
       ["core:prompt.focus", "mod+g c"],
       ["core:settings.open", "mod+,"],
       ["core:view.chat", "mod+1"],
-      ["core:view.terminal", "mod+4"],
       ["core:session.start", "mod+enter"],
       ["core:session.stop", "mod+."],
     ]);
@@ -1078,10 +1057,6 @@ function createWorkspacePanelContext(machineId: string, prompt: WorkspacePanelCo
     prompt,
     terminal: { open: vi.fn(), runCommand: vi.fn() },
     host: { requestRender: vi.fn() },
-    activeTerminalCount: 0,
-    selectedTerminalId: undefined,
-    terminalAutoStart: false,
-    onSelectTerminal: vi.fn(),
   };
 }
 

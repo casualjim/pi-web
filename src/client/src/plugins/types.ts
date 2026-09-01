@@ -1,6 +1,6 @@
 import type { TemplateResult } from "lit";
 import type { AppAction } from "../actions";
-import type { DeleteWorkspaceFileResponse, FileContentResponse, FileTreeResponse, JsonValue, Machine, MoveWorkspaceFileOptions, MoveWorkspaceFileResponse, RunTerminalCommandInput, TerminalCommandRun, TerminalCommandRunFilter, TerminalCommandRunHandle, WriteWorkspaceFileOptions, WriteWorkspaceFileResponse, Workspace } from "../api";
+import type { DeleteWorkspaceFileResponse, FileContentResponse, FileTreeResponse, JsonValue, Machine, MoveWorkspaceFileOptions, MoveWorkspaceFileResponse, TerminalCommandRunHandle, WriteWorkspaceFileOptions, WriteWorkspaceFileResponse, Workspace } from "../api";
 import type { AppState } from "../appState";
 import type { SettingsSection } from "../settingsRoute";
 import type { LocalContributionId, PluginId, QualifiedContributionId } from "./ids";
@@ -157,7 +157,12 @@ export interface WorkspaceContext {
   host: WorkspaceHost;
 }
 
-export type WorkspaceTerminalCommandInput = Omit<RunTerminalCommandInput, "workspace">;
+export interface WorkspaceTerminalCommandInput {
+  title: string;
+  command: string;
+  metadata?: Record<string, string>;
+  open?: boolean;
+}
 
 export interface WorkspacePanelTerminal {
   open(options?: { terminalId?: string | undefined }): void;
@@ -165,15 +170,7 @@ export interface WorkspacePanelTerminal {
 }
 
 export interface PiWebUnstableRuntimeContext {
-  terminalCommandRuns: TerminalCommandRunsInternalRuntime;
   openSettings?: (section?: SettingsSection) => void;
-}
-
-export interface TerminalCommandRunsInternalRuntime {
-  runCommand(input: RunTerminalCommandInput): Promise<TerminalCommandRunHandle>;
-  listCommandRuns(filter?: TerminalCommandRunFilter): Promise<TerminalCommandRun[]>;
-  getCommandRun(runId: string): Promise<TerminalCommandRun | undefined>;
-  open(options?: { terminalId?: string | undefined }): void;
 }
 
 export interface PluginPromptEditor {
@@ -250,16 +247,6 @@ export interface WorkspacePanelContext extends WorkspaceContext {
   terminal: WorkspacePanelTerminal;
   /** Contribution-scoped address-bar state for deep links and browser history. */
   navigation?: WorkspacePanelNavigationV1;
-  /**
-   * @deprecated Runtime-only compatibility alias for pre-v2 plugins. Use `terminal.open()` instead.
-   * This is intentionally not part of the public `@jmfederico/pi-web/plugin-api` declarations.
-   */
-  openTerminal?: (options?: { terminalId?: string | undefined }) => void;
-  piWebUnstable?: Pick<PiWebUnstableRuntimeContext, "terminalCommandRuns">;
-  activeTerminalCount: number;
-  selectedTerminalId: string | undefined;
-  terminalAutoStart: boolean;
-  onSelectTerminal: (terminalId: string | undefined, options?: { replace?: boolean | undefined }) => void;
 }
 
 export type WorkspacePanelIcon = TemplateResult;

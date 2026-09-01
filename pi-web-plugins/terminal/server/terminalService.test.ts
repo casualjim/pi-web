@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { interactiveShellArgs, TerminalService, type TerminalActivityEvent, type TerminalActivitySink, type TerminalInfo, type TerminalWorkspaceScope } from "./terminalService";
+import { interactiveShellArgs, TerminalService, type TerminalActivitySink, type TerminalInfo, type TerminalWorkspaceScope } from "./terminalService";
 
 describe("interactive shell arguments", () => {
   it.each([
@@ -99,7 +99,9 @@ describe.skipIf(process.platform === "win32")("TerminalService command runs", ()
         await terminalExit(service, run.terminalId);
 
         service.continue(scope(), run.terminalId);
+        const shellReady = firstLiveTerminalOutput(service, run.terminalId);
         const exit = terminalExit(service, run.terminalId);
+        await shellReady;
         service.write(scope(), run.terminalId, `${LOGIN_PROFILE_COMMAND}\nexit\n`);
 
         expect(await exit).toContain(LOGIN_PROFILE_OUTPUT);
@@ -164,7 +166,9 @@ describe.skipIf(process.platform === "win32")("TerminalService command runs", ()
         expect(service.get(scope(), run.terminalId)?.commandRunId).toBeUndefined();
 
         const frame = "__PI_WEB_CONTINUE_ENV_42D8B1__";
+        const shellReady = firstLiveTerminalOutput(service, run.terminalId);
         const exit = terminalExit(service, run.terminalId);
+        await shellReady;
         service.write(scope(), run.terminalId, `printf '${frame}%s${frame}\\n' "$PI_WEB_TERMINAL"\nexit\n`);
 
         const output = await exit;
@@ -224,7 +228,7 @@ describe.skipIf(process.platform === "win32")("TerminalService command runs", ()
     }
   });
 
-  it("publishes terminal lifecycle events and workspace activity updates", async () => {
+  it("publishes workspace activity updates across the terminal lifecycle", async () => {
     const workspaceActivity = createWorkspaceActivityRecorder();
     const service = new TerminalService();
     service.bindActivitySink(workspaceActivity);
@@ -238,31 +242,20 @@ describe.skipIf(process.platform === "win32")("TerminalService command runs", ()
         title: "Lifecycle command",
         command: "true",
       });
-      const runningTerminal = requireTerminal(service, run.terminalId);
-
+      expect(requireTerminal(service, run.terminalId).exited).toBe(false);
       expect(workspaceActivity.updated).toEqual([{ id: run.terminalId, cwd, exited: false }]);
-      expect(workspaceActivity.events).toEqual([{ type: "terminal.created", terminal: runningTerminal }]);
 
       await terminalExit(service, run.terminalId);
-      const exitedTerminal = requireTerminal(service, run.terminalId);
+      expect(requireTerminal(service, run.terminalId).exited).toBe(true);
 
       expect(workspaceActivity.updated).toEqual([
         { id: run.terminalId, cwd, exited: false },
         { id: run.terminalId, cwd, exited: true },
       ]);
-      expect(workspaceActivity.events).toEqual([
-        { type: "terminal.created", terminal: runningTerminal },
-        { type: "terminal.exited", terminal: exitedTerminal },
-      ]);
 
       service.close(scope(), run.terminalId);
 
       expect(workspaceActivity.removed).toEqual([{ terminalId: run.terminalId, cwd }]);
-      expect(workspaceActivity.events).toEqual([
-        { type: "terminal.created", terminal: runningTerminal },
-        { type: "terminal.exited", terminal: exitedTerminal },
-        { type: "terminal.closed", terminalId: run.terminalId, cwd },
-      ]);
     } finally {
       service.dispose();
     }
@@ -270,7 +263,6 @@ describe.skipIf(process.platform === "win32")("TerminalService command runs", ()
 });
 
 interface WorkspaceActivityRecorder extends TerminalActivitySink {
-  readonly events: TerminalActivityEvent[];
   readonly updated: TerminalActivityUpdate[];
   readonly removed: TerminalActivityRemoval[];
 }
@@ -285,18 +277,15 @@ interface TerminalActivityRemoval {
 function createWorkspaceActivityRecorder(): WorkspaceActivityRecorder {
   const updated: TerminalActivityUpdate[] = [];
   const removed: TerminalActivityRemoval[] = [];
-  const events: TerminalActivityEvent[] = [];
   return {
     updated,
     removed,
-    events,
     updateTerminal: (terminal) => {
       updated.push({ id: terminal.id, cwd: terminal.cwd, exited: terminal.exited });
     },
     removeTerminal: (terminalId, cwd) => {
       removed.push({ terminalId, cwd });
     },
-    publish: (event) => { events.push(event); },
   };
 }
 
@@ -334,6 +323,26 @@ async function withBashLoginProfile(run: () => Promise<void>): Promise<void> {
 function restoreEnv(key: "HOME" | "SHELL", value: string | undefined): void {
   if (value === undefined) Reflect.deleteProperty(process.env, key);
   else process.env[key] = value;
+}
+
+function firstLiveTerminalOutput(service: TerminalService, terminalId: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let detach = (): void => undefined;
+    const finish = (callback: () => void): void => {
+      detach();
+      callback();
+    };
+    try {
+      detach = service.attach(scope(), terminalId, {
+        output: (_data, replay) => {
+          if (!replay) finish(resolve);
+        },
+        exit: () => { finish(() => { reject(new Error("Continued terminal exited before its shell became ready")); }); },
+      });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 function terminalExit(service: TerminalService, terminalId: string): Promise<string> {

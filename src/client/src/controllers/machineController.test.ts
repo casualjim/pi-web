@@ -57,7 +57,6 @@ describe("MachineController", () => {
       selectedProject: project,
       selectedWorkspace: workspace,
       selectedSession: session,
-      activeTerminalCount: 2,
       error: "stale error",
     };
     const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
@@ -83,7 +82,6 @@ describe("MachineController", () => {
     expect(state.selectedProject).toBeUndefined();
     expect(state.selectedWorkspace).toBeUndefined();
     expect(state.selectedSession).toBeUndefined();
-    expect(state.activeTerminalCount).toBe(0);
     expect(state.error).toBe("");
     expect(projects.loadProjects).toHaveBeenCalledOnce();
     expect(updateUrl).toHaveBeenCalledOnce();

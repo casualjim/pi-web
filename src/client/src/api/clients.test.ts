@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PiWebConfigValues, TerminalCommandRun, Workspace } from "../../../shared/apiTypes";
-import { configApi, filesApi, machinesApi, piPackagesApi, piWebApi, pluginsApi, SessionTreeForkUnavailableError, sessionsApi, terminalsApi, workspacesApi } from "./clients";
+import { configApi, filesApi, machinesApi, piPackagesApi, piWebApi, pluginsApi, SessionTreeForkUnavailableError, sessionsApi, workspacesApi } from "./clients";
 
 const workspace: Workspace = {
   id: "w/1",
@@ -484,7 +484,7 @@ describe("machine-scoped workspace API", () => {
   });
 });
 
-describe("machine-scoped terminal command-run API", () => {
+describe("machine-scoped workspace removal API", () => {
   it("deletes workspaces through the selected machine scope with the confirmed host precondition", async () => {
     const fetchMock = stubJsonFetch(commandRun);
 
@@ -497,55 +497,6 @@ describe("machine-scoped terminal command-run API", () => {
     expect(init?.body).toBe(JSON.stringify({ precondition: "v1.confirmed" }));
   });
 
-  it("creates command runs through the selected machine scope", async () => {
-    const fetchMock = stubJsonFetch(commandRun);
-
-    await terminalsApi.runTerminalCommand("core", { workspace, title: "Build", command: "npm test", open: true }, "remote a");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/terminal-command-runs");
-    expect(init?.method).toBe("POST");
-    expect(JSON.parse(requestBody(init))).toEqual({ origin: "core", title: "Build", command: "npm test", metadata: {} });
-  });
-
-  it("closes all workspace terminals through the selected machine scope", async () => {
-    const fetchMock = stubJsonFetch({ closed: true });
-
-    await terminalsApi.closeWorkspaceTerminals("p 1", "w/1", "remote a");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/terminals");
-    expect(init?.method).toBe("DELETE");
-  });
-
-  it("lists, reads, and cancels command runs through the selected machine scope", async () => {
-    const fetchMock = stubSequenceFetch([
-      jsonResponse([commandRun]),
-      jsonResponse(commandRun),
-      jsonResponse(commandRun),
-    ]);
-
-    await terminalsApi.listCommandRuns({ projectId: "p 1", workspaceId: "w/1", statuses: ["running"], metadata: { "pi.operation": "workspace.delete" } }, "remote a");
-    await terminalsApi.getCommandRun("run 1", "remote a");
-    await terminalsApi.cancelCommandRun("run 1", "remote a");
-
-    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs?projectId=p+1&workspaceId=w%2F1&statuses=running&metadata=%7B%22pi.operation%22%3A%22workspace.delete%22%7D",
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs/run%201",
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs/run%201/cancel",
-    ]);
-    expect(fetchCall(fetchMock, 2)[1]?.method).toBe("POST");
-  });
-
-  it("returns undefined for missing command runs in the selected machine scope", async () => {
-    const fetchMock = stubResponseFetch(new Response("{}", { status: 404 }));
-
-    await expect(terminalsApi.getCommandRun("missing", "remote-a")).resolves.toBeUndefined();
-
-    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/remote-a/terminal-command-runs/missing");
-  });
 });
 
 describe("workspace file read API", () => {

@@ -414,7 +414,7 @@ describe("server plugin runtime", () => {
     });
     expect(recovery.healthRecords()).toEqual([]);
     expect(() => { recovery.requiredTerminalService().closeForCwd("/repo"); })
-      .toThrow("Terminal is unavailable while server-plugin safe start is set to none");
+      .toThrow("Required Terminal plugin is unavailable in recovery safe start");
     await recovery.stop();
   });
 
@@ -454,7 +454,8 @@ describe("server plugin runtime", () => {
       ["terminal", "active"],
       ["zeta", "active"],
     ]);
-    expect(runtime.requiredTerminalService().legacyRoutes).not.toBe(requiredService.legacyRoutes);
+    expect(runtime.requiredTerminalService()).not.toBe(requiredService);
+    expect(typeof runtime.requiredTerminalService().runCommand).toBe("function");
 
     await runtime.stop();
     expect(events).toEqual(["stop:zeta", "stop:terminal"]);
@@ -476,7 +477,7 @@ describe("server plugin runtime", () => {
         stop: stopped,
       })),
       logger: testLogger(),
-    })).rejects.toThrow("valid requiredTerminalService");
+    })).rejects.toThrow("did not provide its composition service");
     expect(stopped).toHaveBeenCalledOnce();
   });
 
@@ -552,26 +553,10 @@ function requiredTerminalServiceFixture() {
     createdAt: "2026-08-01T00:00:00.000Z",
     metadata: {},
   };
-  const legacyRoutes = {
-    list: () => [],
-    create: () => ({ id: "terminal-1", cwd: "/repo", name: "Shell", createdAt: run.createdAt, exited: false }),
-    closeForCwd: () => undefined,
-    closeAll: () => undefined,
-    close: () => undefined,
-    attach: () => () => undefined,
-    write: () => undefined,
-    resize: () => undefined,
-    continue: () => ({ id: "terminal-1", cwd: "/repo", name: "Shell", createdAt: run.createdAt, exited: false }),
-    runCommand: () => run,
-    listCommandRuns: () => [run],
-    getCommandRun: () => run,
-    cancelCommandRun: () => run,
-  };
   return {
     closeForCwd: () => undefined,
     runCommand: () => run,
     bindActivitySink: () => undefined,
-    legacyRoutes,
   };
 }
 

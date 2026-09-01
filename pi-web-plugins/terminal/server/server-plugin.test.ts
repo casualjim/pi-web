@@ -66,6 +66,11 @@ describe.skipIf(process.platform === "win32")("Terminal paired server entry", ()
     const channel = await openChannel(channelContext({ terminalId, cols: 120, rows: 40 }, sent, controller));
 
     await channel.receive({ type: "input", data: "printf '__TERMINAL_PAIRED_CHANNEL__\\n'\n" }, new AbortController().signal);
+    // Enter, Tab, and spaces are valid PTY input even though trimming would make
+    // some of those frames empty.
+    await channel.receive({ type: "input", data: "\r" }, new AbortController().signal);
+    expect(() => channel.receive({ type: "input", data: "" }, new AbortController().signal))
+      .toThrow("data must be a non-empty string");
     await channel.receive({ type: "resize", cols: 100.9, rows: 30.2 }, new AbortController().signal);
     await vi.waitFor(() => {
       expect(sent.some((frame) => jsonStringOrUndefined(frame, "type") === "output"
@@ -99,7 +104,9 @@ describe.skipIf(process.platform === "win32")("Terminal paired server entry", ()
     const activation = activateTerminalPlugin(activationContext("terminal"));
     expect(activation.pairedBackend?.version).toBe(1);
     expect(typeof activation.pairedBackend?.openChannel).toBe("function");
-    expect(activation.requiredTerminalService.legacyRoutes).toBeInstanceOf(TerminalService);
+    expect(typeof activation.requiredTerminalService.closeForCwd).toBe("function");
+    expect(typeof activation.requiredTerminalService.runCommand).toBe("function");
+    expect(typeof activation.requiredTerminalService.bindActivitySink).toBe("function");
     await activation.stop?.(new AbortController().signal);
 
     expect(() => activateTerminalPlugin(activationContext("other"))).toThrow("must activate as plugin id terminal");

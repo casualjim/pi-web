@@ -27,7 +27,6 @@ interface RequiredTerminalServiceContribution {
   closeForCwd(cwd: string): void;
   runCommand(options: RunTerminalCommandOptions): TerminalCommandRun;
   bindActivitySink(sink: TerminalActivitySink): void;
-  readonly legacyRoutes: TerminalService;
 }
 
 interface TerminalActivation extends ServerPluginActivation {
@@ -53,7 +52,6 @@ export function activateTerminalPlugin(context: ServerPluginActivationContext): 
     closeForCwd: (cwd: string) => { service.closeForCwd(cwd); },
     runCommand: (options: RunTerminalCommandOptions) => service.runCommand(options),
     bindActivitySink: (sink: TerminalActivitySink) => { service.bindActivitySink(sink); },
-    legacyRoutes: service,
   });
   let stopped = false;
   return Object.freeze({
@@ -185,7 +183,7 @@ function openTerminalChannel(
       const frame = requireObject(data, "terminal.attach frame");
       const type = requireString(frame, "type", "terminal.attach frame");
       if (type === "input") {
-        service.write(scope, terminalId, requireString(frame, "data", "terminal.attach input frame"));
+        service.write(scope, terminalId, requireTerminalInputData(frame));
         return;
       }
       if (type === "resize") {
@@ -313,6 +311,12 @@ function requireNullishInput(value: JsonValue, label: string): void {
 function requireString(record: JsonObject, key: string, label: string): string {
   const value = record[key];
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} ${key} must be a non-empty string`);
+  return value;
+}
+
+function requireTerminalInputData(record: JsonObject): string {
+  const value = record["data"];
+  if (typeof value !== "string" || value === "") throw new Error("terminal.attach input frame data must be a non-empty string");
   return value;
 }
 

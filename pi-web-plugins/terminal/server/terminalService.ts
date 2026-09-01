@@ -61,15 +61,9 @@ export interface RunTerminalCommandOptions extends TerminalWorkspaceScope {
   rows?: number;
 }
 
-export type TerminalActivityEvent =
-  | { type: "terminal.created"; terminal: TerminalInfo }
-  | { type: "terminal.exited"; terminal: TerminalInfo }
-  | { type: "terminal.closed"; terminalId: string; cwd: string };
-
 export interface TerminalActivitySink {
   updateTerminal(terminal: Pick<TerminalInfo, "id" | "cwd" | "exited">): void;
   removeTerminal(terminalId: string, cwd?: string): void;
-  publish(event: TerminalActivityEvent): void;
 }
 
 interface TerminalRecord extends TerminalInfo, TerminalWorkspaceScope {
@@ -247,7 +241,6 @@ export class TerminalService {
     this.attachPtyEvents(record);
     const info = toInfo(record);
     this.activitySink?.updateTerminal(info);
-    this.publish({ type: "terminal.created", terminal: info });
     return info;
   }
 
@@ -303,7 +296,6 @@ export class TerminalService {
     this.terminals.set(id, record);
     const info = toInfo(record);
     this.activitySink?.updateTerminal(info);
-    this.publish({ type: "terminal.created", terminal: info });
     return info;
   }
 
@@ -319,7 +311,6 @@ export class TerminalService {
       record.events.emit("exit", exitCode);
       const info = toInfo(record);
       this.activitySink?.updateTerminal(info);
-      this.publish({ type: "terminal.exited", terminal: info });
     });
   }
 
@@ -365,11 +356,6 @@ export class TerminalService {
     terminal.events.removeAllListeners();
     this.activitySink?.removeTerminal(terminal.id, terminal.cwd);
     if (!terminal.exited) terminal.pty.kill();
-    this.publish({ type: "terminal.closed", terminalId: terminal.id, cwd: terminal.cwd });
-  }
-
-  private publish(event: TerminalActivityEvent): void {
-    this.activitySink?.publish(event);
   }
 
   private requireAvailable(): void {

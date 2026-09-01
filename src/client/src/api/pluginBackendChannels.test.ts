@@ -93,6 +93,28 @@ describe("browser plugin backend channel helper", () => {
     expect(() => { channel.send(null); }).toThrow("not open");
   });
 
+  it("attributes a browser transport error even when socket teardown reports code 1000", async () => {
+    const socket = new FakeBrowserSocket();
+    const opened = openPluginBackendChannel(
+      { ...target, machineId: "local" },
+      "terminal.attach",
+      null,
+      { onData: () => undefined },
+      () => socket.asWebSocket(),
+    );
+    socket.open();
+    socket.message(serializePluginBackendChannelReadyEnvelope());
+    const channel = await opened;
+
+    socket.transportError();
+
+    await expect(channel.closed).resolves.toMatchObject({
+      code: 1000,
+      wasClean: true,
+      error: { code: "transport-error", message: "Plugin backend channel transport failed" },
+    });
+  });
+
   it("cancels an opening channel and rejects invalid outbound data before sending", async () => {
     const connected = nextConnection(server);
     const controller = new AbortController();
@@ -110,6 +132,44 @@ describe("browser plugin backend channel helper", () => {
     await expect(opened).rejects.toMatchObject({ name: "AbortError", message: "Panel disconnected" });
   });
 });
+
+class FakeBrowserSocket extends EventTarget {
+  readyState = 0;
+
+  asWebSocket(): WebSocket {
+    // Deliberately model only the browser methods exercised by the channel helper.
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- structural test double for a browser-only WebSocket boundary.
+    return this as unknown as WebSocket;
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.dispatchEvent(new Event("open"));
+  }
+
+  message(data: string): void {
+    const event = new Event("message");
+    Object.defineProperty(event, "data", { value: data });
+    this.dispatchEvent(event);
+  }
+
+  transportError(): void {
+    this.dispatchEvent(new Event("error"));
+  }
+
+  send(data: string): void { void data; }
+
+  close(code = 1000, reason = ""): void {
+    this.readyState = 3;
+    const event = new Event("close");
+    Object.defineProperties(event, {
+      code: { value: code },
+      reason: { value: reason },
+      wasClean: { value: true },
+    });
+    queueMicrotask(() => { this.dispatchEvent(event); });
+  }
+}
 
 function nextConnection(webSocketServer: WebSocketServer): Promise<NodeWebSocket> {
   return new Promise((resolve) => { webSocketServer.once("connection", resolve); });

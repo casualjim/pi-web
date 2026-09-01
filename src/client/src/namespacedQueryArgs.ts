@@ -18,16 +18,6 @@ export function queryNamespace(contributionId: string): string {
   return contributionId.replaceAll(":", ".");
 }
 
-export function readNamespacedQuery(namespace: string): Record<string, string | string[]> {
-  return readNamespacedQueryFromParams(new URLSearchParams(window.location.search), namespace);
-}
-
-export function readNamespacedString(namespace: string, key: string): string | undefined {
-  const value = readNamespacedQuery(namespace)[key];
-  if (Array.isArray(value)) return value[0];
-  return value === "" ? undefined : value;
-}
-
 /** Read one contribution's canonical query snapshot, falling back to aliases per key. */
 export function readContributionQuery(
   contributionId: QualifiedContributionId,
@@ -150,20 +140,6 @@ export function setContributionQueryKey(
   );
   replaceContributionQueryParams(url.searchParams, normalized);
   return commitUrl(url, options);
-}
-
-export function setNamespacedQueryKey(namespace: string, key: string, value: QueryValue | undefined | null, options?: { replace?: boolean | undefined }): void {
-  const url = new URL(window.location.href);
-  const namespacedKey = `${namespace}--${key}`;
-  url.searchParams.delete(namespacedKey);
-  if (value !== undefined && value !== null && value !== "") {
-    if (Array.isArray(value)) {
-      for (const item of value) url.searchParams.append(namespacedKey, String(item));
-    } else {
-      url.searchParams.set(namespacedKey, String(value));
-    }
-  }
-  commitUrl(url, options);
 }
 
 export function isContributionQueryParameter(value: string): boolean {

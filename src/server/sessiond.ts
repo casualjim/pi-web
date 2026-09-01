@@ -26,7 +26,6 @@ import {
   WorkspaceProviderRegistry,
 } from "./workspaces/workspaceProviderRegistry.js";
 import { sessiondSocketPath } from "../sessiond/config.js";
-import { registerTerminalRoutes } from "./terminals/terminalRoutes.js";
 import { getPiWebRuntimeComponent } from "./piWebStatus.js";
 import { SESSIOND_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
 import { agentSessionDirEnvOverride, effectivePiWebConfig, maxUploadBytes, offlineModeEnabled, PI_CODING_AGENT_DIR_ENV, PI_CODING_AGENT_SESSION_DIR_ENV } from "../config.js";
@@ -298,7 +297,6 @@ async function createSessionDaemonRuntime() {
     terminals.bindActivitySink({
       updateTerminal: (terminal) => { workspaceActivity.updateTerminal(terminal); },
       removeTerminal: (terminalId, cwd) => { workspaceActivity.removeTerminal(terminalId, cwd); },
-      publish: (event) => { eventHub.publishRealtime(event); },
     });
     const workspaceRemovals = new WorkspaceRemovalService(workspaceProviders, terminals);
     const runtimeComponent = Object.freeze({
@@ -332,7 +330,7 @@ async function createSessionDaemonRuntime() {
       // next start discards it.
       await stateOwnership.release();
     };
-    return { eventHub, machineStatus, statusAttribution, auth, sessions, terminals, unreadStore, activeAgentProfile, runtimeComponent, catalogRefresher, serverPlugins, projects, workspaceProviders, pluginBackends, workspaceProviderRuntime, workspaceRemovals, shutdown };
+    return { eventHub, machineStatus, statusAttribution, auth, sessions, unreadStore, activeAgentProfile, runtimeComponent, catalogRefresher, serverPlugins, projects, workspaceProviders, pluginBackends, workspaceProviderRuntime, workspaceRemovals, shutdown };
   } catch (error) {
     try {
       await serverPlugins.stop();
@@ -343,11 +341,10 @@ async function createSessionDaemonRuntime() {
   }
 }
 
-function registerSessionDaemonRoutes({ eventHub, machineStatus, statusAttribution, auth, sessions, terminals, runtimeComponent, projects, workspaceProviders, pluginBackends, workspaceProviderRuntime, workspaceRemovals }: SessionDaemonRuntime): void {
+function registerSessionDaemonRoutes({ eventHub, machineStatus, statusAttribution, auth, sessions, runtimeComponent, projects, workspaceProviders, pluginBackends, workspaceProviderRuntime, workspaceRemovals }: SessionDaemonRuntime): void {
   registerMachineStatusRoutes(app, machineStatus);
   registerAuthRoutes(app, auth);
   registerSessionRoutes(app, sessions, eventHub);
-  registerTerminalRoutes(app, terminals.legacyRoutes);
   registerWorkspaceCatalogRoutes(app, {
     projects,
     workspaces: workspaceProviders,

@@ -64,15 +64,6 @@ export type {
   WriteWorkspaceFileResponse,
 };
 
-/** Internal query shape for PI WEB's terminal-command-runs host protocol. */
-export interface TerminalCommandRunFilter {
-  projectId?: string;
-  workspaceId?: string;
-  terminalId?: string;
-  statuses?: TerminalCommandRunStatus[];
-  metadata?: Record<string, string>;
-}
-
 export type MachineStatus = "unknown" | "online" | "offline" | "error";
 
 /**
@@ -1138,24 +1129,6 @@ export interface FileSuggestion {
   kind: "tracked" | "untracked" | "other";
 }
 
-export interface TerminalInfo {
-  id: string;
-  cwd: string;
-  name: string;
-  createdAt: string;
-  exited: boolean;
-  exitCode?: number;
-  commandRunId?: string;
-}
-
-export interface RunTerminalCommandInput {
-  workspace: Workspace;
-  title: string;
-  command: string;
-  metadata?: Record<string, string>;
-  open?: boolean;
-}
-
 /** Secret-free identity of the pi agent state directory fixed for one sessiond lifetime. */
 export interface ActiveAgentProfileDescriptor {
   readonly schemaVersion: 2;
@@ -1186,11 +1159,6 @@ export interface PiWebRuntimeResponse {
   };
   capabilities: PiWebCapability[];
 }
-
-export type TerminalUiEvent =
-  | { type: "terminal.created"; terminal: TerminalInfo }
-  | { type: "terminal.exited"; terminal: TerminalInfo }
-  | { type: "terminal.closed"; terminalId: string; cwd: string };
 
 export interface CommandOption {
   value: string;
@@ -1336,4 +1304,4 @@ export type GlobalSessionEvent =
   | SessionUnreadEvent
   | SessionStartupProgressEvent
   | ModelScopeChangedEvent;
-export type RealtimeEvent = GlobalSessionEvent | TerminalUiEvent | MachineStatusUiEvent;
+export type RealtimeEvent = GlobalSessionEvent | MachineStatusUiEvent;

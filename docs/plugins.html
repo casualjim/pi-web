@@ -460,9 +460,12 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
               <h3>Terminal</h3>
               <p>
                 <strong>Terminal</strong> is the required bundled, machine-specific browser/server plugin. It supplies
-                PI WEB's PTY, replay, command-run, and paired request/channel service. Normal and
-                <code>bundled-only</code> startup activates it before ordinary plugins and publishes its browser entry
-                only while the matching bundled server entry is active and healthy.
+                the Terminal panel and navigation action, Xterm UI and browser state, PTY/replay and command-run
+                service, and its paired request/channel protocol. Normal and <code>bundled-only</code> startup activates
+                it before ordinary plugins and publishes its browser entry only while the matching bundled server entry
+                is active, healthy, and revision-matched. The browser entry uses that workspace-scoped backend for local
+                and selected remote machines, including selection, reconnect/replay, mobile keys, copy behavior,
+                command-run display, and cleanup, instead of calling Terminal-specific application routes.
               </p>
               <p>
                 Ordinary config, Settings, and <code>pi-web plugins disable terminal</code> cannot disable Terminal.

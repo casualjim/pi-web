@@ -28,10 +28,17 @@ export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES = 128;
 export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES = 1024 * 1024;
 /** Server-to-browser bound accommodates Terminal's full worst-case escaped replay plus live output. */
 export const PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES = 1_280 * 1024;
+/** Independent aggregate edge cap and authoritative sessiond global cap. */
 export const PLUGIN_BACKEND_CHANNEL_MAX_TOTAL = 128;
+/** Authoritative sessiond per-plugin admission cap. */
 export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN = 32;
+/** Authoritative sessiond per-plugin/workspace admission cap. */
 export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE = 8;
 export const PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS = 10_000;
+/**
+ * Shared duration for independently owned edge transport-connect and sessiond
+ * plugin-open deadlines. An upstream OPEN cancels only the edge deadline.
+ */
 export const PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS = 10_000;
 /** Maximum time a clean close may wait for already-accepted socket frames or callbacks. */
 export const PLUGIN_BACKEND_CHANNEL_DRAIN_TIMEOUT_MS = 10_000;

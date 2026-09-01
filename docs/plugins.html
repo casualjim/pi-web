@@ -391,20 +391,27 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
                 the plugin returns <code>receive()</code>, optional plugin-owned <code>closed</code>, and optional once-only
                 <code>close()</code> members. Resolve <code>closed</code> only after the final <code>send()</code>; the host
                 boundedly drains accepted output frames in order before cleanly closing the browser transport. A clean
-                browser close also drains already accepted <code>receive()</code> callbacks before plugin cleanup. Data
-                frames are limited to 64 KiB JSON and queues to 128 frames per direction at each hop, with 1 MiB
-                browser-to-server and 1.25 MiB server-to-browser byte bounds. Admissions at every host hop are limited
-                to 128 global, 32 per plugin, and 8 per plugin/workspace (including connections awaiting an upstream
-                upgrade, their open frame, or physical teardown); proxy upgrades and clean drains are bounded to 10
-                seconds, physical teardown of a non-cooperating peer to 1 second, and lifetime to 12 hours with no idle
-                timeout. The directional 1.25 MiB output bound accommodates Terminal's full replay under worst-case JSON
-                escaping plus following live output without reordering.
-                Invalid/binary frames, overflow, callback failure/timeout, disconnect, expiry, and shutdown close both
-                directions and retain admission until physical teardown; denied sockets are attributed when possible and
-                then terminated rather than escaping the aggregate while closing.
+                browser close also drains already accepted <code>receive()</code> callbacks before plugin cleanup.
+                Sessiond is the sole semantic and scoped channel authority: it validates the open envelope, package
+                revision, operation, project/workspace scope, and plugin contribution. Intermediate local and federated
+                hops forward opaque, bounded UTF-8 text without parsing host envelopes or plugin payload fields.
+                Data frames are limited to 64 KiB JSON and queues to 128 frames per direction at each physical hop, with
+                1 MiB browser-to-server and 1.25 MiB server-to-browser byte bounds. One aggregate edge cap allows 128
+                physically alive proxy channels per web/API process and is shared by local and federated routes. Sessiond
+                separately and authoritatively admits 128 total channels, 32 per plugin, and 8 per plugin/workspace; both
+                accounting layers include channels awaiting connection/open or physical teardown. Each edge has a
+                10-second transport-connect deadline that ends permanently when its upstream WebSocket opens. Sessiond's
+                10-second open-handshake/plugin-open deadline is separate; clean drains are also bounded to 10 seconds,
+                physical teardown of a non-cooperating peer to 1 second, and lifetime to 12 hours with no idle timeout.
+                The directional 1.25 MiB output bound accommodates Terminal's full replay under worst-case JSON escaping
+                plus following live output without reordering. Binary, malformed UTF-8, and over-limit physical frames
+                fail at the edge; semantically invalid bounded text reaches sessiond for JSON/envelope rejection.
+                Overflow, callback failure/timeout, disconnect, expiry, and shutdown close both directions and retain
+                accounting until physical teardown; denied sockets are attributed when possible and then terminated
+                rather than escaping the aggregate while closing.
               </p>
               <p>
-                Sessiond is the single workspace authority. An enabled server entry can contribute at most one provider.
+                Sessiond is also the single workspace-provider authority. An enabled server entry can contribute at most one provider.
                 Primary providers probe first; bundled Git probes only as a fallback. Exactly one claimant owns the whole
                 project's workspace semantics. Multiple claimants in the winning tier produce a visible conflict rather
                 than import-order selection. If nobody claims, the kernel project-folder workspace remains available.

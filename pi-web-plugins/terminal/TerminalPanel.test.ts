@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import type { JsonValue, WorkspaceBackend, WorkspaceBackendChannelOptions, WorkspacePanelContext, WorkspacePanelNavigationV1 } from "@jmfederico/pi-web/plugin-api";
+import { Terminal } from "@xterm/xterm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalBrowserRuntime } from "./TerminalBrowserRuntime";
 import { TerminalPanel, filterTerminalInput } from "./TerminalPanel";
@@ -288,7 +289,7 @@ describe("Terminal panel lifecycle", () => {
       void input;
       attempt += 1;
       if (attempt === 1) return Promise.reject(new Error("still offline"));
-      options.onData({ type: "output", data: "replayed output", replay: true });
+      options.onData({ type: "output", data: "replayed output", replay: true, replayComplete: true });
       return Promise.resolve(channel);
     });
     const context = terminalContext({ backend: terminalBackend(vi.fn(() => Promise.resolve([])), openChannel) });
@@ -333,6 +334,89 @@ describe("Terminal panel lifecycle", () => {
     panel.disconnectedCallback();
   });
 
+  it("suppresses a complete multi-frame replay while allowing following live Xterm responses and input", async () => {
+    const panel = createTerminalPanel();
+    const terminal = new Terminal({ cols: 80, rows: 24 });
+    const send = vi.fn();
+    Reflect.set(panel, "terminal", terminal);
+    Reflect.set(panel, "selectedId", "terminal-1");
+    Reflect.set(panel, "channelGeneration", 7);
+    Reflect.set(panel, "channel", { closed: new Promise<never>(() => undefined), send, close: vi.fn() });
+    terminal.onData((data) => { callPanelMethod(panel, "handleTerminalData", terminal, data); });
+
+    try {
+      callPanelMethod(panel, "handleChannelFrame", 7, {
+        type: "output",
+        data: "first replay chunk",
+        replay: true,
+        replayComplete: false,
+      }, "terminal-1", terminal);
+      callPanelMethod(panel, "handleChannelFrame", 7, {
+        type: "output",
+        data: "\x1b[6n",
+        replay: true,
+        replayComplete: true,
+      }, "terminal-1", terminal);
+      callPanelMethod(panel, "handleChannelFrame", 7, {
+        type: "output",
+        data: "\x1b[6n",
+        replay: false,
+      }, "terminal-1", terminal);
+      await new Promise<void>((resolve) => { terminal.write("", resolve); });
+
+      const responseFrames: { type: "input"; data: string }[] = [];
+      for (const call of send.mock.calls) {
+        const frame: unknown = call[0];
+        if (isInputFrame(frame)) responseFrames.push(frame);
+      }
+      expect(responseFrames).toHaveLength(1);
+      const response = responseFrames[0]?.data ?? "";
+      expect(response.startsWith("\x1b[")).toBe(true);
+      expect(response.endsWith("R")).toBe(true);
+      expect(response.slice(2, -1)).toMatch(/^\d+;\d+$/u);
+
+      terminal.input("ordinary input", true);
+      expect(send).toHaveBeenNthCalledWith(2, { type: "input", data: "ordinary input" });
+    } finally {
+      terminal.dispose();
+    }
+  });
+
+  it("does not let a stale replay callback clear suppression for a replacement channel generation", () => {
+    const panel = createTerminalPanel();
+    const completions: (() => void)[] = [];
+    const terminal = {
+      write: vi.fn((_data: string, complete?: () => void) => { if (complete !== undefined) completions.push(complete); }),
+    };
+    const send = vi.fn();
+    Reflect.set(panel, "selectedId", "terminal-1");
+    Reflect.set(panel, "channelGeneration", 1);
+    Reflect.set(panel, "terminal", terminal);
+    Reflect.set(panel, "channel", { closed: new Promise<never>(() => undefined), send, close: vi.fn() });
+
+    callPanelMethod(panel, "handleChannelFrame", 1, {
+      type: "output",
+      data: "old replay",
+      replay: true,
+      replayComplete: true,
+    }, "terminal-1", terminal);
+    Reflect.set(panel, "channelGeneration", 2);
+    callPanelMethod(panel, "handleChannelFrame", 2, {
+      type: "output",
+      data: "replacement replay",
+      replay: true,
+      replayComplete: true,
+    }, "terminal-1", terminal);
+
+    completions[0]?.();
+    callPanelMethod(panel, "handleTerminalData", terminal, "blocked while replaying");
+    expect(send).not.toHaveBeenCalled();
+
+    completions[1]?.();
+    callPanelMethod(panel, "handleTerminalData", terminal, "ordinary input");
+    expect(send).toHaveBeenCalledWith({ type: "input", data: "ordinary input" });
+  });
+
   it("handles output, exit, and error frames and wires input plus resize frames", () => {
     const panel = createTerminalPanel();
     const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
@@ -346,9 +430,9 @@ describe("Terminal panel lifecycle", () => {
     Reflect.set(panel, "terminal", terminal);
     Reflect.set(panel, "loadCommandRuns", loadCommandRuns);
 
-    callPanelMethod(panel, "handleChannelFrame", { type: "output", data: "hello", replay: false }, "terminal-1", terminal);
-    callPanelMethod(panel, "handleChannelFrame", { type: "error", message: "pty failed" }, "terminal-1", terminal);
-    callPanelMethod(panel, "handleChannelFrame", { type: "exit", exitCode: 7 }, "terminal-1", terminal);
+    callPanelMethod(panel, "handleChannelFrame", 0, { type: "output", data: "hello", replay: false }, "terminal-1", terminal);
+    callPanelMethod(panel, "handleChannelFrame", 0, { type: "error", message: "pty failed" }, "terminal-1", terminal);
+    callPanelMethod(panel, "handleChannelFrame", 0, { type: "exit", exitCode: 7 }, "terminal-1", terminal);
 
     expect(terminal.write).toHaveBeenCalledWith("hello");
     expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("pty failed"));

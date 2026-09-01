@@ -8,7 +8,7 @@ import type {
   ProjectInput,
   ServerPluginActivationContext,
 } from "@jmfederico/pi-web/server-plugin-api";
-import { activateTerminalPlugin, createTerminalBackend, splitTerminalOutput } from "./server-plugin.js";
+import { activateTerminalPlugin, createTerminalBackend, terminalOutputFrames } from "./server-plugin.js";
 import { TerminalService } from "./terminalService.js";
 
 const services: TerminalService[] = [];
@@ -90,21 +90,22 @@ describe.skipIf(process.platform === "win32")("Terminal paired server entry", ()
 
   it("fits the full worst-case escaped replay within the directional output budget", () => {
     const output = "\u0000".repeat(200_000);
-    const chunks = splitTerminalOutput(output, true);
+    const frames = terminalOutputFrames(output, true);
     const readyBytes = Buffer.byteLength(JSON.stringify({ version: 1, kind: "ready" }), "utf8");
-    const wireBytes = readyBytes + chunks.reduce((total, data) => total + Buffer.byteLength(JSON.stringify({
+    const wireBytes = readyBytes + frames.reduce((total, data) => total + Buffer.byteLength(JSON.stringify({
       version: 1,
       kind: "data",
-      data: { type: "output", data, replay: true },
+      data,
     }), "utf8"), 0);
 
-    expect(chunks.join("")).toBe(output);
-    expect(chunks).toHaveLength(20);
-    expect(wireBytes).toBe(1_201_548);
+    expect(frames.map(({ data }) => data).join("")).toBe(output);
+    expect(frames).toHaveLength(20);
+    expect(frames.slice(0, -1).every((frame) => frame.replayComplete === false)).toBe(true);
+    expect(frames.at(-1)?.replayComplete).toBe(true);
+    expect(wireBytes).toBe(1_202_007);
     expect(wireBytes).toBeLessThan(1_280 * 1024);
-    for (const data of chunks) {
-      expect(Buffer.byteLength(JSON.stringify({ type: "output", data, replay: true }), "utf8"))
-        .toBeLessThanOrEqual(60 * 1024);
+    for (const frame of frames) {
+      expect(Buffer.byteLength(JSON.stringify(frame), "utf8")).toBeLessThanOrEqual(60 * 1024);
     }
   });
 

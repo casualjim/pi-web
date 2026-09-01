@@ -34,6 +34,12 @@ interface ScopedPanelOperation {
   readonly controller: AbortController;
 }
 
+interface TerminalReplayInputSuppression {
+  readonly generation: number;
+  readonly terminalId: string;
+  readonly terminal: Terminal;
+}
+
 export class TerminalPanel extends LitElement {
   @property({ attribute: false }) context: WorkspacePanelContext | undefined;
   @property({ attribute: false }) runtime: TerminalBrowserRuntime | undefined;
@@ -71,7 +77,7 @@ export class TerminalPanel extends LitElement {
   private resizeObserver: ResizeObserver | undefined;
   private intersectionObserver: IntersectionObserver | undefined;
   private themeObserver: MutationObserver | undefined;
-  private suppressTerminalInput = false;
+  private replayInputSuppression: TerminalReplayInputSuppression | undefined;
   private observedRuntime: TerminalBrowserRuntime | undefined;
   private observedWorkspaceScope: string | undefined;
   private loadedWorkspaceScope: string | undefined;
@@ -518,10 +524,7 @@ export class TerminalPanel extends LitElement {
       this.resizeObserver = new ResizeObserver(() => { this.fitAndNotify(); });
       this.resizeObserver.observe(terminalHost);
     }
-    terminal.onData((data) => {
-      if (this.suppressTerminalInput || this.copySnapshot !== undefined) return;
-      this.sendTerminalInput(data);
-    });
+    terminal.onData((data) => { this.handleTerminalData(terminal, data); });
     const initialSize = this.fitTerminal();
     this.connectChannel(context, this.selectedId, terminal, initialSize);
     requestAnimationFrame(() => { this.fitAndNotify(); });
@@ -546,7 +549,7 @@ export class TerminalPanel extends LitElement {
       ...(initialSize === undefined ? {} : { size: initialSize }),
       signal: controller.signal,
       onFrame: (frame) => {
-        if (readyForFrames) this.handleChannelFrame(frame, terminalId, terminal);
+        if (readyForFrames) this.handleChannelFrame(generation, frame, terminalId, terminal);
         else bufferedFrames.push(frame);
       },
     }).then((channel) => {
@@ -556,11 +559,11 @@ export class TerminalPanel extends LitElement {
       }
       this.channel = channel;
       if (resetAfterReconnect) {
+        this.replayInputSuppression = undefined;
         terminal.reset();
-        this.suppressTerminalInput = false;
       }
       readyForFrames = true;
-      for (const frame of bufferedFrames) this.handleChannelFrame(frame, terminalId, terminal);
+      for (const frame of bufferedFrames) this.handleChannelFrame(generation, frame, terminalId, terminal);
       this.channelReconnectAttempt = 0;
       this.connectionError = undefined;
       this.fitAndNotify();
@@ -572,10 +575,10 @@ export class TerminalPanel extends LitElement {
     });
   }
 
-  private handleChannelFrame(frame: TerminalServerFrame, terminalId: string, terminal: Terminal): void {
-    if (terminal !== this.terminal || terminalId !== this.selectedId) return;
+  private handleChannelFrame(generation: number, frame: TerminalServerFrame, terminalId: string, terminal: Terminal): void {
+    if (!this.channelIsCurrent(generation, terminalId, terminal)) return;
     if (frame.type === "output") {
-      this.writeTerminalOutput(terminal, frame.data, frame.replay);
+      this.writeTerminalOutput(generation, terminalId, terminal, frame);
       return;
     }
     if (frame.type === "exit") {
@@ -627,15 +630,37 @@ export class TerminalPanel extends LitElement {
     return generation === this.channelGeneration && terminal === this.terminal && terminalId === this.selectedId;
   }
 
-  private writeTerminalOutput(terminal: Terminal, data: string, replay: boolean): void {
-    if (!replay) {
-      terminal.write(data);
+  private handleTerminalData(terminal: Terminal, data: string): void {
+    const suppression = this.replayInputSuppression;
+    if (terminal !== this.terminal
+      || this.copySnapshot !== undefined
+      || suppression?.terminal === terminal) return;
+    this.sendTerminalInput(data);
+  }
+
+  private writeTerminalOutput(
+    generation: number,
+    terminalId: string,
+    terminal: Terminal,
+    frame: Extract<TerminalServerFrame, { type: "output" }>,
+  ): void {
+    if (!frame.replay) {
+      terminal.write(frame.data);
       return;
     }
-    this.suppressTerminalInput = true;
-    terminal.write(data, () => {
-      this.suppressTerminalInput = false;
-    });
+    let suppression = this.replayInputSuppression;
+    if (suppression?.generation !== generation
+      || suppression.terminalId !== terminalId
+      || suppression.terminal !== terminal) {
+      suppression = { generation, terminalId, terminal };
+      this.replayInputSuppression = suppression;
+    }
+    terminal.write(frame.data, frame.replayComplete ? () => {
+      if (this.replayInputSuppression === suppression
+        && this.channelIsCurrent(generation, terminalId, terminal)) {
+        this.replayInputSuppression = undefined;
+      }
+    } : undefined);
   }
 
   private fitAndNotify(): void {
@@ -720,6 +745,7 @@ export class TerminalPanel extends LitElement {
     this.channel = undefined;
     this.resizeObserver?.disconnect();
     this.resizeObserver = undefined;
+    this.replayInputSuppression = undefined;
     this.terminal?.dispose();
     this.terminal = undefined;
     this.fitAddon = undefined;

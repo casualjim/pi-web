@@ -44,7 +44,8 @@ export interface TerminalResizeFrame extends JsonObject {
 export type TerminalClientFrame = TerminalInputFrame | TerminalResizeFrame;
 
 export type TerminalServerFrame =
-  | { type: "output"; data: string; replay: boolean }
+  | { type: "output"; data: string; replay: false }
+  | { type: "output"; data: string; replay: true; replayComplete: boolean }
   | { type: "exit"; exitCode?: number }
   | { type: "error"; message: string };
 
@@ -197,9 +198,18 @@ export function parseTerminalServerFrame(value: unknown): TerminalServerFrame {
   const record = requireRecord(value, "Terminal channel frame");
   const type = record["type"];
   if (type === "output") {
+    const data = requireStringValue(record, "data", "Terminal output frame");
     const replay = record["replay"];
-    if (typeof replay !== "boolean") throw new Error("Terminal output frame replay must be a boolean");
-    return { type, data: requireStringValue(record, "data", "Terminal output frame"), replay };
+    if (replay === false) {
+      if (record["replayComplete"] !== undefined) throw new Error("Terminal live output frame must not declare replay completion");
+      return { type, data, replay };
+    }
+    if (replay === true) {
+      const replayComplete = record["replayComplete"];
+      if (typeof replayComplete !== "boolean") throw new Error("Terminal replay output frame replayComplete must be a boolean");
+      return { type, data, replay, replayComplete };
+    }
+    throw new Error("Terminal output frame replay must be a boolean");
   }
   if (type === "exit") return { type, ...optionalNumberField(record, "exitCode", "Terminal exit frame") };
   if (type === "error") return { type, message: requireStringValue(record, "message", "Terminal error frame") };

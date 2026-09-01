@@ -61,7 +61,7 @@ describe("Terminal paired-backend protocol", () => {
       close: vi.fn(),
     };
     const openChannel = vi.fn<NonNullable<WorkspaceBackend["openChannel"]>>((_operation, _input, options) => {
-      options.onData({ type: "output", data: "hello", replay: true });
+      options.onData({ type: "output", data: "hello", replay: true, replayComplete: true });
       return Promise.resolve(channel);
     });
     const frames: unknown[] = [];
@@ -72,10 +72,14 @@ describe("Terminal paired-backend protocol", () => {
     const openCall = openChannel.mock.calls[0];
     expect(openCall?.slice(0, 2)).toEqual(["terminal.attach", { terminalId: "terminal-1", cols: 80, rows: 24 }]);
     expect(typeof openCall?.[2].onData).toBe("function");
-    expect(frames).toEqual([{ type: "output", data: "hello", replay: true }]);
+    expect(frames).toEqual([{ type: "output", data: "hello", replay: true, replayComplete: true }]);
+    expect(parseTerminalServerFrame({ type: "output", data: "live", replay: false })).toEqual({ type: "output", data: "live", replay: false });
     expect(parseTerminalServerFrame({ type: "exit", exitCode: 0 })).toEqual({ type: "exit", exitCode: 0 });
     expect(parseTerminalServerFrame({ type: "error", message: "pty failed" })).toEqual({ type: "error", message: "pty failed" });
     expect(() => parseTerminalServerFrame({ type: "output", data: "bad" })).toThrow("replay must be a boolean");
+    expect(() => parseTerminalServerFrame({ type: "output", data: "bad", replay: true })).toThrow("replayComplete must be a boolean");
+    expect(() => parseTerminalServerFrame({ type: "output", data: "bad", replay: false, replayComplete: true }))
+      .toThrow("must not declare replay completion");
   });
 
   it("splits large Unicode input into ordered JSON-byte-safe channel frames", () => {

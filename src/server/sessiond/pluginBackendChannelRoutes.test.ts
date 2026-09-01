@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, type RawData } from "ws";
-import { splitTerminalOutput } from "../../../pi-web-plugins/terminal/server/server-plugin.js";
+import { terminalOutputFrames } from "../../../pi-web-plugins/terminal/server/server-plugin.js";
 import type { JsonValue } from "../../server-plugin-api.js";
 import {
   parsePluginBackendChannelServerEnvelope,
@@ -170,11 +170,11 @@ describe("session daemon plugin backend channels", () => {
     const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
     if (workspaceId === undefined) throw new Error("Expected workspace");
     const replay = "\u0000".repeat(200_000);
-    const chunks = splitTerminalOutput(replay, true);
-    expect(chunks.length).toBeLessThan(128);
+    const replayFrames = terminalOutputFrames(replay, true);
+    expect(replayFrames.length).toBeLessThan(128);
     const registry = new PluginBackendRegistry({
       contributions: [contribution(({ send }) => {
-        for (const data of chunks) send({ type: "output", data, replay: true });
+        for (const frame of replayFrames) send(frame);
         send({ type: "output", data: "__LIVE_AFTER_REPLAY__", replay: false });
         return { receive: () => undefined };
       })],
@@ -190,13 +190,12 @@ describe("session daemon plugin backend channels", () => {
       socket.send(serializePluginBackendChannelOpenEnvelope("terminal-r1", null));
       expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({ version: 1, kind: "ready" });
       let received = "";
-      for (const expectedChunk of chunks) {
+      for (const expectedFrame of replayFrames) {
         const frame = parsePluginBackendChannelServerEnvelope(await messages.next());
-        expect(frame).toMatchObject({ kind: "data", data: { type: "output", replay: true } });
+        expect(frame).toEqual({ version: 1, kind: "data", data: expectedFrame });
         if (frame.kind !== "data" || !isJsonRecord(frame.data)) throw new Error("Expected Terminal replay data frame");
         const data = frame.data["data"];
         if (typeof data !== "string") throw new Error("Expected Terminal replay text");
-        expect(data).toBe(expectedChunk);
         received += data;
       }
       expect(received).toBe(replay);

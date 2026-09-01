@@ -154,9 +154,7 @@ function openTerminalChannel(
   };
   detach = service.attach(scope, terminalId, {
     output(data, replay) {
-      for (const chunk of splitTerminalOutput(data, replay)) {
-        send({ type: "output", data: chunk, replay });
-      }
+      for (const frame of terminalOutputFrames(data, replay)) send(frame);
     },
     exit(exitCode) {
       send({ type: "exit", ...(exitCode === undefined ? {} : { exitCode }) });
@@ -349,8 +347,16 @@ function parseCommandRunStatus(value: JsonValue): TerminalCommandRunStatus {
   throw new Error(`Invalid Terminal command run status: ${JSON.stringify(value)}`);
 }
 
-export function splitTerminalOutput(value: string, replay: boolean): string[] {
-  const emptyFrameBytes = Buffer.byteLength(JSON.stringify({ type: "output", data: "", replay }), "utf8");
+interface TerminalOutputFrame extends JsonObject {
+  readonly type: "output";
+  readonly data: string;
+  readonly replay: boolean;
+  readonly replayComplete?: boolean;
+}
+
+export function terminalOutputFrames(value: string, replay: boolean): TerminalOutputFrame[] {
+  const emptyFrame = terminalOutputFrame("", replay, false);
+  const emptyFrameBytes = Buffer.byteLength(JSON.stringify(emptyFrame), "utf8");
   const chunks: string[] = [];
   let chunk = "";
   let encodedBytes = emptyFrameBytes;
@@ -367,7 +373,13 @@ export function splitTerminalOutput(value: string, replay: boolean): string[] {
     encodedBytes += characterBytes;
   }
   if (chunk !== "" || value === "") chunks.push(chunk);
-  return chunks;
+  return chunks.map((data, index) => terminalOutputFrame(data, replay, index === chunks.length - 1));
+}
+
+function terminalOutputFrame(data: string, replay: boolean, replayComplete: boolean): TerminalOutputFrame {
+  return replay
+    ? { type: "output", data, replay: true, replayComplete }
+    : { type: "output", data, replay: false };
 }
 
 function throwIfAborted(signal: AbortSignal): void {

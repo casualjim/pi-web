@@ -38,7 +38,8 @@ describe("PiWebPluginService", () => {
     const service = new PiWebPluginService({ roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }], packageProvider: false });
 
     await expect(service.manifest()).resolves.toEqual({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
+      terminalMode: "recovery-disabled",
       plugins: [expect.objectContaining({ id: "info", source: "test", scope: "local", machineSpecific: false })],
     });
     const manifest = await service.manifest();
@@ -260,7 +261,8 @@ describe("PiWebPluginService", () => {
       configProvider: () => ({}),
       warningSink: () => undefined,
     });
-    const activeRuntime = createWorkspaceProviderRuntimeSnapshot(
+    const activeRuntime = {
+      ...createWorkspaceProviderRuntimeSnapshot(
       [{
         pluginId,
         source: "test",
@@ -273,13 +275,15 @@ describe("PiWebPluginService", () => {
         name: pluginId,
       }],
       [{ pluginId, health: { status: "healthy" } }],
-    );
+    ),
+      terminalMode: "recovery-disabled" as const,
+    };
     const service = new PiWebPluginService({
       catalog,
       runtimeProvider: { providerRuntime: () => Promise.resolve(activeRuntime) },
     });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
     const lifecycle = await service.plugins();
     expect(lifecycle).toMatchObject({
       plugins: [{
@@ -326,7 +330,7 @@ describe("PiWebPluginService", () => {
 
     await writeFile(chunkPath, "export const value = 'desired-update';");
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
     const pinnedChunk = await service.readAsset("dual-assets", "chunk.js");
     expect(pinnedChunk?.content.toString("utf8")).toBe("export const value = 'active';");
   });
@@ -344,7 +348,7 @@ describe("PiWebPluginService", () => {
       },
     });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
     await expect(service.plugins()).resolves.toMatchObject({
       plugins: [{ id: "dual", server: { state: "unknown" } }],
       serverRuntime: { status: "incompatible", message: "unsupported provider runtime protocol" },
@@ -360,7 +364,7 @@ describe("PiWebPluginService", () => {
       roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
       packageProvider: false,
       runtimeProvider: {
-        providerRuntime: () => Promise.resolve({ protocolVersion: 1, records: [], health: [], diagnostics: [] }),
+        providerRuntime: () => Promise.resolve({ protocolVersion: 2, terminalMode: "recovery-disabled", records: [], health: [], diagnostics: [] }),
       },
       recoveryProvider: () => ({ safeStart }),
     });
@@ -505,7 +509,7 @@ describe("PiWebPluginService", () => {
     await writeFile(join(updatedAgentDir, "settings.json"), `${JSON.stringify({ packages: [packageDir] }, null, 2)}\n`, "utf8");
     const service = new PiWebPluginService({ roots: [], cwd: tempDir, agentDirProvider: () => activeAgentDir });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
 
     activeAgentDir = updatedAgentDir;
 
@@ -649,8 +653,8 @@ describe("PiWebPluginService", () => {
       files: { "pi-web-plugin.js": "export default {};" },
     });
 
-    await expect(new PiWebPluginService({ roots: [{ path: legacyRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
-    await expect(new PiWebPluginService({ roots: [{ path: unsafeRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(new PiWebPluginService({ roots: [{ path: legacyRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
+    await expect(new PiWebPluginService({ roots: [{ path: unsafeRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
   });
 
   it("continues discovering valid plugins when another local plugin is invalid", async () => {
@@ -720,7 +724,8 @@ function activeRuntimeProvider(
       ...(plugin.enabled ? { name: plugin.id } : { message: "disabled in PI WEB config" }),
     }]);
     return {
-      protocolVersion: 1 as const,
+      protocolVersion: 2 as const,
+      terminalMode: "recovery-disabled" as const,
       records,
       health: records.flatMap((record) => record.state === "active" ? [{ pluginId: record.pluginId, health: { status: "healthy" as const } }] : []),
       diagnostics: snapshot.diagnostics,

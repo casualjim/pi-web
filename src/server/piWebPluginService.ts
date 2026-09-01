@@ -1,5 +1,6 @@
 import { PI_WEB_PLUGIN_LIFECYCLE_VERSION, type PiWebPluginSafeStart, type PiWebPluginsResponse, type PiWebPluginScope } from "../shared/apiTypes.js";
 import { isPiWebPluginId } from "../shared/pluginIds.js";
+import { REQUIRED_TERMINAL_PLUGIN_ID, type TerminalPluginMode } from "../shared/requiredTerminalPlugin.js";
 import {
   PiWebPluginCatalog,
   readPiWebPluginPackageArtifact,
@@ -29,6 +30,7 @@ export {
 
 export interface PiWebPluginManifest {
   lifecycleVersion: typeof PI_WEB_PLUGIN_LIFECYCLE_VERSION;
+  terminalMode: TerminalPluginMode;
   plugins: PiWebPluginManifestEntry[];
 }
 
@@ -99,7 +101,9 @@ export class PiWebPluginService {
         machineSpecific: plugin.machineSpecific,
       });
     }
-    return { lifecycleVersion: PI_WEB_PLUGIN_LIFECYCLE_VERSION, plugins };
+    const terminalMode = lifecycle.response.serverRuntime.terminalMode;
+    if (terminalMode === "required") requireTerminalManifestEntry(plugins);
+    return { lifecycleVersion: PI_WEB_PLUGIN_LIFECYCLE_VERSION, terminalMode, plugins };
   }
 
   async plugins(): Promise<PiWebPluginsResponse> {
@@ -232,6 +236,18 @@ export class PiWebPluginService {
       };
     }
   }
+}
+
+function requireTerminalManifestEntry(plugins: readonly PiWebPluginManifestEntry[]): void {
+  const terminal = plugins.find(({ id }) => id === REQUIRED_TERMINAL_PLUGIN_ID);
+  if (terminal === undefined) throw new Error("Required Terminal browser entry is unavailable; use safe start none for recovery");
+  if (terminal.scope !== "bundled" || terminal.source !== "bundled" || !terminal.machineSpecific) {
+    throw new Error("Required Terminal browser entry is not the bundled machine-specific package");
+  }
+  if (terminal.backendRevision === undefined || terminal.backendCapabilityVersion !== 1 || terminal.channelVersion !== 1) {
+    throw new Error("Required Terminal browser/server pairing is incompatible; restart or use safe start none for recovery");
+  }
+  if (plugins[0] !== terminal) throw new Error("Required Terminal browser entry must be activated before ordinary plugins");
 }
 
 function browserModuleUrl(plugin: PiWebPluginCatalogEntry): string {

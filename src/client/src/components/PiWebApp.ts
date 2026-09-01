@@ -31,6 +31,7 @@ import { CLASSIC_THEME_ID, DEFAULT_THEME_PREFERENCE, applyPiWebTheme, findThemeP
 import { corePlugin } from "../plugins/core";
 import { themePackPlugin } from "../plugins/themes";
 import { loadExternalPlugins, type ExternalPluginLoadResult } from "../plugins/external";
+import { REQUIRED_TERMINAL_PLUGIN_ID } from "../../../shared/requiredTerminalPlugin";
 import { PluginRegistry, installPluginRuntimeScope, installWorkspaceLabelScope, installWorkspacePanelScope } from "../plugins/registry";
 import { createPluginWorkspaceBackend } from "../plugins/workspaceBackend";
 import { createWorkspaceFiles as createPluginWorkspaceFiles } from "../plugins/workspaceFiles";
@@ -231,6 +232,7 @@ export class PiWebApp extends LitElement {
   private refreshingWorkspaceDeletionRuns = false;
   private readonly handledWorkspaceDeletionRunIds = new Set<string>();
   private readonly terminalCommandRunRuntimes = new Map<string, TerminalCommandRunsInternalRuntime>();
+  private readonly terminalAvailabilityByMachine = new Map<string, boolean>();
   private machineNavigationRestoreSeq = 0;
   private navigationSelectionSeq = 0;
   private modelDialogInstanceId = 0;
@@ -919,6 +921,11 @@ export class PiWebApp extends LitElement {
   }
 
   private openTerminal(options?: { terminalId?: string | undefined }): void {
+    const machineId = selectedMachineId(this.state);
+    if (!this.terminalAvailableForMachine(machineId)) {
+      this.setState({ error: terminalUnavailableError(machineId).message });
+      return;
+    }
     if (options?.terminalId !== undefined) this.selectTerminal(options.terminalId, { replace: true });
     this.openWorkspaceTool("core:workspace.terminal");
   }
@@ -929,9 +936,15 @@ export class PiWebApp extends LitElement {
     if (existing !== undefined) return existing;
     const runtime = createTerminalCommandRunsRuntime(origin, {
       api: {
-        runTerminalCommand: (runtimeOrigin, input) => terminalsApi.runTerminalCommand(runtimeOrigin, input, machineId),
-        listCommandRuns: (filter) => terminalsApi.listCommandRuns(filter, machineId),
-        getCommandRun: (runId) => terminalsApi.getCommandRun(runId, machineId),
+        runTerminalCommand: (runtimeOrigin, input) => this.terminalAvailableForMachine(machineId)
+          ? terminalsApi.runTerminalCommand(runtimeOrigin, input, machineId)
+          : Promise.reject(terminalUnavailableError(machineId)),
+        listCommandRuns: (filter) => this.terminalAvailableForMachine(machineId)
+          ? terminalsApi.listCommandRuns(filter, machineId)
+          : Promise.reject(terminalUnavailableError(machineId)),
+        getCommandRun: (runId) => this.terminalAvailableForMachine(machineId)
+          ? terminalsApi.getCommandRun(runId, machineId)
+          : Promise.reject(terminalUnavailableError(machineId)),
       },
       openTerminal: (workspace, options) => { void this.openRuntimeTerminal(machineId, workspace, options); },
     });
@@ -940,6 +953,10 @@ export class PiWebApp extends LitElement {
   }
 
   private async openRuntimeTerminal(machineId: string, workspace: Workspace | undefined, options?: { terminalId?: string | undefined }): Promise<void> {
+    if (!this.terminalAvailableForMachine(machineId)) {
+      this.setState({ error: terminalUnavailableError(machineId).message });
+      return;
+    }
     if (selectedMachineId(this.state) !== machineId || (workspace !== undefined && (this.state.selectedWorkspace?.id !== workspace.id || this.state.selectedProject?.id !== workspace.projectId))) {
       if (!this.routeRestoreInProgress) this.rememberCurrentMachineNavigation();
       await this.restoreRouteFor({
@@ -1116,6 +1133,11 @@ export class PiWebApp extends LitElement {
 
   private async refreshActiveTerminals(workspace: Workspace): Promise<void> {
     const machineId = selectedMachineId(this.state);
+    if (!this.terminalAvailableForMachine(machineId)) {
+      this.activeTerminalIds.clear();
+      this.setState({ activeTerminalCount: 0 });
+      return;
+    }
     try {
       const terminals = await terminalsApi.terminals(workspace.projectId, workspace.id, machineId);
       if (selectedMachineId(this.state) !== machineId || this.state.selectedWorkspace?.id !== workspace.id) return;
@@ -1481,7 +1503,10 @@ export class PiWebApp extends LitElement {
     const workspace = this.state.selectedWorkspace;
     if (workspace === undefined) return [];
     const context = this.createWorkspacePanelContext(workspace);
-    return this.plugins.getWorkspacePanels().filter((panel) => panel.visible?.(context) ?? true);
+    return this.plugins.getWorkspacePanels().filter((panel) => {
+      if (panel.id === "core:workspace.terminal" && !this.terminalAvailableForMachine(context.machine.id)) return false;
+      return panel.visible?.(context) ?? true;
+    });
   }
 
   private availableWorkspacePanelId(
@@ -1697,7 +1722,9 @@ export class PiWebApp extends LitElement {
   }
 
   private getDefaultActions(): AppAction[] {
-    return [...this.plugins.getActions(this.createPluginRuntimeContext()), ...this.workspaceSurfaceActions(), ...this.sessionActions(), ...this.navigationFocusActions(), ...this.panelLayoutActions()];
+    const pluginActions = this.plugins.getActions(this.createPluginRuntimeContext())
+      .filter((action) => action.id !== "core:view.terminal" || this.terminalAvailableForMachine(selectedMachineId(this.state)));
+    return [...pluginActions, ...this.workspaceSurfaceActions(), ...this.sessionActions(), ...this.navigationFocusActions(), ...this.panelLayoutActions()];
   }
 
   private workspaceSurfaceActions(): AppAction[] {
@@ -1816,7 +1843,12 @@ export class PiWebApp extends LitElement {
     if (machine.kind !== "remote" || this.loadedMachinePluginIds.has(machine.id)) return;
     const runtime = this.state.machineRuntimes[machine.id];
     if (runtime?.ok === true && !supportsPiWebCapability(runtime, PI_WEB_CAPABILITIES.pluginLifecycle)) {
-      console.warn(`PI WEB plugins from ${machine.name} require a matching plugin lifecycle capability; update and restart PI WEB on that machine`);
+      const message = `PI WEB plugins from ${machine.name} require a matching plugin lifecycle capability; update and restart PI WEB on that machine`;
+      console.warn(message);
+      this.setTerminalAvailability(machine.id, false);
+      const selectionChanged = this.reconcileWorkspacePanelSelection();
+      if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+      this.setState({ error: message });
       return;
     }
     const existing = this.machinePluginLoadPromises.get(machine.id);
@@ -1826,29 +1858,57 @@ export class PiWebApp extends LitElement {
       machineId: machine.id,
       shouldLoadPlugin: (entry) => !this.plugins.hasPlugin(machineScopedPluginId(machine.id, entry.id))
         && this.plugins.shouldLoadRemotePlugin(entry.id, entry.machineSpecific),
-    }))
+    }), machine.id)
       .then((loaded) => { if (loaded) this.loadedMachinePluginIds.add(machine.id); })
       .finally(() => { this.machinePluginLoadPromises.delete(machine.id); });
     this.machinePluginLoadPromises.set(machine.id, load);
     await load;
   }
 
-  private async registerExternalPlugins(label: string, load: () => Promise<ExternalPluginLoadResult>): Promise<boolean> {
+  private async registerExternalPlugins(label: string, load: () => Promise<ExternalPluginLoadResult>, machineId = "local"): Promise<boolean> {
     try {
       const result = await load();
+      if (result.terminalMode === "recovery-disabled") this.setTerminalAvailability(machineId, false);
       let complete = result.failures.length === 0;
       for (const failure of result.failures) {
         console.warn(`Failed to load PI WEB plugin ${failure.entry.id} (${failure.entry.module})`, failure.error);
+      }
+      const requiredTerminalLoadFailure = result.terminalMode === "required"
+        ? result.failures.find(({ entry }) => entry.id === REQUIRED_TERMINAL_PLUGIN_ID)
+        : undefined;
+      if (requiredTerminalLoadFailure !== undefined) {
+        this.setTerminalAvailability(machineId, false);
+        const selectionChanged = this.reconcileWorkspacePanelSelection();
+        if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+        this.setState({ error: `Required Terminal plugin failed to load: ${errorMessage(requiredTerminalLoadFailure.error)}. Open Settings for recovery guidance.` });
+        return false;
+      }
+      const terminalRuntimeId = machineId === "local"
+        ? REQUIRED_TERMINAL_PLUGIN_ID
+        : machineScopedPluginId(machineId, REQUIRED_TERMINAL_PLUGIN_ID);
+      if (result.terminalMode === "required" && this.plugins.hasPlugin(terminalRuntimeId)) {
+        this.setTerminalAvailability(machineId, true);
       }
       for (const registration of result.registrations) {
         if (this.plugins.hasPlugin(registration.id)) continue;
         try {
           this.plugins.register(registration);
+          if (result.terminalMode === "required" && registration.id === terminalRuntimeId) {
+            this.setTerminalAvailability(machineId, true);
+          }
         } catch (error) {
           complete = false;
           console.warn(`Failed to register PI WEB plugin ${registration.id}`, error);
+          if (result.terminalMode === "required" && (registration.sourcePluginId ?? registration.id) === REQUIRED_TERMINAL_PLUGIN_ID) {
+            this.setState({ error: `Required Terminal plugin failed to activate: ${errorMessage(error)}. Open Settings for recovery guidance.` });
+            break;
+          }
         }
       }
+      this.setTerminalAvailability(
+        machineId,
+        result.terminalMode === "required" && this.plugins.hasPlugin(terminalRuntimeId),
+      );
       const selectionChanged = this.reconcileWorkspacePanelSelection();
       if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
       this.applyPreferredTheme(false);
@@ -1856,8 +1916,25 @@ export class PiWebApp extends LitElement {
       return complete;
     } catch (error) {
       console.warn(`Failed to load ${label}`, error);
+      this.setTerminalAvailability(machineId, false);
+      const selectionChanged = this.reconcileWorkspacePanelSelection();
+      if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+      this.setState({ error: `Failed to load ${label}: ${errorMessage(error)}` });
       return false;
     }
+  }
+
+  private setTerminalAvailability(machineId: string, available: boolean): void {
+    this.terminalAvailabilityByMachine.set(machineId, available);
+    if (available || selectedMachineId(this.state) !== machineId) return;
+    this.activeTerminalIds.clear();
+    this.terminalAutoStartWorkspaceId = undefined;
+    this.setState({ activeTerminalCount: 0, selectedTerminalId: undefined, workspaceDeletionRuns: {} });
+    this.updateWorkspaceDeletionPolling();
+  }
+
+  private terminalAvailableForMachine(machineId: string): boolean {
+    return this.terminalAvailabilityByMachine.get(machineId) === true;
   }
 
   private createPromptEditor(): PluginPromptEditor {
@@ -1972,7 +2049,7 @@ export class PiWebApp extends LitElement {
     if (this.refreshingWorkspaceDeletionRuns) return;
     const machineId = selectedMachineId(this.state);
     const project = this.state.selectedProject;
-    if (project === undefined) {
+    if (project === undefined || !this.terminalAvailableForMachine(machineId)) {
       this.setState({ workspaceDeletionRuns: {} });
       this.updateWorkspaceDeletionPolling();
       return;
@@ -2546,6 +2623,10 @@ function sameWorkspaceRouteIdentity(left: WorkspaceRouteIdentity, right: Workspa
 function remoteRouteRestoreRetryDelay(attempt: number): number {
   const index = Math.min(attempt, REMOTE_ROUTE_RESTORE_RETRY_DELAYS_MS.length - 1);
   return REMOTE_ROUTE_RESTORE_RETRY_DELAYS_MS[index] ?? 30_000;
+}
+
+function terminalUnavailableError(machineId: string): Error {
+  return new Error(`Terminal is unavailable because the required plugin is not active on ${machineId}`);
 }
 
 function errorMessage(error: unknown): string {

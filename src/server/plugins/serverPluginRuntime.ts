@@ -20,7 +20,16 @@ import type {
   WorkspaceProvider,
 } from "../../server-plugin-api.js";
 import type { PiWebPluginScope } from "../../shared/apiTypes.js";
+import {
+  REQUIRED_TERMINAL_PLUGIN_ID,
+  REQUIRED_TERMINAL_RECOVERY_GUIDANCE,
+} from "../../shared/requiredTerminalPlugin.js";
 import type { ServerPluginSafeStart } from "../../serverPluginRecovery.js";
+import {
+  snapshotRequiredTerminalService,
+  unavailableRequiredTerminalService,
+  type RequiredTerminalService,
+} from "../terminals/requiredTerminalService.js";
 import type {
   PiWebPluginCatalog,
   PiWebPluginCatalogDiagnostic,
@@ -94,12 +103,18 @@ export interface CreateServerPluginRuntimeOptions {
   importer?: ServerPluginModuleImporter;
   execFile?: ServerPluginExecFile;
   lifecycleTimeoutMs?: number;
+  /** Isolated unit/package tests may opt out; production always enforces Terminal. */
+  enforceRequiredTerminal?: boolean;
+}
+
+interface InternalServerPluginActivation extends ServerPluginActivation {
+  requiredTerminalService?: RequiredTerminalService;
 }
 
 interface ActiveServerPlugin {
   entry: PiWebPluginCatalogEntry;
   plugin: PiWebServerPlugin;
-  activation: ServerPluginActivation;
+  activation: InternalServerPluginActivation;
   providerContribution?: ServerPluginProviderContribution;
   pairedBackendContribution?: ServerPluginPairedBackendContribution;
 }
@@ -118,6 +133,7 @@ export async function createServerPluginRuntime(
     return await ServerPluginRuntime.activate({ plugins: [], diagnostics: [] }, options);
   }
   const snapshot = await options.catalog.snapshot(options.safeStart === "bundled-only" ? { scope: "bundled" } : undefined);
+  if (options.enforceRequiredTerminal !== false) requireTerminalCatalogEntry(snapshot);
   return await ServerPluginRuntime.activate(snapshot, options);
 }
 
@@ -133,6 +149,7 @@ export class ServerPluginRuntime {
     private readonly importer: ServerPluginModuleImporter,
     private readonly execFile: ServerPluginExecFile,
     private readonly lifecycleTimeoutMs: number,
+    private readonly enforceRequiredTerminal: boolean,
   ) {}
 
   static async activate(
@@ -146,6 +163,7 @@ export class ServerPluginRuntime {
       options.importer ?? importServerPluginModule,
       options.execFile ?? createServerPluginExecFile(),
       positiveInteger(options.lifecycleTimeoutMs, DEFAULT_LIFECYCLE_TIMEOUT_MS, "lifecycleTimeoutMs"),
+      options.enforceRequiredTerminal !== false && options.safeStart !== "none",
     );
     try {
       await runtime.start(snapshot.plugins);
@@ -176,6 +194,15 @@ export class ServerPluginRuntime {
 
   pairedBackendContributions(): readonly ServerPluginPairedBackendContribution[] {
     return Object.freeze(this.activePlugins.flatMap((active) => active.pairedBackendContribution === undefined ? [] : [active.pairedBackendContribution]));
+  }
+
+  requiredTerminalService(): RequiredTerminalService {
+    if (this.safeStart === "none") return unavailableRequiredTerminalService();
+    const service = this.activePlugins.find(({ entry }) => entry.id === REQUIRED_TERMINAL_PLUGIN_ID)?.activation.requiredTerminalService;
+    if (service === undefined) {
+      throw requiredTerminalError("Required Terminal service is not active");
+    }
+    return service;
   }
 
   async inspectHealth(): Promise<readonly ServerPluginHealthInspection[]> {
@@ -241,8 +268,16 @@ export class ServerPluginRuntime {
   private async start(entries: readonly PiWebPluginCatalogEntry[]): Promise<void> {
     const serverEntries = entries
       .filter((entry) => entry.serverModule !== undefined)
-      .sort((left, right) => left.id.localeCompare(right.id));
-    for (const entry of serverEntries) await this.activateEntry(entry);
+      .sort(requiredTerminalFirst);
+    for (const entry of serverEntries) {
+      await this.activateEntry(entry);
+      if (this.enforceRequiredTerminal && entry.id === REQUIRED_TERMINAL_PLUGIN_ID) {
+        const terminalHealth = (await this.inspectHealth()).find(({ pluginId }) => pluginId === REQUIRED_TERMINAL_PLUGIN_ID);
+        if (terminalHealth?.health.status === "unhealthy") {
+          throw requiredTerminalError(`Required Terminal server entry is unhealthy: ${terminalHealth.error ?? terminalHealth.health.message ?? "health check failed"}`);
+        }
+      }
+    }
   }
 
   private async activateEntry(entry: PiWebPluginCatalogEntry): Promise<void> {
@@ -255,7 +290,7 @@ export class ServerPluginRuntime {
 
     let phase: ServerPluginLifecyclePhase = "validate";
     let plugin: PiWebServerPlugin | undefined;
-    let activation: ServerPluginActivation | undefined;
+    let rollbackStop: ((signal: AbortSignal) => Promise<void>) | undefined;
     try {
       const settings = cloneJsonObject(entry.settings, `settings for server plugin ${entry.id}`);
       phase = "import";
@@ -275,9 +310,12 @@ export class ServerPluginRuntime {
         execFile: this.execFile,
         signal,
       })));
+      rollbackStop = activationStopForRollback(activationValue);
       phase = "validate";
-      const loadedActivation = parseActivation(activationValue);
-      activation = loadedActivation;
+      const loadedActivation = parseActivation(activationValue, entry.id);
+      if (this.enforceRequiredTerminal && entry.id === REQUIRED_TERMINAL_PLUGIN_ID) {
+        requireTerminalActivation(loadedActivation);
+      }
       phase = "start";
       const start = loadedActivation.start?.bind(loadedActivation);
       if (start !== undefined) {
@@ -321,8 +359,8 @@ export class ServerPluginRuntime {
       }));
       this.logger.info({ pluginId: entry.id, pluginName: loadedPlugin.name }, "server plugin activated");
     } catch (error) {
-      const rollbackError = phase === "start" && activation?.stop !== undefined
-        ? await this.rollbackStart(entry.id, activation)
+      const rollbackError = (phase === "validate" || phase === "start") && rollbackStop !== undefined
+        ? await this.rollbackStart(entry.id, rollbackStop)
         : undefined;
       const message = rollbackError === undefined
         ? errorMessage(error)
@@ -340,12 +378,13 @@ export class ServerPluginRuntime {
       } else {
         this.logger.error(details, "server plugin activation failed");
       }
+      if (this.enforceRequiredTerminal && entry.id === REQUIRED_TERMINAL_PLUGIN_ID) {
+        throw requiredTerminalError(`Required Terminal server entry failed during ${phase}: ${message}`, error);
+      }
     }
   }
 
-  private async rollbackStart(pluginId: string, activation: ServerPluginActivation): Promise<unknown> {
-    const stop = activation.stop?.bind(activation);
-    if (stop === undefined) return undefined;
+  private async rollbackStart(pluginId: string, stop: (signal: AbortSignal) => Promise<void>): Promise<unknown> {
     try {
       await runBounded(pluginId, "stop", this.lifecycleTimeoutMs, (signal) => stop(signal));
       return undefined;
@@ -353,6 +392,41 @@ export class ServerPluginRuntime {
       return error;
     }
   }
+}
+
+function requireTerminalCatalogEntry(snapshot: PiWebPluginCatalogSnapshot): PiWebPluginCatalogEntry {
+  const entry = snapshot.plugins.find(({ id }) => id === REQUIRED_TERMINAL_PLUGIN_ID);
+  if (entry === undefined) throw requiredTerminalError("Required bundled Terminal package is missing");
+  if (entry.scope !== "bundled" || entry.source !== "bundled") {
+    throw requiredTerminalError("Required Terminal package must come from the bundled plugin scope");
+  }
+  if (entry.browserModule === undefined || entry.serverModule === undefined || !entry.machineSpecific) {
+    throw requiredTerminalError("Required Terminal package must provide machine-specific browser and server entries");
+  }
+  if (!entry.enabled) throw requiredTerminalError("Required Terminal package cannot be disabled in normal startup");
+  return entry;
+}
+
+function requireTerminalActivation(activation: InternalServerPluginActivation): void {
+  if (activation.pairedBackend?.openChannel === undefined) {
+    throw new IncompatibleServerPluginError("Required Terminal server entry must expose paired request and channel version 1");
+  }
+  if (activation.requiredTerminalService === undefined) {
+    throw new IncompatibleServerPluginError("Required Terminal server entry must expose requiredTerminalService");
+  }
+}
+
+function requiredTerminalFirst(left: PiWebPluginCatalogEntry, right: PiWebPluginCatalogEntry): number {
+  if (left.id === REQUIRED_TERMINAL_PLUGIN_ID) return right.id === REQUIRED_TERMINAL_PLUGIN_ID ? 0 : -1;
+  if (right.id === REQUIRED_TERMINAL_PLUGIN_ID) return 1;
+  return left.id.localeCompare(right.id);
+}
+
+function requiredTerminalError(message: string, cause?: unknown): RequiredTerminalPluginError {
+  return new RequiredTerminalPluginError(
+    `${message}. ${REQUIRED_TERMINAL_RECOVERY_GUIDANCE}`,
+    cause === undefined ? {} : { cause },
+  );
 }
 
 function disabledReason(entry: PiWebPluginCatalogEntry, safeStart: ServerPluginSafeStart | undefined): string | undefined {
@@ -431,13 +505,34 @@ function isPiWebServerPlugin(value: unknown): value is PiWebServerPlugin {
     && typeof value["activate"] === "function";
 }
 
-function parseActivation(value: unknown): ServerPluginActivation {
+function activationStopForRollback(value: unknown): ((signal: AbortSignal) => Promise<void>) | undefined {
+  if (!isRecord(value)) return undefined;
+  const stop = value["stop"];
+  if (typeof stop !== "function") return undefined;
+  return async (signal: AbortSignal): Promise<void> => {
+    await Reflect.apply(stop, value, [signal]);
+  };
+}
+
+function parseActivation(value: unknown, pluginId: string): InternalServerPluginActivation {
   if (!isRecord(value)) throw new IncompatibleServerPluginError("Server plugin activation must be an object");
   if (value["workspaceProviders"] !== undefined) {
     throw new IncompatibleServerPluginError("Server plugins may contribute only one workspaceProvider");
   }
   const workspaceProviderValue = value["workspaceProvider"];
   const pairedBackendValue = value["pairedBackend"];
+  const requiredTerminalServiceValue = value["requiredTerminalService"];
+  if (requiredTerminalServiceValue !== undefined && pluginId !== REQUIRED_TERMINAL_PLUGIN_ID) {
+    throw new IncompatibleServerPluginError("Only the required Terminal plugin may expose requiredTerminalService");
+  }
+  let requiredTerminalService: RequiredTerminalService | undefined;
+  if (requiredTerminalServiceValue !== undefined) {
+    try {
+      requiredTerminalService = snapshotRequiredTerminalService(requiredTerminalServiceValue);
+    } catch (error) {
+      throw new IncompatibleServerPluginError(errorMessage(error), { cause: error });
+    }
+  }
   const candidate = {
     workspaceProvider: workspaceProviderValue === undefined ? undefined : snapshotWorkspaceProvider(workspaceProviderValue),
     pairedBackend: pairedBackendValue === undefined ? undefined : snapshotPairedPluginBackend(pairedBackendValue),
@@ -458,6 +553,7 @@ function parseActivation(value: unknown): ServerPluginActivation {
   return Object.freeze({
     ...(candidate.workspaceProvider === undefined ? {} : { workspaceProvider: candidate.workspaceProvider }),
     ...(candidate.pairedBackend === undefined ? {} : { pairedBackend: candidate.pairedBackend }),
+    ...(requiredTerminalService === undefined ? {} : { requiredTerminalService }),
     ...(start === undefined ? {} : { start: (signal: AbortSignal) => start(signal) }),
     ...(stop === undefined ? {} : { stop: (signal: AbortSignal) => stop(signal) }),
     ...(health === undefined ? {} : { health: (signal: AbortSignal) => health(signal) }),
@@ -502,12 +598,14 @@ function isPairedPluginBackend(value: unknown): value is PairedPluginBackendV1 {
 
 function snapshotPairedPluginChannel(value: unknown): PairedPluginChannel {
   if (!isPairedPluginChannel(value)) {
-    throw new Error("Server plugin openChannel must return a channel with receive and optional close callbacks");
+    throw new Error("Server plugin openChannel must return a channel with receive, optional completion, and optional close callbacks");
   }
   const receive = value.receive.bind(value);
+  const closed = value.closed === undefined ? undefined : Promise.resolve(value.closed);
   const close = value.close?.bind(value);
   return Object.freeze({
     receive: (data: JsonValue, signal: AbortSignal) => receive(data, signal),
+    ...(closed === undefined ? {} : { closed }),
     ...(close === undefined ? {} : { close: (context: PairedPluginChannelCloseContext) => close(context) }),
   });
 }
@@ -515,7 +613,12 @@ function snapshotPairedPluginChannel(value: unknown): PairedPluginChannel {
 function isPairedPluginChannel(value: unknown): value is PairedPluginChannel {
   return isRecord(value)
     && typeof value["receive"] === "function"
+    && (value["closed"] === undefined || isPromiseLike(value["closed"]))
     && (value["close"] === undefined || typeof value["close"] === "function");
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<void> {
+  return isRecord(value) && typeof value["then"] === "function";
 }
 
 function snapshotWorkspaceProvider(value: unknown): WorkspaceProvider {
@@ -651,6 +754,10 @@ function abortError(signal: AbortSignal): Error {
 
 class IncompatibleServerPluginError extends Error {
   override name = "IncompatibleServerPluginError";
+}
+
+export class RequiredTerminalPluginError extends Error {
+  override name = "RequiredTerminalPluginError";
 }
 
 class ServerPluginTimeoutError extends Error {

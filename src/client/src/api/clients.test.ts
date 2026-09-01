@@ -696,11 +696,12 @@ function piWebConfigResponse(config: PiWebConfigValues) {
 
 function piWebPluginsResponse() {
   return {
-    lifecycleVersion: 1,
+    lifecycleVersion: 2,
     plugins: [{ id: "info", module: "/pi-web-plugins/info/plugin.js", source: "test", scope: "local", machineSpecific: false, enabled: true, discovered: true, conflict: false }],
     diagnostics: [],
     serverRuntime: {
       status: "available",
+      terminalMode: "required",
       desiredSafeStart: "off",
       restartRequired: false,
       recovery: {

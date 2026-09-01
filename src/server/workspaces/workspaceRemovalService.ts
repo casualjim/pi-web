@@ -6,7 +6,7 @@ import {
   WORKSPACE_REMOVAL_OPERATION_TIMEOUT_MS,
 } from "../../shared/workspaceRemovalProtocol.js";
 import type { Project } from "../types.js";
-import type { RunTerminalCommandOptions } from "../terminals/terminalService.js";
+import type { RunTerminalCommandOptions } from "../terminals/requiredTerminalService.js";
 import {
   WorkspaceProviderRemovalError,
   type WorkspaceProviderRemovalTarget,

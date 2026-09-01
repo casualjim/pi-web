@@ -256,7 +256,7 @@ describe("API parsers", () => {
       clearSafeStart: "pi-web plugins safe-start clear --restart",
     };
     const response = {
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [
         {
           id: "info",
@@ -280,7 +280,7 @@ describe("API parsers", () => {
         { id: "workspace-provider", source: "local", scope: "user", enabled: true, discovered: false, conflict: false },
       ],
       diagnostics: [{ kind: "conflict", snapshot: "desired", source: "local", message: "Duplicate id", pluginId: "info" }],
-      serverRuntime: { status: "available", safeStart: "bundled-only", desiredSafeStart: "off", restartRequired: true, recovery },
+      serverRuntime: { status: "available", terminalMode: "required", safeStart: "bundled-only", desiredSafeStart: "off", restartRequired: true, recovery },
     };
 
     expect(parsePiWebPluginsResponse(response)).toEqual({
@@ -300,14 +300,15 @@ describe("API parsers", () => {
   });
 
   it("rejects malformed plugin lifecycle versions and recovery state", () => {
-    expect(() => parsePiWebPluginsResponse({ lifecycleVersion: 2, plugins: [], diagnostics: [], serverRuntime: {} }))
+    expect(() => parsePiWebPluginsResponse({ lifecycleVersion: 3, plugins: [], diagnostics: [], serverRuntime: {} }))
       .toThrow("Unsupported PI WEB plugin lifecycle version");
     expect(() => parsePiWebPluginsResponse({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [],
       diagnostics: [],
       serverRuntime: {
         status: "available",
+        terminalMode: "required",
         desiredSafeStart: "future",
         restartRequired: false,
         recovery: {
@@ -319,11 +320,12 @@ describe("API parsers", () => {
       },
     })).toThrow("Invalid desired PI WEB server-plugin safe-start state");
     expect(() => parsePiWebPluginsResponse({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [],
       diagnostics: [],
       serverRuntime: {
         status: "available",
+        terminalMode: "required",
         restartRequired: false,
         recovery: {
           showSafeStart: "pi-web plugins safe-start show --token secret",

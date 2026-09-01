@@ -8,7 +8,7 @@ import type {
 import type { TerminalCommandRun, WorkspaceListing } from "../../shared/apiTypes.js";
 import type { ServerPluginProviderContribution } from "../plugins/serverPluginRuntime.js";
 import type { Project } from "../types.js";
-import type { RunTerminalCommandOptions } from "../terminals/terminalService.js";
+import type { RunTerminalCommandOptions } from "../terminals/requiredTerminalService.js";
 import {
   WorkspaceProviderRegistry,
   type WorkspaceProviderRemovalTarget,

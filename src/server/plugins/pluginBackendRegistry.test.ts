@@ -350,6 +350,37 @@ describe("PluginBackendRegistry", () => {
     expect(registry.activeChannelCount()).toBe(0);
   });
 
+  it("releases admission and closes the transport when a plugin completes its channel", async () => {
+    const workspaces = providerRegistry([]);
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected folder workspace");
+    let complete: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => { complete = resolve; });
+    const close = vi.fn();
+    const transport = channelTransport();
+    const registry = new PluginBackendRegistry({
+      contributions: [channelContribution("terminal", () => ({ closed, receive: () => undefined, close }))],
+      workspaces,
+    });
+
+    await registry.openChannel({
+      pluginId: "terminal",
+      moduleRevision: "terminal-r1",
+      project,
+      workspaceId,
+      operation: "terminal.attach",
+      input: null,
+    }, transport.value);
+    expect(registry.activeChannelCount()).toBe(1);
+
+    complete?.();
+
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+    expect(close).toHaveBeenCalledOnce();
+    expect(transport.errors).toEqual([]);
+    expect(transport.closes).toEqual([{ code: 1000, reason: "Plugin completed channel" }]);
+  });
+
   it("enforces channel revision, workspace, and admission bounds with reusable release", async () => {
     const workspaces = providerRegistry([]);
     const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;

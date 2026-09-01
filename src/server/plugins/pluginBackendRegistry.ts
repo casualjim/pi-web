@@ -505,6 +505,7 @@ class ManagedPluginBackendChannel implements PluginBackendChannelSession {
       ).catch(() => undefined);
     }, options.lifetimeMs);
     this.lifetimeTimer.unref();
+    this.observePluginCompletion();
   }
 
   async receive(data: unknown): Promise<void> {
@@ -547,6 +548,34 @@ class ManagedPluginBackendChannel implements PluginBackendChannelSession {
 
   private isClosed(): boolean {
     return this.closePromise !== undefined || this.options.lifetimeController.signal.aborted;
+  }
+
+  private observePluginCompletion(): void {
+    const closed = this.options.channel.closed;
+    if (closed === undefined) return;
+    void Promise.resolve(closed).then(async () => {
+      if (this.isClosed()) return;
+      const reason = "Plugin completed channel";
+      try {
+        await this.close(1000, reason);
+        this.options.transport.close(1000, reason);
+      } catch (error) {
+        await this.fail(
+          "channel-closed",
+          `Server plugin ${this.pluginId} channel ${this.options.operation} completion cleanup failed: ${boundedErrorMessage(error)}`,
+          1011,
+        );
+      }
+    }, async (error: unknown) => {
+      if (this.isClosed()) return;
+      await this.fail(
+        "channel-closed",
+        `Server plugin ${this.pluginId} channel ${this.options.operation} completion failed: ${boundedErrorMessage(error)}`,
+        1011,
+      );
+    }).catch((error: unknown) => {
+      this.options.onCleanupFailure(error);
+    });
   }
 
   close(code = 1000, reason = "Channel closed"): Promise<void> {

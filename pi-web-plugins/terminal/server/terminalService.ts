@@ -1,11 +1,34 @@
-import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import * as pty from "node-pty";
-import type { TerminalCommandRun, TerminalCommandRunFilter, TerminalCommandRunStatus, TerminalUiEvent } from "../../shared/apiTypes.js";
-import type { SessionEventHub } from "../realtime/sessionEventHub.js";
-import type { WorkspaceActivityService } from "../activity/workspaceActivityService.js";
 
 const MAX_REPLAY_BUFFER = 200_000;
+
+export type TerminalCommandRunStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface TerminalCommandRun {
+  id: string;
+  origin: string;
+  projectId: string;
+  workspaceId: string;
+  terminalId: string;
+  title: string;
+  command: string;
+  status: TerminalCommandRunStatus;
+  exitCode?: number;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  metadata: Record<string, string>;
+}
+
+export interface TerminalCommandRunFilter {
+  projectId?: string;
+  workspaceId?: string;
+  terminalId?: string;
+  statuses?: TerminalCommandRunStatus[];
+  metadata?: Record<string, string>;
+}
 
 export interface TerminalInfo {
   id: string;
@@ -17,11 +40,20 @@ export interface TerminalInfo {
   commandRunId?: string;
 }
 
-export interface RunTerminalCommandOptions {
-  origin: string;
+export interface TerminalWorkspaceScope {
   projectId: string;
   workspaceId: string;
   cwd: string;
+}
+
+export interface CreateTerminalOptions extends TerminalWorkspaceScope {
+  name?: string;
+  cols?: number;
+  rows?: number;
+}
+
+export interface RunTerminalCommandOptions extends TerminalWorkspaceScope {
+  origin: string;
   title: string;
   command: string;
   metadata?: unknown;
@@ -29,7 +61,18 @@ export interface RunTerminalCommandOptions {
   rows?: number;
 }
 
-interface TerminalRecord extends TerminalInfo {
+export type TerminalActivityEvent =
+  | { type: "terminal.created"; terminal: TerminalInfo }
+  | { type: "terminal.exited"; terminal: TerminalInfo }
+  | { type: "terminal.closed"; terminalId: string; cwd: string };
+
+export interface TerminalActivitySink {
+  updateTerminal(terminal: Pick<TerminalInfo, "id" | "cwd" | "exited">): void;
+  removeTerminal(terminalId: string, cwd?: string): void;
+  publish(event: TerminalActivityEvent): void;
+}
+
+interface TerminalRecord extends TerminalInfo, TerminalWorkspaceScope {
   pty: pty.IPty;
   buffer: string;
   events: EventEmitter;
@@ -39,27 +82,37 @@ interface TerminalRecord extends TerminalInfo {
 export class TerminalService {
   private readonly terminals = new Map<string, TerminalRecord>();
   private readonly commandRuns = new Map<string, TerminalCommandRun>();
+  private activitySink: TerminalActivitySink | undefined;
+  private disposed = false;
 
-  constructor(private readonly events?: SessionEventHub, private readonly workspaceActivity?: Pick<WorkspaceActivityService, "updateTerminal" | "removeTerminal">) {}
+  bindActivitySink(sink: TerminalActivitySink): void {
+    if (this.activitySink !== undefined) throw new Error("Terminal activity sink is already bound");
+    this.activitySink = sink;
+  }
 
-  list(cwd: string): TerminalInfo[] {
+  list(scope: TerminalWorkspaceScope): TerminalInfo[] {
+    validateScope(scope);
     return [...this.terminals.values()]
-      .filter((terminal) => terminal.cwd === cwd)
+      .filter((terminal) => matchesScope(terminal, scope))
       .map(toInfo);
   }
 
   closeForCwd(cwd: string): void {
     if (cwd === "") throw new Error("cwd is required");
-    for (const terminal of [...this.terminals.values()].filter((candidate) => candidate.cwd === cwd)) this.close(terminal.id);
+    for (const terminal of [...this.terminals.values()].filter((candidate) => candidate.cwd === cwd)) {
+      this.closeRecord(terminal);
+    }
   }
 
-  create(options: { cwd: string; name?: string; cols?: number; rows?: number }): TerminalInfo {
+  create(options: CreateTerminalOptions): TerminalInfo {
+    validateScope(options);
     const shell = process.env["SHELL"] ?? "/bin/bash";
     return this.createTerminal({ ...options, shellArgs: interactiveShellArgs(shell) });
   }
 
   runCommand(options: RunTerminalCommandOptions): TerminalCommandRun {
     validateCommandRunOptions(options);
+    this.requireAvailable();
     const commandRunId = randomUUID();
     const terminalId = randomUUID();
     const createdAt = new Date().toISOString();
@@ -82,6 +135,8 @@ export class TerminalService {
     try {
       this.createTerminal({
         id: terminalId,
+        projectId: options.projectId,
+        workspaceId: options.workspaceId,
         cwd: options.cwd,
         name: options.title,
         ...(options.cols === undefined ? {} : { cols: options.cols }),
@@ -103,54 +158,77 @@ export class TerminalService {
       .map(copyCommandRun);
   }
 
+  listCommandRunsForScope(scope: TerminalWorkspaceScope, filter: TerminalCommandRunFilter = {}): TerminalCommandRun[] {
+    validateScope(scope);
+    return this.listCommandRuns({ ...filter, projectId: scope.projectId, workspaceId: scope.workspaceId });
+  }
+
   getCommandRun(runId: string): TerminalCommandRun | undefined {
     const run = this.commandRuns.get(runId);
     return run === undefined ? undefined : copyCommandRun(run);
   }
 
-  cancelCommandRun(runId: string): TerminalCommandRun {
+  getCommandRunForScope(scope: TerminalWorkspaceScope, runId: string): TerminalCommandRun | undefined {
+    validateScope(scope);
     const run = this.commandRuns.get(runId);
-    if (run === undefined) throw new Error("Terminal command run not found");
-    if (isTerminalCommandRunFinal(run.status)) return copyCommandRun(run);
-    const terminal = this.terminals.get(run.terminalId);
-    if (terminal === undefined) throw new Error("Terminal not found");
-    if (!terminal.exited) terminal.pty.write("\x03");
-    return copyCommandRun(run);
+    return run?.projectId === scope.projectId && run.workspaceId === scope.workspaceId
+      ? copyCommandRun(run)
+      : undefined;
   }
 
-  get(id: string): TerminalInfo | undefined {
+  cancelCommandRun(runId: string): TerminalCommandRun {
+    return this.cancelCommandRunRecord(this.requireCommandRun(runId));
+  }
+
+  cancelCommandRunForScope(scope: TerminalWorkspaceScope, runId: string): TerminalCommandRun {
+    const run = this.getCommandRunForScope(scope, runId);
+    if (run === undefined) throw new Error("Terminal command run not found in this workspace");
+    return this.cancelCommandRunRecord(this.requireCommandRun(runId));
+  }
+
+  get(scope: TerminalWorkspaceScope, id: string): TerminalInfo | undefined {
     const terminal = this.terminals.get(id);
-    return terminal === undefined ? undefined : toInfo(terminal);
+    return terminal === undefined || !matchesScope(terminal, scope) ? undefined : toInfo(terminal);
   }
 
-  attach(id: string, handlers: { output: (data: string, replay: boolean) => void; exit: (exitCode: number | undefined) => void }): () => void {
-    const terminal = this.require(id);
+  attach(
+    scope: TerminalWorkspaceScope,
+    id: string,
+    handlers: { output(data: string, replay: boolean): void; exit(exitCode: number | undefined): void; closed?(): void },
+  ): () => void {
+    const terminal = this.requireScoped(scope, id);
     if (terminal.buffer !== "") handlers.output(terminal.buffer, true);
     if (terminal.exited) handlers.exit(terminal.exitCode);
-    const onOutput = (data: string) => { handlers.output(data, false); };
-    const onExit = (exitCode: number | undefined) => { handlers.exit(exitCode); };
+    const onOutput = (data: string): void => { handlers.output(data, false); };
+    const onExit = (exitCode: number | undefined): void => { handlers.exit(exitCode); };
+    const onClosed = (): void => { handlers.closed?.(); };
     terminal.events.on("output", onOutput);
     terminal.events.on("exit", onExit);
+    terminal.events.on("closed", onClosed);
+    let detached = false;
     return () => {
+      if (detached) return;
+      detached = true;
       terminal.events.off("output", onOutput);
       terminal.events.off("exit", onExit);
+      terminal.events.off("closed", onClosed);
     };
   }
 
-  write(id: string, data: string): void {
-    const terminal = this.require(id);
+  write(scope: TerminalWorkspaceScope, id: string, data: string): void {
+    const terminal = this.requireScoped(scope, id);
     if (!terminal.exited) terminal.pty.write(data);
   }
 
-  resize(id: string, cols: number, rows: number): void {
-    const terminal = this.require(id);
+  resize(scope: TerminalWorkspaceScope, id: string, cols: number, rows: number): void {
+    const terminal = this.requireScoped(scope, id);
     if (!terminal.exited && Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
       terminal.pty.resize(Math.floor(cols), Math.floor(rows));
     }
   }
 
-  continue(id: string): TerminalInfo {
-    const record = this.require(id);
+  continue(scope: TerminalWorkspaceScope, id: string): TerminalInfo {
+    const record = this.requireScoped(scope, id);
     if (!record.exited) return toInfo(record);
     delete record.exitCode;
     delete record.commandRunId;
@@ -164,31 +242,39 @@ export class TerminalService {
       cwd: record.cwd,
       cols: 100,
       rows: 30,
-      env: { ...process.env, TERM: "xterm-256color", PI_WEB_TERMINAL: "1" },
+      env: terminalEnvironment(),
     });
     this.attachPtyEvents(record);
     const info = toInfo(record);
-    this.workspaceActivity?.updateTerminal(info);
+    this.activitySink?.updateTerminal(info);
     this.publish({ type: "terminal.created", terminal: info });
     return info;
   }
 
-  close(id: string): void {
+  closeAll(scope: TerminalWorkspaceScope): void {
+    validateScope(scope);
+    for (const terminal of [...this.terminals.values()].filter((candidate) => matchesScope(candidate, scope))) {
+      this.closeRecord(terminal);
+    }
+  }
+
+  close(scope: TerminalWorkspaceScope, id: string): void {
+    validateScope(scope);
     const terminal = this.terminals.get(id);
     if (terminal === undefined) return;
-    this.terminals.delete(id);
-    terminal.events.removeAllListeners();
-    this.workspaceActivity?.removeTerminal(id, terminal.cwd);
-    if (!terminal.exited) terminal.pty.kill();
-    this.publish({ type: "terminal.closed", terminalId: id, cwd: terminal.cwd });
+    if (!matchesScope(terminal, scope)) throw new Error("Terminal not found in this workspace");
+    this.closeRecord(terminal);
   }
 
   dispose(): void {
-    for (const id of [...this.terminals.keys()]) this.close(id);
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const terminal of [...this.terminals.values()]) this.closeRecord(terminal);
   }
 
-  private createTerminal(options: { id?: string; cwd: string; name?: string; cols?: number; rows?: number; shellArgs: string[]; commandRunId?: string }): TerminalInfo {
-    if (options.cwd === "") throw new Error("cwd is required");
+  private createTerminal(options: CreateTerminalOptions & { id?: string; shellArgs: string[]; commandRunId?: string }): TerminalInfo {
+    this.requireAvailable();
+    validateScope(options);
     const id = options.id ?? randomUUID();
     const createdAt = new Date().toISOString();
     const shell = process.env["SHELL"] ?? "/bin/bash";
@@ -197,13 +283,15 @@ export class TerminalService {
       cwd: options.cwd,
       cols: options.cols ?? 100,
       rows: options.rows ?? 30,
-      env: { ...process.env, TERM: "xterm-256color", PI_WEB_TERMINAL: "1" },
+      env: terminalEnvironment(),
     });
     const requestedName = options.name?.trim();
     const record: TerminalRecord = {
       id,
+      projectId: options.projectId,
+      workspaceId: options.workspaceId,
       cwd: options.cwd,
-      name: requestedName !== undefined && requestedName !== "" ? requestedName : `Shell ${String(this.list(options.cwd).length + 1)}`,
+      name: requestedName !== undefined && requestedName !== "" ? requestedName : `Shell ${String(this.list(options).length + 1)}`,
       createdAt,
       exited: false,
       pty: terminal,
@@ -214,7 +302,7 @@ export class TerminalService {
     this.attachPtyEvents(record);
     this.terminals.set(id, record);
     const info = toInfo(record);
-    this.workspaceActivity?.updateTerminal(info);
+    this.activitySink?.updateTerminal(info);
     this.publish({ type: "terminal.created", terminal: info });
     return info;
   }
@@ -230,7 +318,7 @@ export class TerminalService {
       this.completeCommandRun(record.commandRunId, exitCode);
       record.events.emit("exit", exitCode);
       const info = toInfo(record);
-      this.workspaceActivity?.updateTerminal(info);
+      this.activitySink?.updateTerminal(info);
       this.publish({ type: "terminal.exited", terminal: info });
     });
   }
@@ -248,14 +336,44 @@ export class TerminalService {
     this.commandRuns.set(runId, completed);
   }
 
-  private require(id: string): TerminalRecord {
+  private requireScoped(scope: TerminalWorkspaceScope, id: string): TerminalRecord {
+    validateScope(scope);
     const terminal = this.terminals.get(id);
-    if (terminal === undefined) throw new Error("Terminal not found");
+    if (terminal === undefined || !matchesScope(terminal, scope)) {
+      throw new Error("Terminal not found in this workspace");
+    }
     return terminal;
   }
 
-  private publish(event: TerminalUiEvent): void {
-    this.events?.publishRealtime(event);
+  private requireCommandRun(runId: string): TerminalCommandRun {
+    const run = this.commandRuns.get(runId);
+    if (run === undefined) throw new Error("Terminal command run not found");
+    return run;
+  }
+
+  private cancelCommandRunRecord(run: TerminalCommandRun): TerminalCommandRun {
+    if (isTerminalCommandRunFinal(run.status)) return copyCommandRun(run);
+    const terminal = this.terminals.get(run.terminalId);
+    if (terminal === undefined) throw new Error("Terminal not found");
+    if (!terminal.exited) terminal.pty.write("\x03");
+    return copyCommandRun(run);
+  }
+
+  private closeRecord(terminal: TerminalRecord): void {
+    if (!this.terminals.delete(terminal.id)) return;
+    terminal.events.emit("closed");
+    terminal.events.removeAllListeners();
+    this.activitySink?.removeTerminal(terminal.id, terminal.cwd);
+    if (!terminal.exited) terminal.pty.kill();
+    this.publish({ type: "terminal.closed", terminalId: terminal.id, cwd: terminal.cwd });
+  }
+
+  private publish(event: TerminalActivityEvent): void {
+    this.activitySink?.publish(event);
+  }
+
+  private requireAvailable(): void {
+    if (this.disposed) throw new Error("Terminal service is stopped");
   }
 }
 
@@ -282,6 +400,10 @@ export function interactiveShellArgs(shell: string): string[] {
   return executable === "bash" || executable === "zsh" || executable === "fish" ? ["-l"] : [];
 }
 
+function terminalEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, TERM: "xterm-256color", PI_WEB_TERMINAL: "1" };
+}
+
 function commandRunShellScript(command: string): string {
   return `printf '%s\\n' ${shellQuote(`$ ${command}`)}\n${command}`;
 }
@@ -290,11 +412,21 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function validateScope(scope: TerminalWorkspaceScope): void {
+  if (scope.projectId.trim() === "") throw new Error("projectId is required");
+  if (scope.workspaceId.trim() === "") throw new Error("workspaceId is required");
+  if (scope.cwd.trim() === "") throw new Error("cwd is required");
+}
+
+function matchesScope(record: TerminalWorkspaceScope, scope: TerminalWorkspaceScope): boolean {
+  return record.projectId === scope.projectId
+    && record.workspaceId === scope.workspaceId
+    && record.cwd === scope.cwd;
+}
+
 function validateCommandRunOptions(options: RunTerminalCommandOptions): void {
+  validateScope(options);
   if (options.origin.trim() === "") throw new Error("origin is required");
-  if (options.projectId.trim() === "") throw new Error("projectId is required");
-  if (options.workspaceId.trim() === "") throw new Error("workspaceId is required");
-  if (options.cwd.trim() === "") throw new Error("cwd is required");
   if (options.title.trim() === "") throw new Error("title is required");
   if (options.command.trim() === "") throw new Error("command is required");
   parseMetadata(options.metadata);
@@ -302,7 +434,7 @@ function validateCommandRunOptions(options: RunTerminalCommandOptions): void {
 
 function parseMetadata(value: unknown): Record<string, string> {
   if (value === undefined || value === null) return {};
-  if (!isRecord(value) || Array.isArray(value)) throw new Error("metadata must be an object");
+  if (!isRecord(value)) throw new Error("metadata must be an object");
   return Object.fromEntries(Object.entries(value).map(([key, metadataValue]) => {
     if (key.trim() === "") throw new Error("metadata keys must not be empty");
     if (typeof metadataValue !== "string") throw new Error("metadata values must be strings");
@@ -330,5 +462,5 @@ function copyCommandRun(run: TerminalCommandRun): TerminalCommandRun {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

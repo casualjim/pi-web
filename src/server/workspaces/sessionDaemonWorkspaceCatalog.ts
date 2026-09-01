@@ -12,6 +12,7 @@ import type {
   WorkspaceProviderTier,
 } from "../../shared/apiTypes.js";
 import { isPiWebPluginId } from "../../shared/pluginIds.js";
+import type { TerminalPluginMode } from "../../shared/requiredTerminalPlugin.js";
 import type { SessionDaemonRequestClient } from "../../sessiond/sessionDaemonClient.js";
 import type {
   ServerPluginHealthInspection,
@@ -229,12 +230,17 @@ function parseProviderRuntimeSnapshot(value: unknown): WorkspaceProviderRuntimeS
   if (value["protocolVersion"] !== WORKSPACE_PROVIDER_RUNTIME_PROTOCOL_VERSION) {
     throw protocolError("provider runtime protocol is unsupported; restart or upgrade the session daemon");
   }
+  const terminalMode = parseTerminalMode(value["terminalMode"]);
   const safeStart = parseSafeStart(value["safeStart"]);
+  if ((safeStart === "none") !== (terminalMode === "recovery-disabled")) {
+    throw protocolError("provider runtime terminalMode does not match safeStart");
+  }
   const records = parseArray(value["records"], "provider runtime records", parseRuntimeRecord);
   const health = parseArray(value["health"], "provider runtime health", parseHealthInspection);
   const diagnostics = parseArray(value["diagnostics"], "provider runtime diagnostics", parseCatalogDiagnostic);
   return Object.freeze({
     protocolVersion: WORKSPACE_PROVIDER_RUNTIME_PROTOCOL_VERSION,
+    terminalMode,
     ...(safeStart === undefined ? {} : { safeStart }),
     records: Object.freeze(records),
     health: Object.freeze(health),
@@ -334,6 +340,11 @@ function parseHealth(value: unknown, inspectionLabel: string): ServerPluginHealt
   });
 }
 
+function parseTerminalMode(value: unknown): TerminalPluginMode {
+  if (value === "required" || value === "recovery-disabled") return value;
+  throw protocolError("provider runtime terminalMode is invalid");
+}
+
 function parseSafeStart(value: unknown): ServerPluginSafeStart | undefined {
   if (value === undefined) return undefined;
   if (value === "bundled-only" || value === "none") return value;
@@ -406,7 +417,7 @@ function isLifecyclePhase(value: unknown): value is ServerPluginLifecyclePhase {
 }
 
 function isCatalogDiagnosticCode(value: unknown): value is PiWebPluginCatalogDiagnosticCode {
-  return value === "invalid-package" || value === "duplicate-id";
+  return value === "invalid-package" || value === "duplicate-id" || value === "required-plugin-config";
 }
 
 function encodedId(value: string, label: string): string {

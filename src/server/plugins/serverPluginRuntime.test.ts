@@ -3,13 +3,18 @@ import type { PiWebServerPlugin, ServerPluginActivation, ServerPluginActivationC
 import type { PiWebPluginScope } from "../../shared/apiTypes.js";
 import type { PiWebPluginCatalogEntry, PiWebPluginCatalogSnapshot } from "../piWebPluginCatalog.js";
 import {
-  createServerPluginRuntime,
+  createServerPluginRuntime as createServerPluginRuntimeWithRequiredTerminal,
+  type CreateServerPluginRuntimeOptions,
   type ServerPluginModuleImporter,
 } from "./serverPluginRuntime.js";
 
 afterEach(() => {
   vi.useRealTimers();
 });
+
+function createServerPluginRuntime(options: CreateServerPluginRuntimeOptions) {
+  return createServerPluginRuntimeWithRequiredTerminal({ ...options, enforceRequiredTerminal: false });
+}
 
 describe("server plugin runtime", () => {
   it("activates deterministically, quarantines ordinary failures, publishes transactionally, and stops in reverse", async () => {
@@ -393,6 +398,115 @@ describe("server plugin runtime", () => {
     expect(records[2]?.message).toContain("must not contain cycles");
     expect(records[3]?.message).toBe("Server plugins may contribute only one workspaceProvider");
   });
+
+  it("requires the bundled Terminal shape in normal and bundled-only startup but bypasses discovery in no-plugin recovery", async () => {
+    const catalog = { snapshot: vi.fn(() => Promise.resolve(testSnapshot([]))) };
+
+    await expect(createServerPluginRuntimeWithRequiredTerminal({ catalog, logger: testLogger() }))
+      .rejects.toThrow("Required bundled Terminal package is missing");
+    await expect(createServerPluginRuntimeWithRequiredTerminal({ catalog, safeStart: "bundled-only", logger: testLogger() }))
+      .rejects.toThrow("safe-start set none");
+
+    const recovery = await createServerPluginRuntimeWithRequiredTerminal({
+      catalog: { snapshot: vi.fn(() => Promise.reject(new Error("recovery must not discover plugins"))) },
+      safeStart: "none",
+      logger: testLogger(),
+    });
+    expect(recovery.healthRecords()).toEqual([]);
+    expect(() => { recovery.requiredTerminalService().closeForCwd("/repo"); })
+      .toThrow("Terminal is unavailable while server-plugin safe start is set to none");
+    await recovery.stop();
+  });
+
+  it("activates required Terminal before ordinary plugins and stops it after dependents", async () => {
+    const events: string[] = [];
+    const imported: string[] = [];
+    const requiredService = requiredTerminalServiceFixture();
+    const runtime = await createServerPluginRuntimeWithRequiredTerminal({
+      catalog: { snapshot: () => Promise.resolve(testSnapshot([
+        entry("zeta", { scope: "bundled" }),
+        entry("terminal", { scope: "bundled", browserRevision: "terminal-browser" }),
+      ])) },
+      importer: (url) => {
+        const id = pluginIdFromUrl(url);
+        imported.push(id);
+        if (id === "terminal") {
+          return Promise.resolve(pluginModule("Terminal", {
+            pairedBackend: {
+              version: 1,
+              request: () => null,
+              openChannel: () => ({ receive: () => undefined }),
+            },
+            requiredTerminalService: requiredService,
+            health: () => ({ status: "healthy" }),
+            stop: () => { events.push("stop:terminal"); },
+          }));
+        }
+        return Promise.resolve(pluginModule("Zeta", {
+          stop: () => { events.push("stop:zeta"); },
+        }));
+      },
+      logger: testLogger(),
+    });
+
+    expect(imported).toEqual(["terminal", "zeta"]);
+    expect(runtime.healthRecords().map(({ pluginId, state }) => [pluginId, state])).toEqual([
+      ["terminal", "active"],
+      ["zeta", "active"],
+    ]);
+    expect(runtime.requiredTerminalService().legacyRoutes).not.toBe(requiredService.legacyRoutes);
+
+    await runtime.stop();
+    expect(events).toEqual(["stop:zeta", "stop:terminal"]);
+  });
+
+  it("rolls back a required Terminal activation that fails contribution validation", async () => {
+    const stopped = vi.fn();
+    await expect(createServerPluginRuntimeWithRequiredTerminal({
+      catalog: { snapshot: () => Promise.resolve(testSnapshot([
+        entry("terminal", { scope: "bundled", browserRevision: "terminal-browser" }),
+      ])) },
+      importer: () => Promise.resolve(pluginModule("Terminal", {
+        pairedBackend: {
+          version: 1,
+          request: () => null,
+          openChannel: () => ({ receive: () => undefined }),
+        },
+        requiredTerminalService: {},
+        stop: stopped,
+      })),
+      logger: testLogger(),
+    })).rejects.toThrow("valid requiredTerminalService");
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back startup when required Terminal is unhealthy before importing ordinary plugins", async () => {
+    const imported: string[] = [];
+    const stopped = vi.fn();
+    await expect(createServerPluginRuntimeWithRequiredTerminal({
+      catalog: { snapshot: () => Promise.resolve(testSnapshot([
+        entry("alpha", { scope: "bundled" }),
+        entry("terminal", { scope: "bundled", browserRevision: "terminal-browser" }),
+      ])) },
+      importer: (url) => {
+        const id = pluginIdFromUrl(url);
+        imported.push(id);
+        return Promise.resolve(pluginModule("Terminal", {
+          pairedBackend: {
+            version: 1,
+            request: () => null,
+            openChannel: () => ({ receive: () => undefined }),
+          },
+          requiredTerminalService: requiredTerminalServiceFixture(),
+          health: () => ({ status: "unhealthy", message: "PTY unavailable" }),
+          stop: stopped,
+        }));
+      },
+      logger: testLogger(),
+    })).rejects.toThrow("Required Terminal server entry is unhealthy: PTY unavailable");
+    expect(imported).toEqual(["terminal"]);
+    expect(stopped).toHaveBeenCalledOnce();
+  });
 });
 
 function entry(
@@ -423,6 +537,42 @@ function pluginModule(name: string, activation: ServerPluginActivation | Record<
 
 function plugin(name: string, activate: PiWebServerPlugin["activate"]): PiWebServerPlugin {
   return { apiVersion: 1, name, activate };
+}
+
+function requiredTerminalServiceFixture() {
+  const run = {
+    id: "run-1",
+    origin: "core",
+    projectId: "project-1",
+    workspaceId: "workspace-1",
+    terminalId: "terminal-1",
+    title: "Run",
+    command: "true",
+    status: "running" as const,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    metadata: {},
+  };
+  const legacyRoutes = {
+    list: () => [],
+    create: () => ({ id: "terminal-1", cwd: "/repo", name: "Shell", createdAt: run.createdAt, exited: false }),
+    closeForCwd: () => undefined,
+    closeAll: () => undefined,
+    close: () => undefined,
+    attach: () => () => undefined,
+    write: () => undefined,
+    resize: () => undefined,
+    continue: () => ({ id: "terminal-1", cwd: "/repo", name: "Shell", createdAt: run.createdAt, exited: false }),
+    runCommand: () => run,
+    listCommandRuns: () => [run],
+    getCommandRun: () => run,
+    cancelCommandRun: () => run,
+  };
+  return {
+    closeForCwd: () => undefined,
+    runCommand: () => run,
+    bindActivitySink: () => undefined,
+    legacyRoutes,
+  };
 }
 
 function testProvider(): WorkspaceProvider {

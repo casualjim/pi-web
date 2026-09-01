@@ -83,7 +83,12 @@ export interface PairedPluginBackendV1 {
 export interface PairedPluginChannel {
     /** Consume one browser-authored JSON frame within a host-bounded invocation. */
     receive(data: JsonValue, signal: AbortSignal): MaybePromise<void>;
-    /** Release channel resources once after disconnect, failure, expiry, or shutdown. */
+    /**
+     * Optional plugin-owned completion signal. Resolving it asks the host to
+     * close the browser transport and release admission immediately.
+     */
+    readonly closed?: PromiseLike<void>;
+    /** Release channel resources once after disconnect, failure, expiry, shutdown, or plugin completion. */
     close?(context: PairedPluginChannelCloseContext): MaybePromise<void>;
 }
 export interface PairedPluginChannelCloseContext {

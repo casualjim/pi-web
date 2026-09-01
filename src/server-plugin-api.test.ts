@@ -129,7 +129,7 @@ describe("public server plugin API", () => {
       "fallback" | "probe" | "list" | "request" | "prepareRemove"
     >();
     expectTypeOf<keyof PairedPluginBackendV1>().toEqualTypeOf<"version" | "request" | "openChannel">();
-    expectTypeOf<keyof PairedPluginChannel>().toEqualTypeOf<"receive" | "close">();
+    expectTypeOf<keyof PairedPluginChannel>().toEqualTypeOf<"receive" | "closed" | "close">();
     expectTypeOf<keyof PairedPluginChannelOpenContext>().toEqualTypeOf<"project" | "workspace" | "operation" | "input" | "signal" | "send">();
     expectTypeOf<keyof PairedPluginChannelCloseContext>().toEqualTypeOf<"code" | "reason" | "signal">();
     expectTypeOf<keyof PairedPluginRequestContext>().toEqualTypeOf<

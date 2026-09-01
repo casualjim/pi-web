@@ -1627,6 +1627,7 @@ export function parsePiWebPluginsResponse(value: unknown): PiWebPluginsResponse 
       diagnostics: [],
       serverRuntime: {
         status: "incompatible",
+        terminalMode: "recovery-disabled",
         restartRequired: false,
         message: "PI WEB does not support plugin lifecycle diagnostics. Update and restart PI WEB, then try again.",
         recovery: legacyPluginRecoveryCommands(),
@@ -1646,8 +1647,11 @@ function parsePiWebPluginInfo(value: unknown): PiWebPluginInfo {
   const record = requireRecord(value);
   const id = requireString(record, "id");
   const server = record["server"] === undefined ? undefined : parsePiWebPluginServerInfo(record["server"], id);
+  const required = parseOptionalBoolean(record["required"], "required");
+  if (required === false) throw new Error("Invalid PI WEB required plugin marker");
   return {
     id,
+    ...(required === true ? { required: true as const } : {}),
     ...optionalField("module", optionalString(record, "module")),
     source: requireString(record, "source"),
     scope: parsePiWebPluginScope(record["scope"]),
@@ -1710,15 +1714,21 @@ function parsePiWebPluginDiagnostic(value: unknown): PiWebPluginsResponse["diagn
 function parsePiWebPluginRuntimeInfo(value: unknown): PiWebPluginsResponse["serverRuntime"] {
   const record = requireRecord(value);
   const status = record["status"];
+  const terminalMode = record["terminalMode"];
   const safeStart = record["safeStart"];
   const desiredSafeStart = record["desiredSafeStart"];
   if (status !== "available" && status !== "unavailable" && status !== "incompatible") throw new Error("Invalid PI WEB server-plugin runtime status");
+  if (terminalMode !== "required" && terminalMode !== "recovery-disabled") throw new Error("Invalid PI WEB Terminal plugin mode");
   if (safeStart !== undefined && safeStart !== "bundled-only" && safeStart !== "none") throw new Error("Invalid PI WEB server-plugin safe-start state");
   if (desiredSafeStart !== undefined && desiredSafeStart !== "off" && desiredSafeStart !== "bundled-only" && desiredSafeStart !== "none") {
     throw new Error("Invalid desired PI WEB server-plugin safe-start state");
   }
+  if ((safeStart === "none") !== (terminalMode === "recovery-disabled") && status === "available") {
+    throw new Error("PI WEB Terminal plugin mode does not match safe start");
+  }
   return {
     status,
+    terminalMode,
     ...(safeStart === undefined ? {} : { safeStart }),
     ...(desiredSafeStart === undefined ? {} : { desiredSafeStart }),
     restartRequired: requireBoolean(record, "restartRequired"),

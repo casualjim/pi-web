@@ -608,6 +608,7 @@ describe("PiWebApp plugin host", () => {
       mainView: "core:workspace.files",
     });
     expect(appPluginRegistry(app).getWorkspacePanels().some(({ id }) => id === "core:workspace.files")).toBe(false);
+    markPluginLoadingReady(app);
 
     await callAsyncAppMethod(app, "finishWorkspaceRouteRestore", { contributionQuery: {} }, {
       updateUrl: false,
@@ -648,7 +649,7 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "core:workspace.terminal",
       mainView: "chat",
     });
-    if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
+    markPluginLoadingReady(app);
 
     await callAsyncAppMethod(app, "restoreRouteFor", {
       machineId: undefined,
@@ -713,7 +714,15 @@ describe("PiWebApp plugin host", () => {
     });
     const failure = new Error("Files module unavailable");
     vi.mocked(loadExternalPlugins).mockResolvedValue({
-      registrations: [],
+      terminalMode: "required",
+      registrations: [{
+        id: "terminal",
+        machineSpecific: true,
+        backendRevision: "terminal-r1",
+        backendCapabilityVersion: 1,
+        channelVersion: 1,
+        plugin: emptyPlugin("Terminal"),
+      }],
       failures: [{ entry: manifestEntry("files"), error: failure }],
     });
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -745,12 +754,14 @@ describe("PiWebApp plugin host", () => {
       attempt += 1;
       if (attempt === 1) {
         return Promise.resolve({
+          terminalMode: "recovery-disabled",
           registrations: [{ id: "stable", machineSpecific: false, plugin: emptyPlugin("Stable") }],
           failures: [{ entry: retryEntry, error: transientFailure }],
         });
       }
       expect(options.shouldLoadPlugin?.(stableEntry)).toBe(false);
       return Promise.resolve({
+        terminalMode: "recovery-disabled",
         registrations: [{ id: "retry", machineSpecific: false, plugin: emptyPlugin("Retry") }],
         failures: [],
       });
@@ -772,6 +783,82 @@ describe("PiWebApp plugin host", () => {
       "Failed to load PI WEB plugin retry (./retry/plugin.js)",
       transientFailure,
     );
+  });
+
+  it("fails closed while required Terminal manifest verification is pending", async () => {
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    await expect(workspacePanelContextFromApp(app).terminal.runCommand({ title: "Pending", command: "true" }))
+      .rejects.toThrow("Terminal is unavailable because the required plugin is not active on local");
+  });
+
+  it("hides the core Terminal surface and rejects helpers in no-plugin recovery", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    vi.mocked(loadExternalPlugins).mockResolvedValue({
+      terminalMode: "recovery-disabled",
+      registrations: [],
+      failures: [],
+    });
+
+    await ensureGatewayPluginsLoaded(app);
+
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    const context = workspacePanelContextFromApp(app);
+    await expect(context.terminal.runCommand({ title: "Unavailable", command: "true" }))
+      .rejects.toThrow("Terminal is unavailable because the required plugin is not active on local");
+    context.terminal.open();
+    expect(appState(app).error).toContain("Terminal is unavailable because the required plugin is not active on local");
+  });
+
+  it("surfaces required Terminal activation failure and does not register ordinary plugins", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    const terminalFailure = new Error("Terminal activation failed");
+    vi.mocked(loadExternalPlugins).mockResolvedValue({
+      terminalMode: "required",
+      registrations: [
+        {
+          id: "terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          backendCapabilityVersion: 1,
+          channelVersion: 1,
+          plugin: {
+            apiVersion: 2,
+            name: "Terminal",
+            activate: () => { throw terminalFailure; },
+          },
+        },
+        { id: "info", machineSpecific: false, plugin: emptyPlugin("Info") },
+      ],
+      failures: [],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await ensureGatewayPluginsLoaded(app);
+
+    expect(appPluginRegistry(app).hasPlugin("terminal")).toBe(false);
+    expect(appPluginRegistry(app).hasPlugin("info")).toBe(false);
+    expect(appState(app).error).toContain("Required Terminal plugin failed to activate");
+    expect(appState(app).error).toContain("Terminal activation failed");
   });
 
   it("retries a plugin whose activation failed without retaining partial contributions", async () => {
@@ -797,6 +884,7 @@ describe("PiWebApp plugin host", () => {
       },
     };
     vi.mocked(loadExternalPlugins).mockResolvedValue({
+      terminalMode: "recovery-disabled",
       registrations: [{ id: "retryable", machineSpecific: false, plugin: retryable }],
       failures: [],
     });
@@ -994,7 +1082,13 @@ function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string
   if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
   const loaded: unknown = Reflect.get(app, "loadedMachinePluginIds");
   if (!(loaded instanceof Set)) throw new Error("PiWebApp loaded-machine plugin set was unavailable");
-  for (const machineId of loadedMachineIds) loaded.add(machineId);
+  const availability: unknown = Reflect.get(app, "terminalAvailabilityByMachine");
+  if (!(availability instanceof Map)) throw new Error("PiWebApp Terminal availability map was unavailable");
+  availability.set("local", true);
+  for (const machineId of loadedMachineIds) {
+    loaded.add(machineId);
+    availability.set(machineId, true);
+  }
 }
 
 function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {

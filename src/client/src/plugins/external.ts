@@ -1,6 +1,8 @@
+import { PI_WEB_PLUGIN_LIFECYCLE_VERSION } from "../../../shared/apiTypes";
 import { machineScopedPluginId } from "../../../shared/machinePluginIds";
 import { requirePluginBackendRevision } from "../../../shared/pluginBackendProtocol";
 import { isPiWebPluginId, isReservedPiWebPluginId } from "../../../shared/pluginIds";
+import { REQUIRED_TERMINAL_PLUGIN_ID, type TerminalPluginMode } from "../../../shared/requiredTerminalPlugin";
 import { resolveAppUrl, type AppUrlContext } from "../appUrl";
 import type { PiWebPlugin, PiWebPluginRegistration } from "./types";
 
@@ -14,6 +16,7 @@ export interface PluginManifestEntry {
 }
 
 interface PluginManifest {
+  terminalMode: TerminalPluginMode;
   plugins: PluginManifestEntry[];
 }
 
@@ -29,6 +32,7 @@ export interface ExternalPluginLoadFailure {
 }
 
 export interface ExternalPluginLoadResult {
+  terminalMode: TerminalPluginMode;
   registrations: PiWebPluginRegistration[];
   failures: ExternalPluginLoadFailure[];
 }
@@ -36,7 +40,7 @@ export interface ExternalPluginLoadResult {
 export async function loadExternalPlugins(manifestUrl = "pi-web-plugins/manifest.json", options: LoadExternalPluginsOptions = {}): Promise<ExternalPluginLoadResult> {
   const resolvedManifestUrl = resolveAppUrl(manifestUrl);
   const manifest = await fetchPluginManifest(resolvedManifestUrl);
-  if (manifest === undefined) return { registrations: [], failures: [] };
+  if (manifest === undefined) return { terminalMode: "recovery-disabled", registrations: [], failures: [] };
 
   const registrations: PiWebPluginRegistration[] = [];
   const failures: ExternalPluginLoadFailure[] = [];
@@ -57,9 +61,12 @@ export async function loadExternalPlugins(manifestUrl = "pi-web-plugins/manifest
       });
     } catch (error) {
       failures.push({ entry, error });
+      if (manifest.terminalMode === "required" && entry.id === REQUIRED_TERMINAL_PLUGIN_ID) {
+        return { terminalMode: manifest.terminalMode, registrations: [], failures };
+      }
     }
   }
-  return { registrations, failures };
+  return { terminalMode: manifest.terminalMode, registrations, failures };
 }
 
 export function resolvePluginModuleUrl(moduleReference: string, manifestUrl: string, appUrlContext?: AppUrlContext): string {
@@ -80,6 +87,8 @@ async function fetchPluginManifest(manifestUrl: string): Promise<PluginManifest 
 
 function parseManifest(value: unknown): PluginManifest {
   if (!isRecord(value) || !Array.isArray(value["plugins"])) throw new Error("Invalid plugin manifest");
+  if (value["lifecycleVersion"] !== PI_WEB_PLUGIN_LIFECYCLE_VERSION) throw new Error("Unsupported plugin manifest lifecycle version");
+  const terminalMode = parseTerminalMode(value["terminalMode"]);
   const plugins = value["plugins"].map((entry) => {
     if (!isRecord(entry) || typeof entry["id"] !== "string" || typeof entry["module"] !== "string" || entry["module"] === "") throw new Error("Invalid plugin manifest entry");
     const id = entry["id"];
@@ -104,7 +113,23 @@ function parseManifest(value: unknown): PluginManifest {
     if (ids.has(plugin.id)) throw new Error(`Duplicate plugin manifest id: ${plugin.id}`);
     ids.add(plugin.id);
   }
-  return { plugins };
+  const terminal = plugins.find(({ id }) => id === REQUIRED_TERMINAL_PLUGIN_ID);
+  if (terminalMode === "required") {
+    if (terminal === undefined || plugins[0] !== terminal || !terminal.machineSpecific) {
+      throw new Error("Required Terminal plugin manifest entry is unavailable or out of order");
+    }
+    if (terminal.backendRevision === undefined || terminal.backendCapabilityVersion !== 1 || terminal.channelVersion !== 1) {
+      throw new Error("Required Terminal plugin manifest entry is incompatible");
+    }
+  } else if (terminal !== undefined) {
+    throw new Error("Recovery-disabled plugin manifest must not publish Terminal");
+  }
+  return { terminalMode, plugins };
+}
+
+function parseTerminalMode(value: unknown): TerminalPluginMode {
+  if (value === "required" || value === "recovery-disabled") return value;
+  throw new Error("Invalid plugin manifest Terminal mode");
 }
 
 async function pluginManifestResponseError(response: Response): Promise<string> {
@@ -114,9 +139,11 @@ async function pluginManifestResponseError(response: Response): Promise<string> 
     if (isRecord(value)) {
       const error = value["error"];
       const responseDetail = value["detail"];
+      const message = value["message"];
       detail = typeof responseDetail === "string"
         ? `${typeof error === "string" ? `${error}: ` : ""}${responseDetail}`
-        : typeof error === "string" ? error : undefined;
+        : typeof message === "string" ? message
+          : typeof error === "string" ? error : undefined;
     }
   } catch {
     // Status metadata remains a useful bounded error when the body is not JSON.

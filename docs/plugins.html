@@ -388,8 +388,9 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
               <p>
                 The same backend can optionally implement <code>openChannel()</code>. The host supplies frozen scope,
                 bounded JSON open input, a channel-lifetime signal, and a bounded synchronous <code>send()</code> function;
-                the plugin returns <code>receive()</code> and optional once-only <code>close()</code> callbacks. Data frames
-                are limited to 64 KiB JSON, queues to 128 frames/1 MiB per direction at each hop, admissions to 128 global,
+                the plugin returns <code>receive()</code>, optional plugin-owned <code>closed</code>, and optional once-only
+                <code>close()</code> members. Resolving <code>closed</code> makes the host promptly close the browser transport
+                and release admission. Data frames are limited to 64 KiB JSON, queues to 128 frames/1 MiB per direction at each hop, admissions to 128 global,
                 32 per plugin, and 8 per plugin/workspace, and lifetime to 12 hours with no idle timeout. Invalid/binary
                 frames, overflow, callback failure/timeout, disconnect, expiry, and shutdown close and clean up the channel.
               </p>
@@ -452,7 +453,22 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
               </p>
               <p>
                 Built-in plugins can be managed from <strong>Settings → PI WEB plugins</strong> or with the top-level
-                <code>plugins</code> config key.
+                <code>plugins</code> config key. Settings labels required entries separately and does not offer an
+                enablement toggle for them.
+              </p>
+
+              <h3>Terminal</h3>
+              <p>
+                <strong>Terminal</strong> is the required bundled, machine-specific browser/server plugin. It supplies
+                PI WEB's PTY, replay, command-run, and paired request/channel service. Normal and
+                <code>bundled-only</code> startup activates it before ordinary plugins and publishes its browser entry
+                only while the matching bundled server entry is active and healthy.
+              </p>
+              <p>
+                Ordinary config, Settings, and <code>pi-web plugins disable terminal</code> cannot disable Terminal.
+                Missing, incompatible, failed, or unhealthy startup reports the failure instead of claiming Terminal is
+                available. For recovery, run <code>pi-web plugins safe-start set none --restart</code>; diagnosis and
+                Settings remain available without Terminal, then clear safe start after repairing the installation.
               </p>
 
               <h3>Files</h3>
@@ -631,9 +647,9 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
 <span class="prompt">$</span> pi-web plugins safe-start clear --restart</code></pre>
               </div>
               <ul>
-                <li><code>disable</code> persists <code>plugins.&lt;id&gt;.enabled: false</code> while preserving unrelated config.</li>
-                <li><code>bundled-only</code> filters discovery before external server packages are considered.</li>
-                <li><code>none</code> imports no server plugins; the kernel folder workspace remains available.</li>
+                <li><code>disable</code> persists <code>plugins.&lt;id&gt;.enabled: false</code> while preserving unrelated config. It rejects required <code>terminal</code>; use no-plugin safe start only for recovery.</li>
+                <li><code>bundled-only</code> filters discovery before external server packages are considered, while the bundled Terminal entry remains required.</li>
+                <li><code>none</code> imports no server plugins. The kernel folder workspace and diagnosis/Settings surfaces remain available, but Terminal and Terminal-backed command workflows do not.</li>
                 <li><code>clear</code> restores ordinary configured discovery on the next start.</li>
                 <li>An unsupported <code>serverPlugins.safeStart</code> shape or value fails closed as effective <code>none</code>; use <code>show</code>, then <code>set</code> or <code>clear</code>, to repair it offline.</li>
                 <li><code>--restart</code> acts automatically only for a recognized safe installation; otherwise PI WEB prints manual guidance. Config is durable before the restart attempt, so restart manually if that attempt fails.</li>

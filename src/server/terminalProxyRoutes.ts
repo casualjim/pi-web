@@ -12,7 +12,7 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
   app.get<{ Params: { projectId: string; workspaceId: string } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals`, async (request, reply) => {
     try {
       const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
-      return await proxyJson(daemon, "GET", `/terminals?cwd=${encodeURIComponent(context.root)}`, undefined, reply);
+      return await proxyJson(daemon, "GET", `/terminals?${terminalScopeQuery(request.params.projectId, request.params.workspaceId, context.root)}`, undefined, reply);
     } catch (error) {
       requestFailed(reply, error);
       return undefined;
@@ -22,7 +22,7 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
   app.delete<{ Params: { projectId: string; workspaceId: string } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals`, async (request, reply) => {
     try {
       const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
-      return await proxyJson(daemon, "DELETE", `/terminals?cwd=${encodeURIComponent(context.root)}`, undefined, reply);
+      return await proxyJson(daemon, "DELETE", `/terminals?${terminalScopeQuery(request.params.projectId, request.params.workspaceId, context.root)}`, undefined, reply);
     } catch (error) {
       requestFailed(reply, error);
       return undefined;
@@ -32,7 +32,12 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
   app.post<{ Params: { projectId: string; workspaceId: string }; Body: { name?: string; cols?: number; rows?: number } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals`, async (request, reply) => {
     try {
       const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
-      return await proxyJson(daemon, "POST", "/terminals", { ...request.body, cwd: context.root }, reply);
+      return await proxyJson(daemon, "POST", "/terminals", {
+        ...request.body,
+        projectId: request.params.projectId,
+        workspaceId: request.params.workspaceId,
+        cwd: context.root,
+      }, reply);
     } catch (error) {
       requestFailed(reply, error);
       return undefined;
@@ -41,8 +46,12 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
 
   app.post<{ Params: { projectId: string; workspaceId: string; terminalId: string } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals/:terminalId/continue`, async (request, reply) => {
     try {
-      await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
-      return await proxyJson(daemon, "POST", `/terminals/${encodeURIComponent(request.params.terminalId)}/continue`, undefined, reply);
+      const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
+      return await proxyJson(daemon, "POST", `/terminals/${encodeURIComponent(request.params.terminalId)}/continue`, {
+        projectId: request.params.projectId,
+        workspaceId: request.params.workspaceId,
+        cwd: context.root,
+      }, reply);
     } catch (error) {
       requestFailed(reply, error);
       return undefined;
@@ -51,8 +60,9 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
 
   app.delete<{ Params: { projectId: string; workspaceId: string; terminalId: string } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals/:terminalId`, async (request, reply) => {
     try {
-      await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
-      return await proxyJson(daemon, "DELETE", `/terminals/${encodeURIComponent(request.params.terminalId)}`, undefined, reply);
+      const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
+      const scope = terminalScopeQuery(request.params.projectId, request.params.workspaceId, context.root);
+      return await proxyJson(daemon, "DELETE", `/terminals/${encodeURIComponent(request.params.terminalId)}?${scope}`, undefined, reply);
     } catch (error) {
       requestFailed(reply, error);
       return undefined;
@@ -106,9 +116,11 @@ export function registerTerminalProxyRoutes(app: FastifyInstance, projects: Proj
 
   app.get<{ Params: { projectId: string; workspaceId: string; terminalId: string }; Querystring: { cols?: string; rows?: string } }>(`${prefix}/projects/:projectId/workspaces/:workspaceId/terminals/:terminalId/socket`, { websocket: true }, async (socket, request) => {
     try {
-      await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
+      const context = await resolveWorkspaceContext(projects, workspaces, request.params.projectId, request.params.workspaceId);
       const sizeQuery = terminalSizeQuery(request.query.cols, request.query.rows);
-      bridgeSockets(socket, daemon.connectWebSocket(`/terminals/${request.params.terminalId}/socket${sizeQuery}`));
+      const scopeQuery = terminalScopeQuery(request.params.projectId, request.params.workspaceId, context.root);
+      const sizeParams = sizeQuery === "" ? "" : `&${sizeQuery.slice(1)}`;
+      bridgeSockets(socket, daemon.connectWebSocket(`/terminals/${encodeURIComponent(request.params.terminalId)}/socket?${scopeQuery}${sizeParams}`));
     } catch (error) {
       socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : String(error) }));
       socket.close();
@@ -129,6 +141,10 @@ interface TerminalCommandRunQuery {
   terminalId?: string;
   statuses?: string;
   metadata?: string;
+}
+
+function terminalScopeQuery(projectId: string, workspaceId: string, cwd: string): string {
+  return new URLSearchParams({ projectId, workspaceId, cwd }).toString();
 }
 
 function terminalCommandRunQuery(filter: TerminalCommandRunQuery): string {

@@ -3,8 +3,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket, type RawData } from "ws";
-import type { TerminalCommandRun, TerminalCommandRunFilter } from "../../shared/apiTypes.js";
-import type { RunTerminalCommandOptions, TerminalInfo } from "./terminalService.js";
+import type { TerminalCommandRun, TerminalCommandRunFilter, TerminalInfo } from "../../shared/apiTypes.js";
+import { unavailableRequiredTerminalService, type RunTerminalCommandOptions, type TerminalWorkspaceScope } from "./requiredTerminalService.js";
 import { registerTerminalRoutes, type TerminalRouteService } from "./terminalRoutes.js";
 
 let app: FastifyInstance;
@@ -24,7 +24,7 @@ afterEach(async () => {
 
 describe("terminal routes", () => {
   it("applies the initial socket size before attaching and replaying output", async () => {
-    const socket = new WebSocket(`${serverUrl(app)}/terminals/t1/socket?cols=120.9&rows=40.2`);
+    const socket = new WebSocket(`${serverUrl(app)}/terminals/t1/socket?projectId=p1&workspaceId=w1&cwd=${encodeURIComponent(resolve("/repo"))}&cols=120.9&rows=40.2`);
 
     await expect(nextMessage(socket)).resolves.toBe(JSON.stringify({ type: "output", data: "replayed", replay: true }));
     expect(terminals.events).toEqual(["resize:t1:120x40", "attach:t1"]);
@@ -32,15 +32,15 @@ describe("terminal routes", () => {
     socket.close();
   });
 
-  it("closes all terminals for a cwd", async () => {
+  it("closes all terminals only for the requested workspace scope", async () => {
     // The route normalizes the request cwd, so the service receives the
     // resolved absolute path (drive-qualified on Windows).
     const requestCwd = resolve("/repo/worktree");
-    const response = await app.inject({ method: "DELETE", url: `/terminals?cwd=${encodeURIComponent(requestCwd)}` });
+    const response = await app.inject({ method: "DELETE", url: `/terminals?projectId=p1&workspaceId=w1&cwd=${encodeURIComponent(requestCwd)}` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ closed: true });
-    expect(terminals.events).toEqual([`close-cwd:${requestCwd}`]);
+    expect(terminals.events).toEqual([`close-all:p1:w1:${requestCwd}`]);
   });
 
   it("routes command-run create, get, filter, cancel, and terminal continue requests", async () => {
@@ -72,9 +72,30 @@ describe("terminal routes", () => {
     expect(cancelResponse.statusCode).toBe(200);
     expect(terminals.events).toContain("cancel:run1");
 
-    const continueResponse = await app.inject({ method: "POST", url: "/terminals/t-run/continue" });
+    const continueResponse = await app.inject({
+      method: "POST",
+      url: "/terminals/t-run/continue",
+      payload: { projectId: "p1", workspaceId: "w1", cwd: "/repo" },
+    });
     expect(continueResponse.statusCode).toBe(200);
     expect(terminals.events).toContain("continue:t-run");
+  });
+
+  it("reports Terminal unavailable instead of false success in no-plugin recovery", async () => {
+    const recoveryApp = Fastify({ logger: false });
+    registerTerminalRoutes(recoveryApp, unavailableRequiredTerminalService().legacyRoutes);
+    try {
+      const response = await recoveryApp.inject({
+        method: "POST",
+        url: "/terminals",
+        payload: { projectId: "p1", workspaceId: "w1", cwd: "/repo" },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({ error: "Terminal is unavailable while server-plugin safe start is set to none" });
+    } finally {
+      await recoveryApp.close();
+    }
   });
 
   it("rejects invalid command-run filter and metadata queries", async () => {
@@ -99,12 +120,12 @@ class FakeTerminals implements TerminalRouteService {
   readonly filters: TerminalCommandRunFilter[] = [];
   private readonly commandRuns = new Map<string, TerminalCommandRun>();
 
-  list(cwd: string): TerminalInfo[] {
-    void cwd;
+  list(scope: TerminalWorkspaceScope): TerminalInfo[] {
+    void scope;
     return [];
   }
 
-  create(options: { cwd: string; name?: string; cols?: number; rows?: number }): TerminalInfo {
+  create(options: TerminalWorkspaceScope & { name?: string; cols?: number; rows?: number }): TerminalInfo {
     return {
       id: "t1",
       cwd: options.cwd,
@@ -118,11 +139,17 @@ class FakeTerminals implements TerminalRouteService {
     this.events.push(`close-cwd:${cwd}`);
   }
 
-  close(id: string): void {
+  closeAll(scope: TerminalWorkspaceScope): void {
+    this.events.push(`close-all:${scope.projectId}:${scope.workspaceId}:${scope.cwd}`);
+  }
+
+  close(scope: TerminalWorkspaceScope, id: string): void {
+    void scope;
     this.events.push(`close:${id}`);
   }
 
-  attach(id: string, handlers: { output: (data: string, replay: boolean) => void; exit: (exitCode: number | undefined) => void }): () => void {
+  attach(scope: TerminalWorkspaceScope, id: string, handlers: { output: (data: string, replay: boolean) => void; exit: (exitCode: number | undefined) => void }): () => void {
+    void scope;
     this.events.push(`attach:${id}`);
     handlers.output("replayed", true);
     return () => {
@@ -130,15 +157,18 @@ class FakeTerminals implements TerminalRouteService {
     };
   }
 
-  write(id: string, data: string): void {
+  write(scope: TerminalWorkspaceScope, id: string, data: string): void {
+    void scope;
     this.events.push(`write:${id}:${data}`);
   }
 
-  resize(id: string, cols: number, rows: number): void {
+  resize(scope: TerminalWorkspaceScope, id: string, cols: number, rows: number): void {
+    void scope;
     this.events.push(`resize:${id}:${String(cols)}x${String(rows)}`);
   }
 
-  continue(id: string): TerminalInfo {
+  continue(scope: TerminalWorkspaceScope, id: string): TerminalInfo {
+    void scope;
     this.events.push(`continue:${id}`);
     return { id, cwd: "/repo", name: "Shell 1", createdAt: "2026-05-13T00:00:00.000Z", exited: false };
   }

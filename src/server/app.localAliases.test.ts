@@ -44,8 +44,9 @@ describe("buildApp local machine aliases", () => {
         metadata: { "pi.operation": "test" },
       },
     });
+    const terminalScopePath = `/terminals?${new URLSearchParams({ projectId: project.id, workspaceId: workspace.id, cwd: appTestContext.projectDir }).toString()}`;
     expect(closeTerminalsResponse.statusCode).toBe(200);
-    expect(closeTerminalsResponse.json()).toEqual({ method: "DELETE", path: `/terminals?cwd=${encodeURIComponent(appTestContext.projectDir)}` });
+    expect(closeTerminalsResponse.json()).toEqual({ method: "DELETE", path: terminalScopePath });
     expect(appTestContext.sessionDaemonRequests[1]).toEqual({
       method: "POST",
       path: "/terminal-command-runs",
@@ -59,7 +60,7 @@ describe("buildApp local machine aliases", () => {
         metadata: { "pi.operation": "test" },
       },
     });
-    expect(appTestContext.sessionDaemonRequests[2]).toEqual({ method: "DELETE", path: `/terminals?cwd=${encodeURIComponent(appTestContext.projectDir)}` });
+    expect(appTestContext.sessionDaemonRequests[2]).toEqual({ method: "DELETE", path: terminalScopePath });
   });
 
   it("does not proxy terminals for a workspace removed from the daemon authority", async () => {

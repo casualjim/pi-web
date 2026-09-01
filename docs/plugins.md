@@ -262,7 +262,7 @@ Plugin enablement is separate from package installation. Use **Settings → Pi p
 }
 ```
 
-Plugins are enabled by default. `plugins.<id>.enabled: false` removes a browser-only entry on the next page load and prevents a server entry from loading on the next sessiond start. The optional `settings` object must be JSON-compatible and is captured for a server entry only at sessiond startup.
+Plugins are enabled by default. `plugins.<id>.enabled: false` removes a browser-only entry on the next page load and prevents a server entry from loading on the next sessiond start. The bundled `terminal` plugin is the exception: it is required during normal startup, and ordinary enablement config cannot disable it. The optional `settings` object must be JSON-compatible and is captured for a server entry only at sessiond startup.
 
 ### Desired versus active state
 
@@ -289,9 +289,9 @@ pi-web plugins safe-start set none --restart
 pi-web plugins safe-start clear --restart
 ```
 
-- `disable` sets that plugin's desired `enabled` value to `false` while preserving unrelated config.
-- `bundled-only` persists safe start and filters discovery before external local or Pi-package server modules are considered.
-- `none` persists the emergency level and imports no server plugins; the kernel folder workspace remains available.
+- `disable` sets that plugin's desired `enabled` value to `false` while preserving unrelated config. It rejects `terminal` because Terminal is required; use `safe-start set none` only for recovery.
+- `bundled-only` persists safe start and filters discovery before external local or Pi-package server modules are considered. The bundled Terminal entry remains required.
+- `none` persists the emergency level and imports no server plugins. The kernel folder workspace and core diagnosis/settings surfaces remain available, but Terminal and Terminal-backed command workflows are unavailable.
 - `clear` returns the next startup to ordinary configured discovery.
 - `--restart` requests an automatic restart only when PI WEB recognizes a safe installed-service action. Otherwise the command prints manual guidance.
 
@@ -303,7 +303,16 @@ Ordinary plugin failures are normally quarantined, but safe start provides a rec
 
 PI WEB ships core, discoverable plugins in the main `@jmfederico/pi-web` npm package. No separate `pi install` step is required. After updating PI WEB, manually restart sessiond so bundled server entries use the installed revision, then reload the browser tab. Browser-only bundled entries need only the tab reload.
 
-Built-in plugins can be managed from **Settings → PI WEB plugins** or with the top-level `plugins` config key.
+Built-in plugins can be managed from **Settings → PI WEB plugins** or with the top-level `plugins` config key. Settings labels required entries separately and does not offer an enablement toggle for them.
+
+### Terminal
+
+**Plugin id:** `terminal`
+**What it does:** supplies PI WEB's Terminal process service, replay and command-run behavior, and the paired request/channel backend used by its browser surface.
+
+Terminal is a bundled machine-specific browser/server plugin and is required during normal and `bundled-only` startup. PI WEB activates it before ordinary plugins and publishes its browser entry only when the bundled server entry is active, healthy, revision-matched, and exposes the paired request/channel contract. Missing, incompatible, failed, or unhealthy Terminal startup fails visibly with `safe-start set none` recovery guidance rather than claiming Terminal is available.
+
+`plugins.terminal.enabled: false`, the Settings toggle, and `pi-web plugins disable terminal` do not disable Terminal. Use `pi-web plugins safe-start set none --restart` only to bring up diagnosis/settings surfaces without Terminal, repair the installation or config, then clear safe start and restart sessiond.
 
 ### Files
 
@@ -495,12 +504,23 @@ Discovery hashes the package (without traversing `.git` or `node_modules`) to pr
 
 ### Manifest and assets
 
-The manifest contains a lifecycle version and each publishable browser module. Current PI WEB releases emit `module` as a leading application-root reference, include `backendRevision` only for a paired active server entry, add `backendCapabilityVersion: 1` when that server entry contributes the direct paired-request contract, and add `channelVersion: 1` when it also contributes bounded duplex channels:
+The manifest contains a lifecycle version, a `terminalMode` marker, and each publishable browser module. `terminalMode: "required"` puts the compatible bundled Terminal entry first; `"recovery-disabled"` explicitly means no Terminal helper is being published. Current PI WEB releases emit `module` as a leading application-root reference, include `backendRevision` only for a paired active server entry, add `backendCapabilityVersion: 1` when that server entry contributes the direct paired-request contract, and add `channelVersion: 1` when it also contributes bounded duplex channels:
 
 ```json
 {
-  "lifecycleVersion": 1,
+  "lifecycleVersion": 2,
+  "terminalMode": "required",
   "plugins": [
+    {
+      "id": "terminal",
+      "module": "/pi-web-plugins/terminal/browser/pi-web-plugin.js?v=<content-revision>",
+      "backendRevision": "<active-terminal-server-revision>",
+      "backendCapabilityVersion": 1,
+      "channelVersion": 1,
+      "source": "bundled",
+      "scope": "bundled",
+      "machineSpecific": true
+    },
     {
       "id": "workspaces",
       "module": "/pi-web-plugins/workspaces/dist/browser/index.js?v=<content-revision>",
@@ -707,6 +727,7 @@ interface PairedPluginChannelOpenContext {
 
 interface PairedPluginChannel {
   receive(data: JsonValue, signal: AbortSignal): void | Promise<void>;
+  readonly closed?: PromiseLike<void>;
   close?(context: { readonly code: number; readonly reason: string; readonly signal: AbortSignal }): void | Promise<void>;
 }
 ```
@@ -715,7 +736,7 @@ interface PairedPluginChannel {
 
 The host limits JSON input to 256 KiB, JSON output to 8 MiB, each callback to 10 seconds, sessiond dispatch to 25 seconds, and federation to 30 seconds. Caller cancellation propagates to the operation-scoped signal. Observe that signal in nested work and do not retain it after the callback settles.
 
-`pairedBackend.openChannel()` is the optional version-1 duplex addition. It has the same package/revision, selected-machine, project, and current-workspace authority as a direct request and does not require workspace-provider ownership. The host supplies a channel-lifetime signal and a synchronous `send()` function. Return one channel with `receive()` and optional `close()` callbacks; `close()` is invoked at most once. Core validates and transports only JSON host envelopes and never interprets plugin-authored payload fields.
+`pairedBackend.openChannel()` is the optional version-1 duplex addition. It has the same package/revision, selected-machine, project, and current-workspace authority as a direct request and does not require workspace-provider ownership. The host supplies a channel-lifetime signal and a synchronous `send()` function. Return one channel with `receive()`, optional plugin-owned `closed`, and optional `close()` members. Resolve `closed` when the plugin has completed the channel so the host promptly closes the browser transport and releases admission; `close()` is invoked at most once for cleanup. Core validates and transports only JSON host envelopes and never interprets plugin-authored payload fields.
 
 Channel limits are fixed host contracts: 256 KiB open input; 10-second open, receive, and close callbacks; 64 KiB JSON per data frame plus host-envelope allowance; 128 queued frames and 1 MiB queued bytes in each direction at each hop; 128 live channels globally, 32 per plugin, and 8 per plugin/workspace; 12-hour maximum lifetime with no idle timeout; and a 120-byte close reason. `send()` validates and queues synchronously, so split larger output/replay into bounded frames and treat a thrown queue/validation error as channel failure.
 

@@ -26,7 +26,6 @@ import {
   WorkspaceProviderRegistry,
 } from "./workspaces/workspaceProviderRegistry.js";
 import { sessiondSocketPath } from "../sessiond/config.js";
-import { TerminalService } from "./terminals/terminalService.js";
 import { registerTerminalRoutes } from "./terminals/terminalRoutes.js";
 import { getPiWebRuntimeComponent } from "./piWebStatus.js";
 import { SESSIOND_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
@@ -295,7 +294,12 @@ async function createSessionDaemonRuntime() {
       }),
     }));
     auth.subscribe((change) => { sessions.applyAuthChange(change); });
-    const terminals = new TerminalService(eventHub, workspaceActivity);
+    const terminals = serverPlugins.requiredTerminalService();
+    terminals.bindActivitySink({
+      updateTerminal: (terminal) => { workspaceActivity.updateTerminal(terminal); },
+      removeTerminal: (terminalId, cwd) => { workspaceActivity.removeTerminal(terminalId, cwd); },
+      publish: (event) => { eventHub.publishRealtime(event); },
+    });
     const workspaceRemovals = new WorkspaceRemovalService(workspaceProviders, terminals);
     const runtimeComponent = Object.freeze({
       // The deprecated-input report is fixed at startup: it was detected from
@@ -314,7 +318,6 @@ async function createSessionDaemonRuntime() {
         dependencies: {
           quiesceServer: () => { serverQuiescing = true; },
           serverPlugins,
-          terminals,
           catalogRefresher,
           auth,
           sessions,
@@ -344,7 +347,7 @@ function registerSessionDaemonRoutes({ eventHub, machineStatus, statusAttributio
   registerMachineStatusRoutes(app, machineStatus);
   registerAuthRoutes(app, auth);
   registerSessionRoutes(app, sessions, eventHub);
-  registerTerminalRoutes(app, terminals);
+  registerTerminalRoutes(app, terminals.legacyRoutes);
   registerWorkspaceCatalogRoutes(app, {
     projects,
     workspaces: workspaceProviders,

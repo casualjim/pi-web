@@ -290,6 +290,16 @@ describe("Files browser package build", () => {
     const serviceOptions = {
       roots: [{ path: tempDir, source: "bundled", scope: "bundled" }],
       packageProvider: false,
+      runtimeProvider: {
+        providerRuntime: () => Promise.resolve({
+          protocolVersion: 2,
+          terminalMode: "recovery-disabled",
+          safeStart: "none",
+          records: [],
+          health: [],
+          diagnostics: [],
+        }),
+      },
     };
     const service = new PiWebPluginService(serviceOptions);
     const manifest = await service.manifest();

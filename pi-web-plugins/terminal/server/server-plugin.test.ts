@@ -88,12 +88,20 @@ describe.skipIf(process.platform === "win32")("Terminal paired server entry", ()
       .toThrow("browser disconnected");
   });
 
-  it("splits replay by serialized JSON bytes even for escaping-heavy terminal output", () => {
-    const output = `${"\u001b".repeat(20_000)}${"é".repeat(20_000)}`;
+  it("fits the full worst-case escaped replay within the directional output budget", () => {
+    const output = "\u0000".repeat(200_000);
     const chunks = splitTerminalOutput(output, true);
+    const readyBytes = Buffer.byteLength(JSON.stringify({ version: 1, kind: "ready" }), "utf8");
+    const wireBytes = readyBytes + chunks.reduce((total, data) => total + Buffer.byteLength(JSON.stringify({
+      version: 1,
+      kind: "data",
+      data: { type: "output", data, replay: true },
+    }), "utf8"), 0);
 
     expect(chunks.join("")).toBe(output);
-    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks).toHaveLength(20);
+    expect(wireBytes).toBe(1_201_548);
+    expect(wireBytes).toBeLessThan(1_280 * 1024);
     for (const data of chunks) {
       expect(Buffer.byteLength(JSON.stringify({ type: "output", data, replay: true }), "utf8"))
         .toBeLessThanOrEqual(60 * 1024);

@@ -16,8 +16,8 @@ const workspacePanelScopes = new WeakMap<WorkspacePanelContext, WorkspacePanelSc
 const workspaceLabelScopes = new WeakMap<WorkspaceLabelContext, (binding: WorkspacePluginBinding) => WorkspaceLabelContext>();
 
 export interface PluginRegistryOptions {
-  /** Host lifecycle gate for one registration scope; kernel registrations may remain available. */
-  isContributionEnabled?: (pluginId: string, machineId: string | undefined) => boolean;
+  /** Host lifecycle gate for the machine a contribution will act against. */
+  isContributionEnabled?: (pluginId: string, effectiveMachineId: string | undefined) => boolean;
 }
 
 type RegisteredPluginAction = Omit<PluginAction, "id"> & {
@@ -323,7 +323,9 @@ export class PluginRegistry {
   }
 
   private isContributionActive(pluginId: string, machineId: string | undefined, selectedMachineId: string, sourcePluginId: string | undefined): boolean {
-    if (!this.isContributionEnabled(pluginId, machineId)) return false;
+    // Portable gateway registrations still use selected-machine helpers, so
+    // their lifecycle gate follows that effective machine rather than local.
+    if (!this.isContributionEnabled(pluginId, machineId ?? selectedMachineId)) return false;
     if (machineId === undefined) return !this.isGatewayPluginHiddenForMachine(pluginId, selectedMachineId);
     return machineId === selectedMachineId && !this.isRemotePluginHiddenByGateway(sourcePluginId, machineId);
   }

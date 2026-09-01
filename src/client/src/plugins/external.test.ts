@@ -22,6 +22,25 @@ describe("external plugin manifests", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://pi.example.test/pi-web-plugins/manifest.json", { cache: "no-store" });
   });
 
+  it("fails closed for network, parse, and required-entry manifest failures", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("manifest network unavailable"))));
+    await expect(loadExternalPlugins()).rejects.toThrow("manifest network unavailable");
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("{not-json", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))));
+    await expect(loadExternalPlugins()).rejects.toThrow();
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+      lifecycleVersion: 2,
+      terminalMode: "required",
+      plugins: [{ id: "info", module: "./info/plugin.js", machineSpecific: false }],
+    })))));
+    await expect(loadExternalPlugins(undefined, { moduleLoader: vi.fn() }))
+      .rejects.toThrow("Required Terminal plugin manifest entry is unavailable or out of order");
+  });
+
   it("rejects a Terminal entry in a recovery-disabled manifest before module import", async () => {
     const moduleLoader = vi.fn();
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({

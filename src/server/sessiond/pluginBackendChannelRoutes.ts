@@ -3,15 +3,17 @@ import { WebSocket, type RawData } from "ws";
 import type { JsonValue } from "../../shared/apiTypes.js";
 import { isPiWebPluginId } from "../../shared/pluginIds.js";
 import {
-  boundedPluginBackendChannelCloseReason,
   parsePluginBackendChannelClientEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_DRAIN_TIMEOUT_MS,
   PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES,
   PLUGIN_BACKEND_CHANNEL_ROUTE_PATH,
+  PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS,
   requirePluginBackendOperation,
   serializePluginBackendChannelDataEnvelope,
   serializePluginBackendChannelErrorEnvelope,
@@ -25,7 +27,11 @@ import {
   type PluginBackendChannelSession,
   type PluginBackendChannelTransport,
 } from "../plugins/pluginBackendRegistry.js";
-import { createBoundedTextWebSocketSender, setPluginBackendChannelSocketPayloadLimit } from "../webSocketBridge.js";
+import {
+  closePluginBackendChannelWebSocket,
+  createBoundedTextWebSocketSender,
+  setPluginBackendChannelSocketPayloadLimit,
+} from "../webSocketBridge.js";
 import type { Project } from "../types.js";
 import type { PluginBackendProjectReader } from "./pluginBackendRoutes.js";
 
@@ -78,12 +84,12 @@ class PluginBackendChannelSocketController {
   private readonly lifetime = new AbortController();
   private readonly writer: ChannelRouteWriter;
   private readonly handshakeTimer: ReturnType<typeof setTimeout>;
-  private state: "awaiting-open" | "opening" | "ready" | "closed" = "awaiting-open";
+  private state: "awaiting-open" | "opening" | "ready" | "draining-close" | "closed" = "awaiting-open";
   private admission: PluginBackendChannelAdmission | undefined;
   private session: PluginBackendChannelSession | undefined;
   private readonly incoming: PendingIncomingFrame[] = [];
   private incomingBytes = 0;
-  private draining = false;
+  private incomingDrainTask: Promise<void> | undefined;
 
   constructor(
     private readonly socket: WebSocket,
@@ -214,30 +220,48 @@ class PluginBackendChannelSocketController {
     }
     this.incoming.push({ data, bytes });
     this.incomingBytes += bytes;
-    if (!this.draining) void this.drainIncoming();
+    this.startIncomingDrain();
+  }
+
+  private startIncomingDrain(): void {
+    if (this.incomingDrainTask !== undefined) return;
+    const task = this.drainIncoming();
+    this.incomingDrainTask = task;
+    const finish = (restart: boolean): void => {
+      if (this.incomingDrainTask !== task) return;
+      this.incomingDrainTask = undefined;
+      if (restart && this.incoming.length !== 0 && (this.state === "ready" || this.state === "draining-close")) {
+        this.startIncomingDrain();
+      }
+    };
+    void task.then(() => { finish(true); }, () => { finish(false); });
   }
 
   private async drainIncoming(): Promise<void> {
-    this.draining = true;
-    try {
-      while (this.state === "ready") {
-        const next = this.incoming[0];
-        if (next === undefined) return;
-        try {
-          await this.session?.receive(next.data);
-        } catch (error) {
-          if (error instanceof PluginBackendChannelError) await this.fail(error.code, error.message, error.closeCode);
-          else await this.fail("receive-failed", boundedErrorMessage(error), 1011);
-          return;
-        } finally {
-          if (this.incoming[0] === next) {
-            this.incoming.shift();
-            this.incomingBytes -= next.bytes;
-          }
+    while (this.state === "ready" || this.state === "draining-close") {
+      const next = this.incoming[0];
+      if (next === undefined) return;
+      try {
+        await this.session?.receive(next.data);
+      } catch (error) {
+        if (this.state === "draining-close") throw error;
+        if (error instanceof PluginBackendChannelError) await this.fail(error.code, error.message, error.closeCode);
+        else await this.fail("receive-failed", boundedErrorMessage(error), 1011);
+        return;
+      } finally {
+        if (this.incoming[0] === next) {
+          this.incoming.shift();
+          this.incomingBytes -= next.bytes;
         }
       }
-    } finally {
-      this.draining = false;
+    }
+  }
+
+  private async awaitIncomingDrain(): Promise<void> {
+    while (this.incoming.length !== 0 || this.incomingDrainTask !== undefined) {
+      this.startIncomingDrain();
+      const task = this.incomingDrainTask;
+      if (task !== undefined) await task;
     }
   }
 
@@ -255,7 +279,7 @@ class PluginBackendChannelSocketController {
       this.logger.error({ err: error, pluginId: this.params.pluginId, operation: this.params.operation }, "plugin backend channel cleanup failed after transport failure");
     } finally {
       try {
-        await this.writer.close(closeCode, message);
+        await this.writer.close(closeCode, message, { terminateImmediately: this.admission === undefined });
       } finally {
         this.admission?.release();
       }
@@ -264,18 +288,39 @@ class PluginBackendChannelSocketController {
 
   private async onClosed(code: number, reason: string): Promise<void> {
     if (this.state === "closed") return;
-    this.state = "closed";
     clearTimeout(this.handshakeTimer);
-    if (!this.lifetime.signal.aborted) this.lifetime.abort(new DOMException(reason || "Browser disconnected", "AbortError"));
+    let cleanupCode = code;
+    let cleanupReason = reason || "Browser disconnected";
+    if (code === 1000 && this.state === "ready") {
+      this.state = "draining-close";
+      try {
+        await withTimeout(
+          this.awaitIncomingDrain(),
+          PLUGIN_BACKEND_CHANNEL_DRAIN_TIMEOUT_MS,
+          "Plugin backend channel accepted receive drain",
+        );
+      } catch (error) {
+        cleanupCode = 1011;
+        cleanupReason = `Plugin backend channel accepted receive drain failed: ${boundedErrorMessage(error)}`;
+        this.logger.error({ err: error, pluginId: this.params.pluginId, operation: this.params.operation }, "plugin backend channel receive drain failed after clean disconnect");
+      }
+    }
+    if (this.channelIsClosed()) return;
+    this.state = "closed";
+    if (!this.lifetime.signal.aborted) this.lifetime.abort(new DOMException(cleanupReason, "AbortError"));
     this.incoming.length = 0;
     this.incomingBytes = 0;
     try {
-      await this.session?.close(code, reason || "Browser disconnected");
+      await this.session?.close(cleanupCode, cleanupReason);
     } catch (error) {
       this.logger.error({ err: error, pluginId: this.params.pluginId, operation: this.params.operation }, "plugin backend channel cleanup failed after disconnect");
     } finally {
       this.admission?.release();
     }
+  }
+
+  private channelIsClosed(): boolean {
+    return this.state === "closed";
   }
 }
 
@@ -289,22 +334,27 @@ class ChannelRouteWriter implements PluginBackendChannelTransport {
   private readonly pending: { text: string; bytes: number }[] = [];
   private pendingBytes = 0;
   private isReady = false;
-  private closed = false;
+  private closing = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(private readonly socket: WebSocket, onFailure: (error: unknown) => void) {
-    this.sender = createBoundedTextWebSocketSender(socket, { onOverflow: onFailure });
+    this.sender = createBoundedTextWebSocketSender(socket, {
+      maxBytes: PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES,
+      onOverflow: onFailure,
+    });
   }
 
   send(data: JsonValue): void {
     const text = serializePluginBackendChannelDataEnvelope(data);
-    if (this.closed) throw new Error("Plugin backend channel transport is closed");
+    if (this.closing) throw new Error("Plugin backend channel transport is closed");
     if (this.isReady) {
       this.sender(text);
       return;
     }
     const bytes = utf8ByteLength(text);
     const readyBytes = utf8ByteLength(serializePluginBackendChannelReadyEnvelope());
-    if (this.pending.length >= PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES - 1 || this.pendingBytes + bytes + readyBytes > PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES) {
+    if (this.pending.length >= PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES - 1
+      || this.pendingBytes + bytes + readyBytes > PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES) {
       throw new Error("Plugin backend channel plugin queue limit was exceeded");
     }
     this.pending.push({ text, bytes });
@@ -312,7 +362,7 @@ class ChannelRouteWriter implements PluginBackendChannelTransport {
   }
 
   sendError(code: string, message: string): void {
-    if (this.closed) return;
+    if (this.closing) return;
     this.pending.length = 0;
     this.pendingBytes = 0;
     try {
@@ -322,23 +372,44 @@ class ChannelRouteWriter implements PluginBackendChannelTransport {
     }
   }
 
-  async close(code: number, reason: string): Promise<void> {
-    if (this.closed) return;
+  close(
+    code: number,
+    reason: string,
+    options: { terminateImmediately?: boolean } = {},
+  ): Promise<void> {
+    if (this.closePromise !== undefined) return this.closePromise;
     if (code === 1000) this.ready();
-    this.closed = true;
+    this.closing = true;
+    this.closePromise = this.performClose(code, reason, options);
+    return this.closePromise;
+  }
+
+  private async performClose(
+    code: number,
+    reason: string,
+    options: { terminateImmediately?: boolean },
+  ): Promise<void> {
     if (code === 1000) {
       try {
         await this.sender.drain();
       } catch (error) {
-        closeSocket(this.socket, 1011, `Plugin backend channel clean-close drain failed: ${boundedErrorMessage(error)}`);
+        await closePluginBackendChannelWebSocket(this.socket, 1011, `Plugin backend channel clean-close drain failed: ${boundedErrorMessage(error)}`);
         throw error;
       }
+    } else {
+      try {
+        // Give the attributed error envelope a bounded chance to reach a
+        // cooperative peer without draining indefinitely on abnormal close.
+        await this.sender.drain(PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS);
+      } catch {
+        // Physical teardown below remains authoritative.
+      }
     }
-    closeSocket(this.socket, code, reason);
+    await closePluginBackendChannelWebSocket(this.socket, code, reason, options);
   }
 
   ready(): void {
-    if (this.closed || this.isReady) return;
+    if (this.closing || this.isReady) return;
     this.isReady = true;
     this.sender(serializePluginBackendChannelReadyEnvelope());
     for (const frame of this.pending) this.sender(frame.text);
@@ -366,14 +437,17 @@ function decodeCloseReason(reason: Buffer): string {
   }
 }
 
-function closeSocket(socket: WebSocket, code: number, reason: string): void {
-  if (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING) return;
-  const boundedReason = boundedPluginBackendChannelCloseReason(reason);
-  if (socket.readyState === WebSocket.CONNECTING) {
-    socket.once("open", () => { socket.close(code, boundedReason); });
-    return;
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { reject(new Error(`${label} timed out after ${String(timeoutMs)}ms`)); }, timeoutMs);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  socket.close(code, boundedReason);
 }
 
 function boundedChannelErrorMessage(value: string): string {

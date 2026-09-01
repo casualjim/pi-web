@@ -2,7 +2,7 @@ import { createServer, type Server as NetServer, type Socket as NetSocket } from
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   parsePluginBackendChannelServerEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
@@ -100,7 +100,7 @@ describe("local plugin backend channel proxy", () => {
     const rejected = nextClose(second);
     await waitForOpen(second);
     await expect(errorFrame).resolves.toMatchObject({ kind: "error", code: "admission-denied" });
-    await expect(rejected).resolves.toMatchObject({ code: 1013 });
+    await expect(rejected).resolves.toMatchObject({ code: 1006 });
     expect(connectionCount).toBe(1);
     expect(admissions.activeCount).toBe(1);
 
@@ -108,7 +108,7 @@ describe("local plugin backend channel proxy", () => {
     const daemonClosed = nextClose(daemonSocket);
     first.close();
     await Promise.all([firstClosed, daemonClosed]);
-    expect(admissions.activeCount).toBe(0);
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
   });
 
   it("times out and releases an admission when the daemon WebSocket upgrade stalls", async () => {
@@ -143,7 +143,7 @@ describe("local plugin backend channel proxy", () => {
       await waitForOpen(browser);
       await expect(closed).resolves.toMatchObject({ code: 1011 });
       await stalledClosed;
-      expect(admissions.activeCount).toBe(0);
+      await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
       expect(stalledSockets.size).toBe(0);
     } finally {
       for (const socket of stalledSockets) socket.destroy();

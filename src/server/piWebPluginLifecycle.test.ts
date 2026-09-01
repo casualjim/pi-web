@@ -129,7 +129,7 @@ describe("PI WEB plugin desired/active lifecycle reconciliation", () => {
     expect(reconciled.response.serverRuntime.terminalMode).toBe("recovery-disabled");
   });
 
-  it.each(["unavailable", "incompatible"] as const)("keeps browser-only plugins available while withholding server-backed plugins when sessiond is %s", (status) => {
+  it.each(["unavailable", "incompatible"] as const)("withholds every ordinary browser module while required runtime state is %s", (status) => {
     const desired = snapshot([
       entry("browser-only", { browser: "browser-1" }),
       entry("server-backed", { browser: "browser-1", server: "server-1" }),
@@ -141,9 +141,11 @@ describe("PI WEB plugin desired/active lifecycle reconciliation", () => {
       moduleUrl,
     );
 
-    expect(reconciled.browserPlugins.map(({ plugin }) => plugin.id)).toEqual(["browser-only"]);
+    expect(reconciled.browserPlugins).toEqual([]);
+    expect(plugin(reconciled, "browser-only")).not.toHaveProperty("module");
+    expect(plugin(reconciled, "server-backed")).not.toHaveProperty("module");
     expect(plugin(reconciled, "server-backed").server).toMatchObject({ state: "unknown", restartRequired: false });
-    expect(reconciled.response.serverRuntime).toMatchObject({ status });
+    expect(reconciled.response.serverRuntime).toMatchObject({ status, terminalMode: "required" });
     expect(typeof reconciled.response.serverRuntime.message).toBe("string");
   });
 });

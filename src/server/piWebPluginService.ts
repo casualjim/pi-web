@@ -34,6 +34,16 @@ export interface PiWebPluginManifest {
   plugins: PiWebPluginManifestEntry[];
 }
 
+export class PiWebPluginManifestRuntimeError extends Error {
+  override name = "PiWebPluginManifestRuntimeError";
+  readonly statusCode: 409 | 503;
+
+  constructor(readonly runtimeStatus: "unavailable" | "incompatible", message: string) {
+    super(message);
+    this.statusCode = runtimeStatus === "unavailable" ? 503 : 409;
+  }
+}
+
 export interface PiWebPluginManifestEntry {
   id: string;
   module: string;
@@ -86,6 +96,13 @@ export class PiWebPluginService {
 
   async manifest(): Promise<PiWebPluginManifest> {
     const lifecycle = await this.lifecycle();
+    const runtime = lifecycle.response.serverRuntime;
+    if (runtime.status !== "available") {
+      throw new PiWebPluginManifestRuntimeError(
+        runtime.status,
+        requiredRuntimeFailureMessage(runtime.status, runtime.message),
+      );
+    }
     const plugins: PiWebPluginManifestEntry[] = [];
     for (const { plugin, backendRevision, backendCapabilityVersion, channelVersion } of lifecycle.browserPlugins) {
       const artifact = await this.captureBrowserArtifact(plugin, backendRevision);
@@ -236,6 +253,11 @@ export class PiWebPluginService {
       };
     }
   }
+}
+
+function requiredRuntimeFailureMessage(status: "unavailable" | "incompatible", message: string | undefined): string {
+  const detail = message === undefined || message === "" ? "no runtime detail was available" : message;
+  return `Required Terminal plugin runtime is ${status}: ${detail}. Retry when the session daemon is available and compatible; only an active safe-start-none runtime may disable Terminal.`;
 }
 
 function requireTerminalManifestEntry(plugins: readonly PiWebPluginManifestEntry[]): void {

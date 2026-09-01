@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   parsePluginBackendChannelServerEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
@@ -106,7 +106,7 @@ describe("machine plugin backend channel proxy", () => {
     const rejected = nextClose(second);
     await waitForOpen(second);
     await expect(errorFrame).resolves.toMatchObject({ kind: "error", code: "admission-denied" });
-    await expect(rejected).resolves.toMatchObject({ code: 1013 });
+    await expect(rejected).resolves.toMatchObject({ code: 1006 });
     expect(remoteClientCalls).toBe(1);
     expect(admissions.activeCount).toBe(1);
 
@@ -114,6 +114,22 @@ describe("machine plugin backend channel proxy", () => {
     first.close();
     await firstClosed;
     expect(admissions.activeCount).toBe(0);
+  });
+
+  it("accounts the invalid local-machine channel alias through physical teardown", async () => {
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ maxTotal: 1 });
+    const remoteClient = vi.fn(() => Promise.resolve(undefined));
+    registerMachineProxyRoutes(app, { remoteClient }, admissions);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const browser = new WebSocket(`${fastifyServerUrl(app)}/api/machines/local/plugin-backends/terminal/projects/p/workspaces/w/channels/attach`);
+    sockets.push(browser);
+    const closed = nextClose(browser);
+    await waitForOpen(browser);
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(1); });
+    await expect(closed).resolves.toMatchObject({ code: 1011 });
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
+    expect(remoteClient).not.toHaveBeenCalled();
   });
 
   it("times out unresolved federation setup and releases its admission", async () => {
@@ -128,7 +144,7 @@ describe("machine plugin backend channel proxy", () => {
     const closed = nextClose(browser);
     await waitForOpen(browser);
     await expect(closed).resolves.toMatchObject({ code: 1011 });
-    expect(admissions.activeCount).toBe(0);
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
   });
 });
 

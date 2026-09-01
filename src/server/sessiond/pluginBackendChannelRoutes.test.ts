@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, type RawData } from "ws";
+import { splitTerminalOutput } from "../../../pi-web-plugins/terminal/server/server-plugin.js";
 import type { JsonValue } from "../../server-plugin-api.js";
 import {
   parsePluginBackendChannelServerEnvelope,
@@ -111,6 +112,106 @@ describe("session daemon plugin backend channels", () => {
     await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
   });
 
+  it("drains accepted asynchronous receives in order before a clean browser close", async () => {
+    const workspaces = workspaceRegistry();
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected workspace");
+    const gates = [deferred(), deferred()];
+    const events: string[] = [];
+    const close = vi.fn(() => { events.push("close"); });
+    const registry = new PluginBackendRegistry({
+      contributions: [contribution(() => ({
+        async receive(data) {
+          if (!isJsonRecord(data) || typeof data["sequence"] !== "number") throw new Error("Expected sequence frame");
+          const sequence = data["sequence"];
+          events.push(`receive:${String(sequence)}:start`);
+          const gate = gates[sequence - 1];
+          if (gate === undefined) throw new Error("Missing receive gate");
+          await gate.promise;
+          events.push(`receive:${String(sequence)}:end`);
+        },
+        close,
+      }))],
+      workspaces,
+    });
+    registerPluginBackendChannelRoutes(app, { projects: projectReader(), backends: registry });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const socket = connect(workspaceId);
+    const messages = socketMessages(socket);
+    const closed = nextClose(socket);
+    await waitForOpen(socket);
+    socket.send(serializePluginBackendChannelOpenEnvelope("terminal-r1", null));
+    expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toMatchObject({ kind: "ready" });
+    socket.send(serializePluginBackendChannelDataEnvelope({ sequence: 1 }));
+    socket.send(serializePluginBackendChannelDataEnvelope({ sequence: 2 }), () => { socket.close(1000, "browser complete"); });
+
+    await vi.waitFor(() => { expect(events).toEqual(["receive:1:start"]); });
+    expect(close).not.toHaveBeenCalled();
+    expect(registry.activeChannelCount()).toBe(1);
+    gates[0]?.resolve();
+    await vi.waitFor(() => { expect(events).toEqual(["receive:1:start", "receive:1:end", "receive:2:start"]); });
+    expect(close).not.toHaveBeenCalled();
+    gates[1]?.resolve();
+
+    await expect(closed).resolves.toMatchObject({ code: 1000 });
+    await vi.waitFor(() => { expect(events).toEqual([
+      "receive:1:start",
+      "receive:1:end",
+      "receive:2:start",
+      "receive:2:end",
+      "close",
+    ]); });
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+  });
+
+  it("attaches and reconnects with the full worst-case escaped Terminal replay", async () => {
+    const workspaces = workspaceRegistry();
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected workspace");
+    const replay = "\u0000".repeat(200_000);
+    const chunks = splitTerminalOutput(replay, true);
+    expect(chunks.length).toBeLessThan(128);
+    const registry = new PluginBackendRegistry({
+      contributions: [contribution(({ send }) => {
+        for (const data of chunks) send({ type: "output", data, replay: true });
+        send({ type: "output", data: "__LIVE_AFTER_REPLAY__", replay: false });
+        return { receive: () => undefined };
+      })],
+      workspaces,
+    });
+    registerPluginBackendChannelRoutes(app, { projects: projectReader(), backends: registry });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const socket = connect(workspaceId);
+      const messages = socketMessages(socket);
+      await waitForOpen(socket);
+      socket.send(serializePluginBackendChannelOpenEnvelope("terminal-r1", null));
+      expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({ version: 1, kind: "ready" });
+      let received = "";
+      for (const expectedChunk of chunks) {
+        const frame = parsePluginBackendChannelServerEnvelope(await messages.next());
+        expect(frame).toMatchObject({ kind: "data", data: { type: "output", replay: true } });
+        if (frame.kind !== "data" || !isJsonRecord(frame.data)) throw new Error("Expected Terminal replay data frame");
+        const data = frame.data["data"];
+        if (typeof data !== "string") throw new Error("Expected Terminal replay text");
+        expect(data).toBe(expectedChunk);
+        received += data;
+      }
+      expect(received).toBe(replay);
+      expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({
+        version: 1,
+        kind: "data",
+        data: { type: "output", data: "__LIVE_AFTER_REPLAY__", replay: false },
+      });
+      const closed = nextClose(socket);
+      socket.close(1000, `replay-${String(attempt)}`);
+      await closed;
+      await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+    }
+  });
+
   it("reserves admission before open and releases no-open sockets exactly once", async () => {
     const workspaces = workspaceRegistry();
     const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
@@ -135,7 +236,7 @@ describe("session daemon plugin backend channels", () => {
       kind: "error",
       code: "admission-denied",
     });
-    await expect(deniedClose).resolves.toMatchObject({ code: 1013 });
+    await expect(deniedClose).resolves.toMatchObject({ code: 1006 });
     expect(registry.activeChannelCount()).toBe(1);
 
     waiting.close(1000, "retry");
@@ -306,6 +407,16 @@ function nextClose(socket: WebSocket): Promise<{ code: number; reason: string }>
   return new Promise((resolve) => {
     socket.once("close", (code, reason) => { resolve({ code, reason: rawDataToString(reason) }); });
   });
+}
+
+function isJsonRecord(value: JsonValue): value is Readonly<Record<string, JsonValue>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolvePromise: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
 }
 
 function rawDataToString(data: RawData): string {

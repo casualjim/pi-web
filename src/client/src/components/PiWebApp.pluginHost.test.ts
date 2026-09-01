@@ -142,6 +142,7 @@ describe("PiWebApp plugin host", () => {
       mainView: "browser-only:workspace.panel",
     });
     setVerifiedPluginMode(app, "local", "recovery-disabled");
+    setVerifiedPluginMode(app, remoteMachine.id, "recovery-disabled");
     let navigation: WorkspacePanelNavigationV1 | undefined;
     appPluginRegistry(app).register({
       id: "browser-only",
@@ -1245,6 +1246,61 @@ describe("PiWebApp plugin host", () => {
     });
   });
 
+  it("gates portable contributions against remote required mode and fences stale callbacks", async () => {
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedMachine: remoteMachine,
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    markPluginLoadingReady(app); // local healthy; remote is still unverified
+    if (!Reflect.set(app, "loadPluginsForSelectedMachine", () => Promise.resolve())) {
+      throw new Error("Could not isolate selected-machine plugin loading");
+    }
+    const run = vi.fn();
+    appPluginRegistry(app).register({
+      id: "portable",
+      machineSpecific: false,
+      plugin: {
+        apiVersion: 2,
+        name: "Portable",
+        activate: () => ({ contributions: { actions: [{ id: "act", title: "Portable", run }] } }),
+      },
+    });
+    const portableAction = (): { id: string; run: () => void | Promise<void> } | undefined => {
+      const actions = callAppMethod(app, "getDefaultActions");
+      if (!isActionArray(actions)) throw new Error("Expected app actions");
+      return actions.find((action) => action.id === "portable:act");
+    };
+
+    expect(portableAction()).toBeUndefined();
+    installTestTerminalComposition(app, remoteMachine.id);
+    const stale = portableAction();
+    expect(stale).toBeDefined();
+    callAppMethod(app, "setState", {
+      selectedMachine: { id: "local", name: "Local", kind: "local", createdAt: "now", updatedAt: "now" },
+    });
+    await stale?.run();
+    expect(run).not.toHaveBeenCalled();
+    callAppMethod(app, "setState", { selectedMachine: remoteMachine });
+
+    callAppMethod(app, "clearRequiredTerminal", "local");
+    verifiedPluginModes(app).delete("local");
+    expect(portableAction()).toBeDefined(); // local failure must not hide a healthy remote
+
+    callAppMethod(app, "clearRequiredTerminal", remoteMachine.id);
+    verifiedPluginModes(app).delete(remoteMachine.id);
+    expect(portableAction()).toBeUndefined();
+    await stale?.run();
+    expect(run).not.toHaveBeenCalled();
+
+    installTestTerminalComposition(app, remoteMachine.id);
+    await portableAction()?.run();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   it("fails closed while required Terminal manifest verification is pending", async () => {
     const app = createApp();
     setAppState(app, {
@@ -1287,13 +1343,71 @@ describe("PiWebApp plugin host", () => {
       });
 
     await ensureGatewayPluginsLoaded(app);
-    expect(appState(app).error).toContain("404 Not Found");
+    expect(displayedError(app)).toContain("404 Not Found");
     expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
     expect(Reflect.get(app, "gatewayPluginLoadPromise")).toBeUndefined();
 
     await ensureGatewayPluginsLoaded(app);
     expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
     expect(loadExternalPlugins).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves an attributable required-load failure through deep-link restoration until valid retry", async () => {
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, { ...initialAppState(), projects: [project] });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "PI WEB plugins", () =>
+      Promise.reject(new Error("Invalid plugin manifest lifecycle payload")));
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+
+    if (!Reflect.set(app, "loadPluginsForSelectedMachine", () => Promise.resolve())) {
+      throw new Error("Could not isolate deep-link plugin loading");
+    }
+    stubWorkspaceProjectSelection(app, () => {
+      callAppMethod(app, "setState", {
+        selectedProject: project,
+        selectedWorkspace: workspace,
+        workspaces: [workspace],
+        error: "",
+      });
+    });
+    await callAsyncAppMethod(app, "restoreRouteFor", {
+      machineId: undefined,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      sessionId: undefined,
+      tool: "core:workspace.terminal",
+      view: undefined,
+    }, false, { contributionQuery: {} });
+
+    expect(appState(app).selectedWorkspace?.id).toBe(workspace.id);
+    expect(appState(app).error).toBe("");
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+    callAppMethod(app, "setState", { error: "temporary workspace error" });
+    expect(displayedError(app)).toBe("temporary workspace error");
+    callAppMethod(app, "setState", { error: "" });
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+
+    callAppMethod(app, "setState", { error: "unrelated workspace warning" });
+    await callAsyncAppMethod(app, "registerExternalPlugins", "PI WEB plugins", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [{
+        id: "terminal",
+        machineSpecific: true,
+        backendRevision: "terminal-r1",
+        backendCapabilityVersion: 1,
+        channelVersion: 1,
+        plugin: requiredTerminalPlugin(),
+      }],
+      failures: [],
+    }));
+    expect(appState(app).error).toBe("unrelated workspace warning");
+    expect(displayedError(app)).toBe("unrelated workspace warning");
+    callAppMethod(app, "setState", { error: "" });
+    expect(displayedError(app)).toBe("");
   });
 
   it("hides the core Terminal surface and rejects helpers in no-plugin recovery", async () => {
@@ -1420,8 +1534,8 @@ describe("PiWebApp plugin host", () => {
 
     expect(appPluginRegistry(app).hasPlugin("terminal")).toBe(false);
     expect(appPluginRegistry(app).hasPlugin("info")).toBe(false);
-    expect(appState(app).error).toContain("Required Terminal plugin failed to activate");
-    expect(appState(app).error).toContain("Terminal activation failed");
+    expect(displayedError(app)).toContain("Required Terminal plugin failed to activate");
+    expect(displayedError(app)).toContain("Terminal activation failed");
   });
 
   it("retries a plugin whose activation failed without retaining partial contributions", async () => {
@@ -1519,6 +1633,12 @@ function appState(app: PiWebApp): ReturnType<typeof initialAppState> {
   const state: unknown = Reflect.get(app, "state");
   if (!isAppState(state)) throw new Error("PiWebApp state was unavailable");
   return state;
+}
+
+function displayedError(app: PiWebApp): string {
+  const value = callAppMethod(app, "displayedError");
+  if (typeof value !== "string") throw new Error("PiWebApp displayed error was unavailable");
+  return value;
 }
 
 function workspacePanelContextFromApp(app: PiWebApp): WorkspacePanelContext {
@@ -1693,9 +1813,13 @@ function installTestTerminalComposition(app: PiWebApp, machineId: string): void 
 }
 
 function setVerifiedPluginMode(app: PiWebApp, machineId: string, mode: "required" | "recovery-disabled"): void {
+  verifiedPluginModes(app).set(machineId, mode);
+}
+
+function verifiedPluginModes(app: PiWebApp): Map<unknown, unknown> {
   const modes: unknown = Reflect.get(app, "verifiedPluginModeByMachine");
   if (!(modes instanceof Map)) throw new Error("PiWebApp verified plugin mode map was unavailable");
-  modes.set(machineId, mode);
+  return modes;
 }
 
 function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {
@@ -1838,6 +1962,10 @@ async function callAsyncAppMethod(app: PiWebApp, name: string, ...args: unknown[
 
 function isAction(value: unknown): value is { id: string; run: () => void | Promise<void> } {
   return typeof value === "object" && value !== null && "id" in value && typeof value.id === "string" && "run" in value && typeof value.run === "function";
+}
+
+function isActionArray(value: unknown): value is { id: string; run: () => void | Promise<void> }[] {
+  return Array.isArray(value) && value.every((candidate: unknown) => isAction(candidate));
 }
 
 function manifestEntry(id: string): PluginManifestEntry {

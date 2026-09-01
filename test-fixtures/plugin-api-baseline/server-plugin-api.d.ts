@@ -81,11 +81,12 @@ export interface PairedPluginBackendV1 {
 }
 /** Channel instance returned by `openChannel()` after the host validates scope. */
 export interface PairedPluginChannel {
-    /** Consume one browser-authored JSON frame within a host-bounded invocation. */
+    /** Consume one browser-authored JSON frame in accepted order within a host-bounded invocation. */
     receive(data: JsonValue, signal: AbortSignal): MaybePromise<void>;
     /**
-     * Optional plugin-owned completion signal. Resolving it asks the host to
-     * close the browser transport and release admission immediately.
+     * Optional plugin-owned completion signal. Resolve it only after the final
+     * send; the host boundedly drains accepted transport work before physical
+     * close and admission release.
      */
     readonly closed?: PromiseLike<void>;
     /** Release channel resources once after disconnect, failure, expiry, shutdown, or plugin completion. */

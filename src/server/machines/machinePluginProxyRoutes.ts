@@ -42,7 +42,9 @@ const SAFE_RESPONSE_HEADERS = new Set([
 
 export function registerMachinePluginProxyRoutes(app: FastifyInstance, machines: MachinePluginProxyMachines = new MachineService()): void {
   app.get<{ Params: { machineId: string } }>("/api/machines/:machineId/pi-web-plugins/manifest.json", async (request, reply) => {
-    if (request.params.machineId === "local") return { lifecycleVersion: PI_WEB_PLUGIN_LIFECYCLE_VERSION, terminalMode: "recovery-disabled", plugins: [] };
+    if (request.params.machineId === "local") {
+      return reply.code(400).send({ error: "Local plugin manifests must use the local manifest endpoint" });
+    }
 
     const client = await machines.remoteClient(request.params.machineId);
     if (client === undefined) return reply.code(404).send({ error: "Machine not found" });

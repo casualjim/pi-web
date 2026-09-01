@@ -20,6 +20,7 @@ import {
   PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE,
   PLUGIN_BACKEND_CHANNEL_MAX_TOTAL,
   PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
+  PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS,
   PLUGIN_BACKEND_DISPATCH_TIMEOUT_MS,
   PLUGIN_BACKEND_REQUEST_TIMEOUT_MS,
   PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES,
@@ -339,7 +340,9 @@ export class PluginBackendRegistry {
       signal?.removeEventListener("abort", abortFromCaller);
       finishOpeningTask();
       if (!lifetimeController.signal.aborted) lifetimeController.abort(error);
-      releaseAdmission();
+      // A route-provided reservation remains tied to its physical socket; the
+      // route releases it only after attributed teardown completes.
+      if (reservedAdmission === undefined) releaseAdmission();
       if (openingChannel !== undefined) {
         void openingChannel.then(async (channel) => {
           await closeUnpublishedChannel(channel, pluginId, operation, this.channelCallbackTimeoutMs);
@@ -368,10 +371,8 @@ export class PluginBackendRegistry {
 
   async closeAll(reason = "Session daemon shutdown"): Promise<void> {
     this.channelShutdown = true;
-    for (const admission of [...this.channelAdmissions]) {
-      admission.abort(reason);
-      admission.release();
-    }
+    const admissions = [...this.channelAdmissions];
+    for (const admission of admissions) admission.abort(reason);
     for (const controller of this.openingChannelControllers) {
       if (!controller.signal.aborted) controller.abort(new DOMException(reason, "AbortError"));
     }
@@ -387,6 +388,19 @@ export class PluginBackendRegistry {
         failures.push(reason);
       }
     }
+    await Promise.all(admissions.map(async (admission) => {
+      try {
+        await waitForPromise(
+          admission.released,
+          PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS + (2 * PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS),
+          "Plugin backend channel admission teardown",
+        );
+      } catch (error) {
+        // Do not counterfeit teardown by dropping admission while a physical
+        // owner has not confirmed close; shutdown reports the bounded failure.
+        failures.push(error);
+      }
+    }));
     if (failures.length !== 0) throw new AggregateError(failures, "One or more plugin backend channels failed to close");
   }
 
@@ -505,7 +519,9 @@ export class PluginBackendRegistry {
 
 class ManagedPluginBackendChannelAdmission implements PluginBackendChannelAdmission {
   private readonly controller = new AbortController();
-  private released = false;
+  private isReleased = false;
+  private resolveReleased: () => void = () => undefined;
+  readonly released = new Promise<void>((resolve) => { this.resolveReleased = resolve; });
 
   constructor(
     readonly request: PluginBackendChannelAdmissionRequest,
@@ -521,9 +537,10 @@ class ManagedPluginBackendChannelAdmission implements PluginBackendChannelAdmiss
   }
 
   release(): void {
-    if (this.released) return;
-    this.released = true;
+    if (this.isReleased) return;
+    this.isReleased = true;
     this.onRelease();
+    this.resolveReleased();
   }
 }
 
@@ -535,11 +552,9 @@ function requireManagedChannelAdmission(
     || admission.request.pluginId !== expected.pluginId
     || admission.request.projectId !== expected.projectId
     || admission.request.workspaceId !== expected.workspaceId) {
-    admission.release();
     throw channelError("admission-denied", 1013, `Server plugin ${expected.pluginId} channel admission reservation is invalid`);
   }
   if (admission.signal.aborted) {
-    admission.release();
     throw channelError("shutdown", 1012, `Server plugin ${expected.pluginId} channel admission was cancelled`);
   }
   return admission;
@@ -887,6 +902,19 @@ function cloneJsonObject(value: JsonObject, label: string): JsonObject {
 
 function isJsonObject(value: JsonValue): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function waitForPromise<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { reject(new Error(`${label} timed out after ${String(timeoutMs)}ms`)); }, timeoutMs);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function runBoundedPluginBackendOperation<T>(

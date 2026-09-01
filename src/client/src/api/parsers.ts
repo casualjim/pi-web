@@ -1579,7 +1579,7 @@ export function parsePiWebPluginsResponse(value: unknown): PiWebPluginsResponse 
       diagnostics: [],
       serverRuntime: {
         status: "incompatible",
-        terminalMode: "recovery-disabled",
+        terminalMode: "required",
         restartRequired: false,
         message: "PI WEB does not support plugin lifecycle diagnostics. Update and restart PI WEB, then try again.",
         recovery: legacyPluginRecoveryCommands(),
@@ -1674,6 +1674,9 @@ function parsePiWebPluginRuntimeInfo(value: unknown): PiWebPluginsResponse["serv
   if (safeStart !== undefined && safeStart !== "bundled-only" && safeStart !== "none") throw new Error("Invalid PI WEB server-plugin safe-start state");
   if (desiredSafeStart !== undefined && desiredSafeStart !== "off" && desiredSafeStart !== "bundled-only" && desiredSafeStart !== "none") {
     throw new Error("Invalid desired PI WEB server-plugin safe-start state");
+  }
+  if (status !== "available" && terminalMode === "recovery-disabled") {
+    throw new Error("Unavailable PI WEB runtime cannot declare Terminal recovery mode");
   }
   if ((safeStart === "none") !== (terminalMode === "recovery-disabled") && status === "available") {
     throw new Error("PI WEB Terminal plugin mode does not match safe start");

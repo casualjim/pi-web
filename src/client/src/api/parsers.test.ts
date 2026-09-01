@@ -295,7 +295,7 @@ describe("API parsers", () => {
     });
 
     expect(parsed.plugins).toEqual([expect.objectContaining({ id: "info", enabled: true, discovered: true, conflict: false })]);
-    expect(parsed.serverRuntime).toMatchObject({ status: "incompatible", restartRequired: false });
+    expect(parsed.serverRuntime).toMatchObject({ status: "incompatible", terminalMode: "required", restartRequired: false });
     expect(parsed.serverRuntime.message).toContain("Update and restart PI WEB");
   });
 
@@ -335,6 +335,22 @@ describe("API parsers", () => {
         },
       },
     })).toThrow("Invalid PI WEB server plugin recovery commands");
+    expect(() => parsePiWebPluginsResponse({
+      lifecycleVersion: 2,
+      plugins: [],
+      diagnostics: [],
+      serverRuntime: {
+        status: "unavailable",
+        terminalMode: "recovery-disabled",
+        restartRequired: false,
+        recovery: {
+          showSafeStart: "pi-web plugins safe-start show",
+          bundledOnly: "pi-web plugins safe-start set bundled-only --restart",
+          noServerPlugins: "pi-web plugins safe-start set none --restart",
+          clearSafeStart: "pi-web plugins safe-start clear --restart",
+        },
+      },
+    })).toThrow("Unavailable PI WEB runtime cannot declare Terminal recovery mode");
   });
 
   it("parses paged message responses and rejects legacy array message pages", () => {

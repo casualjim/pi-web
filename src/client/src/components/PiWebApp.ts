@@ -235,6 +235,9 @@ export class PiWebApp extends LitElement {
   private readonly requiredTerminalByMachine = new Map<string, RequiredTerminalBrowserComposition>();
   private readonly knownRequiredTerminalByMachine = new Map<string, RequiredTerminalBrowserComposition>();
   private readonly verifiedPluginModeByMachine = new Map<string, TerminalPluginMode>();
+  /** Required-load failures outlive workspace/project resets until authoritative recovery. */
+  private readonly requiredPluginFailureByMachine = new Map<string, string>();
+  private readonly dismissedRequiredPluginFailureByMachine = new Map<string, string>();
   private machineNavigationRestoreSeq = 0;
   private navigationSelectionSeq = 0;
   private modelDialogInstanceId = 0;
@@ -1788,7 +1791,7 @@ export class PiWebApp extends LitElement {
       this.clearRequiredTerminal(machine.id);
       const selectionChanged = this.reconcileWorkspacePanelSelection();
       if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
-      this.setState({ error: message });
+      this.setRequiredPluginFailure(machine.id, message);
       return;
     }
     const existing = this.machinePluginLoadPromises.get(machine.id);
@@ -1812,6 +1815,7 @@ export class PiWebApp extends LitElement {
       if (result.terminalMode === "recovery-disabled") {
         this.clearRequiredTerminal(machineId);
         this.verifiedPluginModeByMachine.set(machineId, "recovery-disabled");
+        this.clearRequiredPluginFailure(machineId);
       }
       let complete = result.failures.length === 0;
       for (const failure of result.failures) {
@@ -1826,7 +1830,7 @@ export class PiWebApp extends LitElement {
         const selectionChanged = this.reconcileWorkspacePanelSelection();
         if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
         this.applyPreferredTheme(false);
-        this.setState({ error: `Required Terminal plugin failed to load: ${errorMessage(requiredTerminalLoadFailure.error)}. Open Settings for recovery guidance.` });
+        this.setRequiredPluginFailure(machineId, `Required Terminal plugin failed to load: ${errorMessage(requiredTerminalLoadFailure.error)}. Open Settings for recovery guidance.`);
         this.requestUpdate();
         return false;
       }
@@ -1866,7 +1870,7 @@ export class PiWebApp extends LitElement {
           if (isRequiredTerminal) {
             this.verifiedPluginModeByMachine.delete(machineId);
             this.clearRequiredTerminal(machineId);
-            this.setState({ error: `Required Terminal plugin failed to activate: ${errorMessage(error)}. Open Settings for recovery guidance.` });
+            this.setRequiredPluginFailure(machineId, `Required Terminal plugin failed to activate: ${errorMessage(error)}. Open Settings for recovery guidance.`);
             break;
           }
         }
@@ -1875,8 +1879,12 @@ export class PiWebApp extends LitElement {
         complete = false;
         this.verifiedPluginModeByMachine.delete(machineId);
         this.clearRequiredTerminal(machineId);
+        if (!this.requiredPluginFailureByMachine.has(machineId)) {
+          this.setRequiredPluginFailure(machineId, "Required Terminal plugin is unavailable after plugin activation. Open Settings for recovery guidance.");
+        }
       } else if (result.terminalMode === "required") {
         this.verifiedPluginModeByMachine.set(machineId, "required");
+        this.clearRequiredPluginFailure(machineId);
       }
       const selectionChanged = this.reconcileWorkspacePanelSelection();
       if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
@@ -1890,10 +1898,43 @@ export class PiWebApp extends LitElement {
       const selectionChanged = this.reconcileWorkspacePanelSelection();
       if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
       this.applyPreferredTheme(false);
-      this.setState({ error: `Failed to load ${label}: ${errorMessage(error)}` });
+      this.setRequiredPluginFailure(machineId, `Failed to load ${label}: ${errorMessage(error)}`);
       this.requestUpdate();
       return false;
     }
+  }
+
+  private setRequiredPluginFailure(machineId: string, message: string): void {
+    this.requiredPluginFailureByMachine.set(machineId, message);
+    this.dismissedRequiredPluginFailureByMachine.delete(machineId);
+    if (selectedMachineId(this.state) === machineId) this.requestUpdate();
+  }
+
+  private clearRequiredPluginFailure(machineId: string): void {
+    if (!this.requiredPluginFailureByMachine.delete(machineId)) return;
+    this.dismissedRequiredPluginFailureByMachine.delete(machineId);
+    if (selectedMachineId(this.state) === machineId) this.requestUpdate();
+  }
+
+  private displayedError(): string {
+    if (this.state.error !== "") return this.state.error;
+    const machineId = selectedMachineId(this.state);
+    const failure = this.requiredPluginFailureByMachine.get(machineId);
+    return failure !== undefined && this.dismissedRequiredPluginFailureByMachine.get(machineId) !== failure
+      ? failure
+      : "";
+  }
+
+  private dismissDisplayedError(): void {
+    if (this.state.error !== "") {
+      this.setState({ error: "" });
+      return;
+    }
+    const machineId = selectedMachineId(this.state);
+    const failure = this.requiredPluginFailureByMachine.get(machineId);
+    if (failure === undefined) return;
+    this.dismissedRequiredPluginFailureByMachine.set(machineId, failure);
+    this.requestUpdate();
   }
 
   private clearRequiredTerminal(machineId: string): void {
@@ -1908,9 +1949,13 @@ export class PiWebApp extends LitElement {
     return this.requiredTerminalByMachine.has(machineId);
   }
 
-  private pluginContributionAvailable(pluginId: string, registrationMachineId: string | undefined): boolean {
+  private pluginContributionAvailable(pluginId: string, effectiveMachineId: string | undefined): boolean {
     if (pluginId === "core" || pluginId === "themes") return true;
-    const machineId = registrationMachineId ?? "local";
+    // Machine-using callbacks are rechecked against the live selection so a
+    // closure captured on another healthy machine cannot act after a switch.
+    if (effectiveMachineId !== undefined && effectiveMachineId !== selectedMachineId(this.state)) return false;
+    // Undefined is reserved for intentional app-global theme evaluation.
+    const machineId = effectiveMachineId ?? "local";
     const mode = this.verifiedPluginModeByMachine.get(machineId);
     const terminalRuntimeId = machineId === "local"
       ? REQUIRED_TERMINAL_PLUGIN_ID
@@ -2618,7 +2663,7 @@ export class PiWebApp extends LitElement {
         <main class=${mainViewClass(mainView)}>
           ${this.renderContextBar()}
           ${this.renderMobileMainTabs()}
-          ${errorBanner(state.error, () => { this.setState({ error: "" }); })}
+          ${errorBanner(this.displayedError(), () => { this.dismissDisplayedError(); })}
           ${deprecatedAgentInputsBanner(deprecatedAgentInputsWarnings(state.machines, state.machineRuntimes))}
           <div class="mobile-navigation-panel">${this.appShell.isMobileNavigationLayout ? this.renderNavigationPanel() : null}</div>
           ${state.selectedSession ? html`

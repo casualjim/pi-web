@@ -89,7 +89,7 @@ describe("bounded plugin backend channel bridge", () => {
     await expect(messages.next()).resolves.toBe(first);
     await expect(messages.next()).resolves.toBe(second);
     await closed;
-    expect(onClosed).toHaveBeenCalledOnce();
+    await vi.waitFor(() => { expect(onClosed).toHaveBeenCalledOnce(); });
   });
 
   it("closes both directions for binary or invalid-direction frames", async () => {

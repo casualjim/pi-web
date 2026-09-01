@@ -406,6 +406,17 @@ describe("PluginBackendRegistry", () => {
     await expect(registry.openChannel({ ...request, workspaceId: "missing" }, channelTransport().value))
       .rejects.toMatchObject({ code: "workspace-not-found", closeCode: 1008 });
 
+    const routeAdmission = registry.reserveChannel({ pluginId: "terminal", projectId: project.id, workspaceId });
+    await expect(registry.openChannel(
+      { ...request, project: { ...project, id: "other-project" } },
+      channelTransport().value,
+      undefined,
+      routeAdmission,
+    )).rejects.toMatchObject({ code: "admission-denied", closeCode: 1013 });
+    expect(registry.activeChannelCount()).toBe(1);
+    routeAdmission.release();
+    expect(registry.activeChannelCount()).toBe(0);
+
     const first = await registry.openChannel(request, channelTransport().value);
     await expect(registry.openChannel(request, channelTransport().value))
       .rejects.toMatchObject({ code: "admission-denied", closeCode: 1013 });

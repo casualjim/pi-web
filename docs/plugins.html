@@ -390,12 +390,18 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
                 bounded JSON open input, a channel-lifetime signal, and a bounded synchronous <code>send()</code> function;
                 the plugin returns <code>receive()</code>, optional plugin-owned <code>closed</code>, and optional once-only
                 <code>close()</code> members. Resolve <code>closed</code> only after the final <code>send()</code>; the host
-                boundedly drains accepted frames in order before cleanly closing the browser transport and releasing
-                admission. Data frames are limited to 64 KiB JSON, queues to 128 frames/1 MiB per direction at each hop,
-                admissions at every host hop to 128 global, 32 per plugin, and 8 per plugin/workspace (including
-                connections awaiting an upstream upgrade or their open frame), proxy upgrades and clean drains to 10
-                seconds, and lifetime to 12 hours with no idle timeout. Invalid/binary
-                frames, overflow, callback failure/timeout, disconnect, expiry, and shutdown close and clean up the channel.
+                boundedly drains accepted output frames in order before cleanly closing the browser transport. A clean
+                browser close also drains already accepted <code>receive()</code> callbacks before plugin cleanup. Data
+                frames are limited to 64 KiB JSON and queues to 128 frames per direction at each hop, with 1 MiB
+                browser-to-server and 1.25 MiB server-to-browser byte bounds. Admissions at every host hop are limited
+                to 128 global, 32 per plugin, and 8 per plugin/workspace (including connections awaiting an upstream
+                upgrade, their open frame, or physical teardown); proxy upgrades and clean drains are bounded to 10
+                seconds, physical teardown of a non-cooperating peer to 1 second, and lifetime to 12 hours with no idle
+                timeout. The directional 1.25 MiB output bound accommodates Terminal's full replay under worst-case JSON
+                escaping plus following live output without reordering.
+                Invalid/binary frames, overflow, callback failure/timeout, disconnect, expiry, and shutdown close both
+                directions and retain admission until physical teardown; denied sockets are attributed when possible and
+                then terminated rather than escaping the aggregate while closing.
               </p>
               <p>
                 Sessiond is the single workspace authority. An enabled server entry can contribute at most one provider.
@@ -473,8 +479,10 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
               <p>
                 Ordinary config, Settings, and <code>pi-web plugins disable terminal</code> cannot disable Terminal.
                 Missing, incompatible, failed, or unhealthy startup reports the failure instead of claiming Terminal is
-                available. For recovery, run <code>pi-web plugins safe-start set none --restart</code>; diagnosis and
-                Settings remain available without Terminal, then clear safe start after repairing the installation.
+                available. Only an active session-daemon lifecycle snapshot can declare intentional no-Terminal recovery;
+                unavailable or incompatible runtime state withholds ordinary plugin modules and remains retryable. For
+                recovery, run <code>pi-web plugins safe-start set none --restart</code>; diagnosis and Settings remain
+                available without Terminal, then clear safe start after repairing the installation.
               </p>
 
               <h3>Files</h3>

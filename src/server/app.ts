@@ -19,7 +19,7 @@ import { registerWorkspaceExplorerRoutes } from "./workspaceExplorerRoutes.js";
 import { registerProjectTrustRoutes } from "./projectTrustRoutes.js";
 import { registerWorkspaceDeletionRoutes } from "./workspaces/workspaceDeletionRoutes.js";
 import { createFilePiWebConfigService, registerConfigRoutes, registerLocalMachineConfigRoutes, type PiWebConfigService } from "./configRoutes.js";
-import { PiWebPluginService } from "./piWebPluginService.js";
+import { PiWebPluginManifestRuntimeError, PiWebPluginService } from "./piWebPluginService.js";
 import { createActiveProfilePiPackageService, type PiPackageService } from "./piPackageService.js";
 import { registerPiPackageRoutes } from "./piPackageRoutes.js";
 import { createPiWebStatusCache, type PiWebStatusCache } from "./piWebStatusCache.js";
@@ -153,8 +153,15 @@ async function withProfileDependency<T>(reply: FastifyReply, operation: () => Pr
   try {
     return await operation();
   } catch (error) {
-    if (!(error instanceof ActiveAgentProfileAccessError)) throw error;
-    return reply.code(503).send({ error: error.message });
+    if (error instanceof ActiveAgentProfileAccessError) return reply.code(503).send({ error: error.message });
+    if (error instanceof PiWebPluginManifestRuntimeError) {
+      return reply.code(error.statusCode).send({
+        error: `Required Terminal plugin runtime is ${error.runtimeStatus}`,
+        code: `required-plugin-runtime-${error.runtimeStatus}`,
+        detail: error.message,
+      });
+    }
+    throw error;
   }
 }
 

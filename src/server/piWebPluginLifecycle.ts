@@ -50,9 +50,9 @@ export function reconcilePiWebPluginLifecycle(
   const browserPlugins: ReconciledBrowserPlugin[] = [];
   const activeSafeStart = activeSnapshot?.safeStart ?? "off";
   const effectiveDesiredSafeStart = desiredSafeStart ?? activeSafeStart;
-  // Only sessiond's immutable snapshot may claim required Terminal availability.
-  // An unavailable/incompatible runtime remains an explicit no-Terminal mode.
-  const terminalMode = activeSnapshot?.terminalMode ?? "recovery-disabled";
+  // Only sessiond's immutable snapshot may declare intentional no-Terminal
+  // recovery. Without one, normal required mode remains fail-closed.
+  const terminalMode = activeSnapshot?.terminalMode ?? "required";
 
   const plugins = [...pluginIds]
     .sort(requiredTerminalIdFirst)
@@ -63,7 +63,8 @@ export function reconcilePiWebPluginLifecycle(
         ? serverInfo(pluginId, plugin, record, healthById.get(pluginId), runtime.status, activeSafeStart, effectiveDesiredSafeStart)
         : undefined;
 
-      if (plugin?.browserModule !== undefined
+      if (activeSnapshot !== undefined
+        && plugin?.browserModule !== undefined
         && (terminalMode === "required" || plugin.id !== REQUIRED_TERMINAL_PLUGIN_ID)
         && shouldPublishBrowserPlugin(plugin, server)) {
         browserPlugins.push({
@@ -78,7 +79,9 @@ export function reconcilePiWebPluginLifecycle(
         return {
           id: plugin.id,
           ...(plugin.id === REQUIRED_TERMINAL_PLUGIN_ID ? { required: true as const } : {}),
-          ...(plugin.browserModule === undefined || (terminalMode === "recovery-disabled" && plugin.id === REQUIRED_TERMINAL_PLUGIN_ID)
+          ...(activeSnapshot === undefined
+            || plugin.browserModule === undefined
+            || (terminalMode === "recovery-disabled" && plugin.id === REQUIRED_TERMINAL_PLUGIN_ID)
             ? {}
             : { module: browserModuleUrl(plugin) }),
           source: plugin.source,

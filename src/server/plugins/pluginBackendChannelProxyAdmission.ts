@@ -1,12 +1,13 @@
 import { WebSocket } from "ws";
 import {
-  boundedPluginBackendChannelCloseReason,
   PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN,
   PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE,
   PLUGIN_BACKEND_CHANNEL_MAX_TOTAL,
   PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
+  PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS,
   serializePluginBackendChannelErrorEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
+import { closePluginBackendChannelWebSocket } from "../webSocketBridge.js";
 
 export interface PluginBackendChannelProxyScope {
   readonly authorityId: string;
@@ -112,39 +113,44 @@ export function pluginBackendChannelProxyAdmissionPool(owner: object): PluginBac
   return created;
 }
 
-/** Send one protocol-attributed rejection before the bounded close. */
+/** Best-effort attributed rejection followed by immediate physical teardown. */
 export function rejectPluginBackendChannelProxyAdmission(
   socket: WebSocket,
   error: PluginBackendChannelProxyAdmissionError,
 ): void {
+  const terminate = (): void => {
+    void closePluginBackendChannelWebSocket(socket, error.closeCode, error.message, { terminateImmediately: true });
+  };
   if (socket.readyState !== WebSocket.OPEN) {
-    closeProxySocket(socket, error.closeCode, error.message);
+    terminate();
     return;
   }
+  const deadline = setTimeout(terminate, PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS);
+  deadline.unref();
   try {
-    socket.send(serializePluginBackendChannelErrorEnvelope(error.code, error.message), { binary: false });
+    socket.send(serializePluginBackendChannelErrorEnvelope(error.code, error.message), { binary: false }, () => {
+      clearTimeout(deadline);
+      terminate();
+    });
   } catch {
-    // The bounded close below remains authoritative when the error frame cannot be queued.
+    clearTimeout(deadline);
+    terminate();
   }
-  closeProxySocket(socket, error.closeCode, error.message);
 }
 
 class ManagedPluginBackendChannelProxyLease implements PluginBackendChannelProxyLease {
-  private isActive = true;
+  private phase: "active" | "tearing-down" | "released" = "active";
   private upstream: WebSocket | undefined;
   private resolveReleased: () => void = () => undefined;
   readonly released = new Promise<void>((resolve) => { this.resolveReleased = resolve; });
   private readonly timer: ReturnType<typeof setTimeout>;
 
   private readonly onClientSetupClosed = (): void => {
-    const upstream = this.upstream;
-    this.release();
-    if (upstream !== undefined) closeProxySocket(upstream, 1001, "Plugin backend channel client disconnected during proxy setup");
+    this.beginTeardown(1001, "Plugin backend channel client disconnected during proxy setup");
   };
 
   private readonly onUpstreamSetupClosed = (): void => {
-    this.release();
-    closeProxySocket(this.client, 1011, "Plugin backend channel upstream disconnected during proxy setup");
+    this.beginTeardown(1011, "Plugin backend channel upstream disconnected during proxy setup");
   };
 
   private readonly onUpstreamOpen = (): void => {
@@ -165,12 +171,12 @@ class ManagedPluginBackendChannelProxyLease implements PluginBackendChannelProxy
   }
 
   get active(): boolean {
-    return this.isActive;
+    return this.phase === "active";
   }
 
   attachUpstream(upstream: WebSocket): boolean {
-    if (!this.isActive) {
-      closeProxySocket(upstream, 1001, "Plugin backend channel proxy setup was cancelled");
+    if (!this.active) {
+      void closePluginBackendChannelWebSocket(upstream, 1001, "Plugin backend channel proxy setup was cancelled", { terminateImmediately: true });
       return false;
     }
     this.upstream = upstream;
@@ -188,25 +194,30 @@ class ManagedPluginBackendChannelProxyLease implements PluginBackendChannelProxy
   }
 
   bridgeStarted(): void {
-    if (!this.isActive) return;
-    this.client.off("close", this.onClientSetupClosed);
-    this.client.off("error", this.onClientSetupClosed);
-    this.upstream?.off("close", this.onUpstreamSetupClosed);
-    this.upstream?.off("error", this.onUpstreamSetupClosed);
+    if (!this.active) return;
+    this.detachSetupListeners();
   }
 
   fail(code: number, reason: string): void {
-    if (!this.isActive) return;
-    const upstream = this.upstream;
-    this.release();
-    closeProxySocket(this.client, code, reason);
-    if (upstream !== undefined) closeProxySocket(upstream, code, reason);
+    this.beginTeardown(code, reason);
   }
 
+  /** The bridge calls this only after both physical sockets have closed. */
   release(): void {
-    if (!this.isActive) return;
-    this.isActive = false;
+    this.finalizeRelease();
+  }
+
+  private beginTeardown(code: number, reason: string): void {
+    if (!this.active) return;
+    this.phase = "tearing-down";
     clearTimeout(this.timer);
+    this.detachSetupListeners();
+    const sockets = this.upstream === undefined ? [this.client] : [this.client, this.upstream];
+    void Promise.allSettled(sockets.map((socket) => closePluginBackendChannelWebSocket(socket, code, reason)))
+      .finally(() => { this.finalizeRelease(); });
+  }
+
+  private detachSetupListeners(): void {
     this.client.off("close", this.onClientSetupClosed);
     this.client.off("error", this.onClientSetupClosed);
     if (this.upstream !== undefined) {
@@ -214,17 +225,16 @@ class ManagedPluginBackendChannelProxyLease implements PluginBackendChannelProxy
       this.upstream.off("close", this.onUpstreamSetupClosed);
       this.upstream.off("error", this.onUpstreamSetupClosed);
     }
+  }
+
+  private finalizeRelease(): void {
+    if (this.phase === "released") return;
+    this.phase = "released";
+    clearTimeout(this.timer);
+    this.detachSetupListeners();
     this.releaseCount();
     this.resolveReleased();
   }
-}
-
-function closeProxySocket(socket: WebSocket, code: number, reason: string): void {
-  if (socket.readyState === WebSocket.CONNECTING) {
-    socket.terminate();
-    return;
-  }
-  if (socket.readyState === WebSocket.OPEN) socket.close(code, boundedPluginBackendChannelCloseReason(reason));
 }
 
 function proxyWorkspaceKey(scope: PluginBackendChannelProxyScope): string {

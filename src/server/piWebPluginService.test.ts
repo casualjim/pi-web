@@ -5,10 +5,23 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActiveAgentProfileAccessError } from "./activeAgentProfileProvider.js";
 import { computePiWebPluginPackageRevision } from "./piWebPluginCatalog.js";
-import { PiWebPluginCatalog, PiWebPluginService, type PiPackageProvider } from "./piWebPluginService.js";
+import {
+  PiWebPluginCatalog,
+  PiWebPluginService as RuntimePiWebPluginService,
+  type PiPackageProvider,
+  type PiWebPluginServiceOptions,
+} from "./piWebPluginService.js";
 import { createWorkspaceProviderRuntimeSnapshot, WorkspaceCatalogProtocolError, type WorkspaceProviderRuntimeReader } from "./workspaces/workspaceCatalog.js";
 
 let tempDir: string;
+
+// Catalog/asset tests use an explicit active safe-start-none snapshot; tests
+// that exercise unavailable runtime state instantiate RuntimePiWebPluginService.
+class PiWebPluginService extends RuntimePiWebPluginService {
+  constructor(options: PiWebPluginServiceOptions = {}) {
+    super({ ...options, runtimeProvider: options.runtimeProvider ?? recoveryRuntimeProvider() });
+  }
+}
 
 const originalDockerRuntime = process.env["PI_WEB_DOCKER_RUNTIME"];
 const originalDockerMode = process.env["PI_WEB_DOCKER_MODE"];
@@ -348,10 +361,30 @@ describe("PiWebPluginService", () => {
       },
     });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
+    await expect(service.manifest()).rejects.toThrow(
+      "Required Terminal plugin runtime is incompatible: unsupported provider runtime protocol",
+    );
     await expect(service.plugins()).resolves.toMatchObject({
       plugins: [{ id: "dual", server: { state: "unknown" } }],
-      serverRuntime: { status: "incompatible", message: "unsupported provider runtime protocol" },
+      serverRuntime: { status: "incompatible", terminalMode: "required", message: "unsupported provider runtime protocol" },
+    });
+  });
+
+  it("withholds browser-only modules when sessiond is unavailable instead of synthesizing recovery", async () => {
+    await writePlugin(join(tempDir, "plugins", "browser-only"), {
+      packageJson: { piWeb: { plugins: [{ id: "browser-only", browserRoot: ".", module: "browser.js" }] } },
+      files: { "browser.js": "export default {};" },
+    });
+    const service = new RuntimePiWebPluginService({
+      roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
+      packageProvider: false,
+    });
+
+    await expect(service.manifest()).rejects.toThrow(
+      "Required Terminal plugin runtime is unavailable: Session daemon server-plugin runtime is unavailable",
+    );
+    await expect(service.plugins()).resolves.toMatchObject({
+      serverRuntime: { status: "unavailable", terminalMode: "required" },
     });
   });
 
@@ -702,6 +735,10 @@ async function writePlugin(root: string, options: { packageJson: unknown; files:
     await mkdir(join(filePath, ".."), { recursive: true });
     await writeFile(filePath, content);
   }
+}
+
+function recoveryRuntimeProvider(): WorkspaceProviderRuntimeReader {
+  return { providerRuntime: () => Promise.resolve(createWorkspaceProviderRuntimeSnapshot([], [], "none")) };
 }
 
 function activeRuntimeProvider(

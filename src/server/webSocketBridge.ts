@@ -8,6 +8,8 @@ import {
   PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES,
+  PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS,
   utf8ByteLength,
 } from "../shared/pluginBackendProtocol.js";
 
@@ -195,11 +197,13 @@ export function bridgePluginBackendChannelSockets(
   const fail = (code: number, reason: string): void => {
     if (closing) return;
     closing = true;
-    closeWebSocket(client, code, reason);
-    closeWebSocket(upstream, code, reason);
-    notifyClosed();
+    void Promise.allSettled([
+      closePluginBackendChannelWebSocket(client, code, reason),
+      closePluginBackendChannelWebSocket(upstream, code, reason),
+    ]).finally(notifyClosed);
   };
   const sendToClient = createBoundedTextWebSocketSender(client, {
+    maxBytes: PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES,
     onOverflow: (error) => { fail(1013, error.message); },
   });
   const sendToUpstream = createBoundedTextWebSocketSender(upstream, {
@@ -266,11 +270,11 @@ async function propagatePluginChannelClose(
     try {
       await sender.drain();
     } catch (error) {
-      closeWebSocket(target, 1011, `Plugin backend channel clean-close drain failed: ${bridgeErrorMessage(error)}`);
+      await closePluginBackendChannelWebSocket(target, 1011, `Plugin backend channel clean-close drain failed: ${bridgeErrorMessage(error)}`);
       return;
     }
   }
-  closeWebSocket(target, closeCode, reason);
+  await closePluginBackendChannelWebSocket(target, closeCode, reason);
 }
 
 /**
@@ -334,12 +338,45 @@ function transferableCloseCode(code: number): number {
     : 1011;
 }
 
-function closeWebSocket(socket: WebSocket, code: number, reason: string): void {
-  if (socket.readyState === WebSocket.CONNECTING) {
-    socket.terminate();
-    return;
-  }
-  if (socket.readyState === WebSocket.OPEN) socket.close(code, boundedPluginBackendChannelCloseReason(reason));
+export interface PluginBackendChannelWebSocketCloseOptions {
+  /** Skip the close handshake after any attributed frame has been queued. */
+  terminateImmediately?: boolean;
+  teardownTimeoutMs?: number;
+}
+
+/** Resolve only after the physical socket closes, terminating a non-cooperating peer at the hard deadline. */
+export function closePluginBackendChannelWebSocket(
+  socket: WebSocket,
+  code: number,
+  reason: string,
+  options: PluginBackendChannelWebSocketCloseOptions = {},
+): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const consumeExpectedError = (): void => undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off("close", finish);
+      socket.off("error", consumeExpectedError);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    }, options.teardownTimeoutMs ?? PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS);
+    timer.unref();
+    socket.once("close", finish);
+    socket.once("error", consumeExpectedError);
+
+    if (options.terminateImmediately === true || socket.readyState === WebSocket.CONNECTING) {
+      socket.terminate();
+    } else if (socket.readyState === WebSocket.OPEN) {
+      socket.close(code, boundedPluginBackendChannelCloseReason(reason));
+    }
+    if (socket.readyState === WebSocket.CLOSED) finish();
+  });
 }
 
 function bridgeErrorMessage(error: unknown): string {

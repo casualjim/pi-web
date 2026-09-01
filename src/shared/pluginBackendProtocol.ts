@@ -24,14 +24,19 @@ export const PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES = 64 * 1024;
 /** Host-envelope allowance around one bounded channel data payload. */
 export const PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES = PLUGIN_BACKEND_CHANNEL_DATA_JSON_MAX_BYTES + 4 * 1024;
 export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES = 128;
+/** Browser-to-server aggregate queue bound at each host hop. */
 export const PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES = 1024 * 1024;
+/** Server-to-browser bound accommodates Terminal's full worst-case escaped replay plus live output. */
+export const PLUGIN_BACKEND_CHANNEL_SERVER_TO_BROWSER_QUEUE_MAX_BYTES = 1_280 * 1024;
 export const PLUGIN_BACKEND_CHANNEL_MAX_TOTAL = 128;
 export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN = 32;
 export const PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE = 8;
 export const PLUGIN_BACKEND_CHANNEL_CALLBACK_TIMEOUT_MS = 10_000;
 export const PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS = 10_000;
-/** Maximum time a clean close may wait for already-accepted socket frames. */
+/** Maximum time a clean close may wait for already-accepted socket frames or callbacks. */
 export const PLUGIN_BACKEND_CHANNEL_DRAIN_TIMEOUT_MS = 10_000;
+/** Hard deadline before a non-cooperating peer is physically terminated. */
+export const PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS = 1_000;
 export const PLUGIN_BACKEND_CHANNEL_MAX_LIFETIME_MS = 12 * 60 * 60_000;
 export const PLUGIN_BACKEND_CHANNEL_CLOSE_REASON_MAX_BYTES = 120;
 export const PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES = 2_048;

@@ -2,7 +2,6 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { RawData, WebSocket } from "ws";
 import { FEDERATED_HTTP_ROUTES, FEDERATED_WEBSOCKET_ROUTES, WORKSPACE_FILE_PREVIEW_ROUTE_PATH, type FederatedHttpRouteSpec } from "../../shared/federatedRoutes.js";
 import {
-  boundedPluginBackendChannelCloseReason,
   parsePluginBackendChannelClientEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
@@ -21,7 +20,12 @@ import {
   rejectPluginBackendChannelProxyAdmission,
 } from "../plugins/pluginBackendChannelProxyAdmission.js";
 import { requestCancellation } from "../requestCancellation.js";
-import { bridgePluginBackendChannelSockets, bridgeSockets, setPluginBackendChannelSocketPayloadLimit } from "../webSocketBridge.js";
+import {
+  bridgePluginBackendChannelSockets,
+  bridgeSockets,
+  closePluginBackendChannelWebSocket,
+  setPluginBackendChannelSocketPayloadLimit,
+} from "../webSocketBridge.js";
 import { applyWorkspaceFilePreviewErrorResponsePolicy, applyWorkspaceFilePreviewResponsePolicy } from "../workspaces/filePreviewResponseHeaders.js";
 import { workspaceFilePreviewErrorResponsePolicy, workspaceFilePreviewResponsePolicy, type WorkspaceFilePreviewResponsePolicy } from "../workspaces/filePreviewResponsePolicy.js";
 import { DEFAULT_REMOTE_REQUEST_TIMEOUT_MS, RemoteMachineRequestError, type MachineClient, type MachineJsonResponse, type MachineRequestOptions } from "./machineClient.js";
@@ -229,13 +233,13 @@ async function proxyWebSocket(
   socket: WebSocket,
   boundedPluginChannel: BoundedPluginChannelProxyContext | undefined,
 ): Promise<void> {
-  if (machineId === "local") {
-    socket.close(1011, "Local machine route is not registered for this endpoint");
+  if (boundedPluginChannel !== undefined) {
+    await proxyBoundedPluginChannel(machines, machineId, requestUrl, socket, boundedPluginChannel);
     return;
   }
 
-  if (boundedPluginChannel !== undefined) {
-    await proxyBoundedPluginChannel(machines, machineId, requestUrl, socket, boundedPluginChannel);
+  if (machineId === "local") {
+    socket.close(1011, "Local machine route is not registered for this endpoint");
     return;
   }
 
@@ -266,8 +270,13 @@ async function proxyBoundedPluginChannel(
     if (error instanceof PluginBackendChannelProxyAdmissionError) {
       rejectPluginBackendChannelProxyAdmission(socket, error);
     } else {
-      closePluginChannelSocket(socket, 1011, `Plugin backend channel admission failed: ${errorMessage(error)}`);
+      void closePluginBackendChannelWebSocket(socket, 1011, `Plugin backend channel admission failed: ${errorMessage(error)}`, { terminateImmediately: true });
     }
+    return;
+  }
+
+  if (machineId === "local") {
+    lease.fail(1011, "Local machine route is not registered for this endpoint");
     return;
   }
 
@@ -277,7 +286,7 @@ async function proxyBoundedPluginChannel(
     lease.fail(1011, errorMessage(error));
     return;
   }
-  const prelude = capturePluginChannelPrelude(socket);
+  const prelude = capturePluginChannelPrelude(socket, (code, reason) => { lease.fail(code, reason); });
   try {
     const resolved = await Promise.race([
       machines.remoteClient(machineId).then((client) => ({ client })),
@@ -311,14 +320,14 @@ interface PluginChannelPrelude {
   dispose(): void;
 }
 
-function capturePluginChannelPrelude(socket: WebSocket): PluginChannelPrelude {
+function capturePluginChannelPrelude(socket: WebSocket, onFailure: (code: number, reason: string) => void): PluginChannelPrelude {
   const frames: string[] = [];
   let bytes = 0;
   let closed = false;
   const fail = (code: number, reason: string): void => {
     if (closed) return;
     closed = true;
-    closePluginChannelSocket(socket, code, reason);
+    onFailure(code, reason);
   };
   const onMessage = (data: RawData, isBinary: boolean): void => {
     try {
@@ -365,10 +374,6 @@ function decodePluginChannelText(data: RawData): string {
   return typeof value === "string"
     ? value
     : new TextDecoder("utf-8", { fatal: true }).decode(value);
-}
-
-function closePluginChannelSocket(socket: WebSocket, code: number, reason: string): void {
-  if (socket.readyState === 1) socket.close(code, boundedPluginBackendChannelCloseReason(reason));
 }
 
 function remoteApiPath(machineId: string, requestUrl: string): string {

@@ -120,6 +120,62 @@ describe("PluginRegistry", () => {
     expect(activate).toHaveBeenCalledOnce();
   });
 
+  it("gates portable machine-using contributions against the selected machine and rechecks stale callbacks", async () => {
+    const modes = new Map<string, boolean>([["local", false], ["remote-1", true]]);
+    const actionRun = vi.fn();
+    const registry = new PluginRegistry({
+      isContributionEnabled: (_pluginId, effectiveMachineId) => effectiveMachineId === undefined
+        ? true // themes are intentionally app-global
+        : modes.get(effectiveMachineId) ?? false,
+    });
+    registry.register({
+      id: "portable",
+      machineSpecific: false,
+      plugin: {
+        apiVersion: 2,
+        name: "Portable",
+        activate: () => ({
+          contributions: {
+            actions: [{ id: "act", title: "Act", run: actionRun }],
+            workspacePanels: [{
+              id: "workspace.panel",
+              title: "Panel",
+              routeAliases: ["portable-panel"],
+              render: () => html`<p>Portable</p>`,
+            }],
+            workspaceLabels: [{ id: "label", items: () => [{ type: "text", text: "portable" }] }],
+            themes: [{ id: "theme", name: "Portable", colorScheme: "light", tokens: testThemeTokens() }],
+          },
+        }),
+      },
+    });
+    const remoteRuntime = createContext({ selectedMachine: testMachine("remote-1"), selectedWorkspace: testWorkspace() }).context;
+    const localRuntime = createContext({ selectedMachine: testMachine("local"), selectedWorkspace: testWorkspace() }).context;
+    const staleRemoteAction = registry.getActions(remoteRuntime)[0];
+
+    expect(staleRemoteAction?.id).toBe("portable:act");
+    expect(registry.getActions(localRuntime)).toEqual([]);
+    expect(registry.resolveWorkspacePanelRouteId("portable-panel", "remote-1")).toBe("portable:workspace.panel");
+    expect(registry.resolveWorkspacePanelRouteId("portable-panel", "local")).toBeUndefined();
+    expect(registry.getWorkspaceLabelItems(createWorkspaceLabelContext("remote-1"))).toEqual([{ type: "text", text: "portable" }]);
+    expect(registry.getWorkspaceLabelItems(createWorkspaceLabelContext("local"))).toEqual([]);
+    expect(registry.getThemes()).toHaveLength(1);
+
+    modes.set("local", true);
+    modes.set("remote-1", false);
+    expect(registry.getActions(remoteRuntime)).toEqual([]);
+    expect(registry.getActions(localRuntime)).toHaveLength(1);
+    expect(registry.resolveWorkspacePanelRouteId("portable-panel", "remote-1")).toBeUndefined();
+    await staleRemoteAction?.run();
+    expect(actionRun).not.toHaveBeenCalled();
+    expect(registry.getThemes()).toHaveLength(1);
+
+    modes.set("remote-1", true);
+    expect(registry.getActions(remoteRuntime)).toHaveLength(1);
+    await registry.getActions(remoteRuntime)[0]?.run();
+    expect(actionRun).toHaveBeenCalledOnce();
+  });
+
   it("rejects legacy browser plugins with an attributed API-version error", () => {
     const registry = new PluginRegistry();
     const legacyPlugin: PiWebPlugin = {

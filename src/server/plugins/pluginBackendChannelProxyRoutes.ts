@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
-import { boundedPluginBackendChannelCloseReason, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, PLUGIN_BACKEND_CHANNEL_ROUTE_PATH } from "../../shared/pluginBackendProtocol.js";
-import { bridgePluginBackendChannelSockets } from "../webSocketBridge.js";
+import { PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, PLUGIN_BACKEND_CHANNEL_ROUTE_PATH } from "../../shared/pluginBackendProtocol.js";
+import { bridgePluginBackendChannelSockets, closePluginBackendChannelWebSocket } from "../webSocketBridge.js";
 import {
   PluginBackendChannelProxyAdmissionError,
   type PluginBackendChannelProxyAdmissionPool,
@@ -45,7 +45,7 @@ export function registerPluginBackendChannelProxyRoutes(
           rejectPluginBackendChannelProxyAdmission(socket, error);
           return;
         }
-        closeSocket(socket, `Plugin backend channel admission failed: ${errorMessage(error)}`);
+        void closePluginBackendChannelWebSocket(socket, 1011, `Plugin backend channel admission failed: ${errorMessage(error)}`, { terminateImmediately: true });
         return;
       }
 
@@ -75,11 +75,6 @@ function daemonPluginBackendChannelPath(params: PluginBackendChannelProxyParams)
     "channels",
     encodeURIComponent(params.operation),
   ].join("/");
-}
-
-function closeSocket(socket: WebSocket, reason: string): void {
-  if (socket.readyState === WebSocket.OPEN) socket.close(1011, boundedPluginBackendChannelCloseReason(reason));
-  else if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
 }
 
 function errorMessage(error: unknown): string {

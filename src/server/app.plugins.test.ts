@@ -6,6 +6,7 @@ import { machineScopedPluginId } from "../shared/machinePluginIds.js";
 import { buildApp } from "./app.js";
 import { appTestContext, fakeRemoteClient, registerAppTestHooks } from "./app.testSupport.js";
 import { PiWebPluginService } from "./piWebPluginService.js";
+import { WorkspaceCatalogProtocolError } from "./workspaces/workspaceCatalog.js";
 
 registerAppTestHooks();
 
@@ -27,6 +28,12 @@ describe("buildApp PI WEB plugin routes", () => {
     const localMachinePluginsResponse = await appTestContext.app.inject({ method: "GET", url: "/api/machines/local/plugins" });
     expect(localMachinePluginsResponse.statusCode).toBe(200);
     expect(localMachinePluginsResponse.json()).toEqual(pluginsResponse.json());
+    const invalidLocalManifestAlias = await appTestContext.app.inject({
+      method: "GET",
+      url: "/api/machines/local/pi-web-plugins/manifest.json",
+    });
+    expect(invalidLocalManifestAlias.statusCode).toBe(400);
+    expect(invalidLocalManifestAlias.json()).toEqual({ error: "Local plugin manifests must use the local manifest endpoint" });
 
     const assetResponse = await appTestContext.app.inject({ method: "GET", url: "/pi-web-plugins/fake/plugin.js?v=1" });
     expect(assetResponse.statusCode).toBe(200);
@@ -42,6 +49,29 @@ describe("buildApp PI WEB plugin routes", () => {
     expect(missingResponse.statusCode).toBe(404);
   });
 
+  it.each([
+    { status: "unavailable", statusCode: 503, error: new Error("connect ECONNREFUSED") },
+    { status: "incompatible", statusCode: 409, error: new WorkspaceCatalogProtocolError("unsupported runtime protocol") },
+  ])("returns an attributable retryable manifest failure when sessiond is $status", async ({ status, statusCode, error }) => {
+    const service = new PiWebPluginService({
+      roots: [],
+      packageProvider: false,
+      runtimeProvider: { providerRuntime: () => Promise.reject(error) },
+    });
+    const routeApp = await buildApp({ piWebPlugins: service, clientDist: false, logger: false });
+    try {
+      const response = await routeApp.inject({ method: "GET", url: "/pi-web-plugins/manifest.json" });
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toMatchObject({
+        error: `Required Terminal plugin runtime is ${status}`,
+        code: `required-plugin-runtime-${status}`,
+      });
+      expect(response.json<{ detail: string }>().detail).toContain(error.message);
+    } finally {
+      await routeApp.close();
+    }
+  });
+
   it("does not serve newer entry bytes through stale noncanonical asset URLs", async () => {
     const pluginsRoot = join(appTestContext.tempDir, "route-plugins");
     const pluginRoot = join(pluginsRoot, "route-revision");
@@ -54,6 +84,16 @@ describe("buildApp PI WEB plugin routes", () => {
     const service = new PiWebPluginService({
       roots: [{ path: pluginsRoot, source: "test", scope: "local" }],
       packageProvider: false,
+      runtimeProvider: {
+        providerRuntime: () => Promise.resolve({
+          protocolVersion: 2,
+          terminalMode: "recovery-disabled",
+          safeStart: "none",
+          records: [],
+          health: [],
+          diagnostics: [],
+        }),
+      },
     });
     const routeApp = await buildApp({ piWebPlugins: service, clientDist: false, logger: false });
 

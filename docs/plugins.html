@@ -389,9 +389,12 @@ import type { PairedPluginBackendV1, PiWebServerPlugin, WorkspaceProvider } from
                 The same backend can optionally implement <code>openChannel()</code>. The host supplies frozen scope,
                 bounded JSON open input, a channel-lifetime signal, and a bounded synchronous <code>send()</code> function;
                 the plugin returns <code>receive()</code>, optional plugin-owned <code>closed</code>, and optional once-only
-                <code>close()</code> members. Resolving <code>closed</code> makes the host promptly close the browser transport
-                and release admission. Data frames are limited to 64 KiB JSON, queues to 128 frames/1 MiB per direction at each hop, admissions to 128 global,
-                32 per plugin, and 8 per plugin/workspace, and lifetime to 12 hours with no idle timeout. Invalid/binary
+                <code>close()</code> members. Resolve <code>closed</code> only after the final <code>send()</code>; the host
+                boundedly drains accepted frames in order before cleanly closing the browser transport and releasing
+                admission. Data frames are limited to 64 KiB JSON, queues to 128 frames/1 MiB per direction at each hop,
+                admissions at every host hop to 128 global, 32 per plugin, and 8 per plugin/workspace (including
+                connections awaiting an upstream upgrade or their open frame), proxy upgrades and clean drains to 10
+                seconds, and lifetime to 12 hours with no idle timeout. Invalid/binary
                 frames, overflow, callback failure/timeout, disconnect, expiry, and shutdown close and clean up the channel.
               </p>
               <p>

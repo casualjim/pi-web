@@ -1,4 +1,5 @@
 import type {
+  JsonObject,
   JsonValue,
   TerminalCommandRun,
   TerminalCommandRunStatus,
@@ -29,10 +30,51 @@ export interface TerminalCommandRunFilter {
   metadata?: Record<string, string>;
 }
 
+export interface TerminalInputFrame extends JsonObject {
+  type: "input";
+  data: string;
+}
+
+export interface TerminalResizeFrame extends JsonObject {
+  type: "resize";
+  cols: number;
+  rows: number;
+}
+
+export type TerminalClientFrame = TerminalInputFrame | TerminalResizeFrame;
+
 export type TerminalServerFrame =
   | { type: "output"; data: string; replay: boolean }
   | { type: "exit"; exitCode?: number }
   | { type: "error"; message: string };
+
+/** The paired channel contract allows at most 64 KiB of plugin JSON per frame. */
+export const TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES = 64 * 1024;
+const EMPTY_TERMINAL_INPUT_FRAME_BYTES = utf8Bytes(JSON.stringify({ type: "input", data: "" }));
+
+/** Split Xterm input without breaking Unicode code points or JSON byte bounds. */
+export function terminalInputFrames(data: string): TerminalInputFrame[] {
+  if (data === "") return [];
+  const frames: TerminalInputFrame[] = [];
+  let characters: string[] = [];
+  let frameBytes = EMPTY_TERMINAL_INPUT_FRAME_BYTES;
+  for (const character of data) {
+    const serializedCharacter = JSON.stringify(character);
+    const characterBytes = utf8Bytes(serializedCharacter) - 2; // surrounding JSON quotes are already in the empty-frame overhead
+    if (characters.length !== 0 && frameBytes + characterBytes > TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES) {
+      frames.push({ type: "input", data: characters.join("") });
+      characters = [];
+      frameBytes = EMPTY_TERMINAL_INPUT_FRAME_BYTES;
+    }
+    if (frameBytes + characterBytes > TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES) {
+      throw new Error("Terminal input character exceeds the paired channel frame limit");
+    }
+    characters.push(character);
+    frameBytes += characterBytes;
+  }
+  if (characters.length !== 0) frames.push({ type: "input", data: characters.join("") });
+  return frames;
+}
 
 export interface TerminalAttachOptions {
   terminalId: string;
@@ -233,6 +275,10 @@ function requireBoolean(record: Record<string, unknown>, key: string, label: str
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
   return value;
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

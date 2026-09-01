@@ -5,7 +5,9 @@ import { isPiWebPluginId } from "../../shared/pluginIds.js";
 import {
   boundedPluginBackendChannelCloseReason,
   parsePluginBackendChannelClientEnvelope,
+  PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_ERROR_MESSAGE_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_FRAMES,
@@ -18,10 +20,12 @@ import {
 } from "../../shared/pluginBackendProtocol.js";
 import {
   PluginBackendChannelError,
+  type PluginBackendChannelAdmission,
+  type PluginBackendChannelAdmissionRequest,
   type PluginBackendChannelSession,
   type PluginBackendChannelTransport,
 } from "../plugins/pluginBackendRegistry.js";
-import { createBoundedTextWebSocketSender } from "../webSocketBridge.js";
+import { createBoundedTextWebSocketSender, setPluginBackendChannelSocketPayloadLimit } from "../webSocketBridge.js";
 import type { Project } from "../types.js";
 import type { PluginBackendProjectReader } from "./pluginBackendRoutes.js";
 
@@ -33,6 +37,7 @@ interface PluginBackendChannelRouteParams {
 }
 
 export interface PluginBackendChannelDispatcher {
+  reserveChannel(request: PluginBackendChannelAdmissionRequest): PluginBackendChannelAdmission;
   openChannel(
     request: {
       pluginId: string;
@@ -44,6 +49,7 @@ export interface PluginBackendChannelDispatcher {
     },
     transport: PluginBackendChannelTransport,
     signal?: AbortSignal,
+    reservedAdmission?: PluginBackendChannelAdmission,
   ): Promise<PluginBackendChannelSession>;
 }
 
@@ -73,6 +79,7 @@ class PluginBackendChannelSocketController {
   private readonly writer: ChannelRouteWriter;
   private readonly handshakeTimer: ReturnType<typeof setTimeout>;
   private state: "awaiting-open" | "opening" | "ready" | "closed" = "awaiting-open";
+  private admission: PluginBackendChannelAdmission | undefined;
   private session: PluginBackendChannelSession | undefined;
   private readonly incoming: PendingIncomingFrame[] = [];
   private incomingBytes = 0;
@@ -94,6 +101,12 @@ class PluginBackendChannelSocketController {
   }
 
   start(): void {
+    try {
+      setPluginBackendChannelSocketPayloadLimit(this.socket, PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES);
+    } catch (error) {
+      void this.fail("transport-limit-unavailable", boundedErrorMessage(error), 1011);
+      return;
+    }
     this.socket.on("message", (data, isBinary) => {
       this.onMessage(data, isBinary);
     });
@@ -109,8 +122,20 @@ class PluginBackendChannelSocketController {
       this.params.operation = requirePluginBackendOperation(this.params.operation);
       if (this.params.projectId === "") throw new Error("Project id is required");
       if (this.params.workspaceId === "") throw new Error("Workspace id is required");
+      this.admission = this.dependencies.backends.reserveChannel({
+        pluginId: this.params.pluginId,
+        projectId: this.params.projectId,
+        workspaceId: this.params.workspaceId,
+      });
+      this.admission.signal.addEventListener("abort", () => {
+        void this.fail("shutdown", "Plugin backend channels are shutting down", 1012);
+      }, { once: true });
     } catch (error) {
-      void this.fail("invalid-request", boundedErrorMessage(error), 1008);
+      if (error instanceof PluginBackendChannelError) {
+        void this.fail(error.code, error.message, error.closeCode);
+      } else {
+        void this.fail("invalid-request", boundedErrorMessage(error), 1008);
+      }
     }
   }
 
@@ -137,6 +162,7 @@ class PluginBackendChannelSocketController {
         return;
       }
       this.state = "opening";
+      setPluginBackendChannelSocketPayloadLimit(this.socket, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES);
       void this.open(envelope.revision, envelope.input);
       return;
     }
@@ -157,7 +183,7 @@ class PluginBackendChannelSocketController {
         workspaceId: this.params.workspaceId,
         operation: this.params.operation,
         input,
-      }, this.writer, this.lifetime.signal);
+      }, this.writer, this.lifetime.signal, this.admission);
       this.session = session;
       if (this.state === "closed") {
         await session.close(1001, "Browser disconnected during channel open");
@@ -228,7 +254,11 @@ class PluginBackendChannelSocketController {
     } catch (error) {
       this.logger.error({ err: error, pluginId: this.params.pluginId, operation: this.params.operation }, "plugin backend channel cleanup failed after transport failure");
     } finally {
-      this.writer.close(closeCode, message);
+      try {
+        await this.writer.close(closeCode, message);
+      } finally {
+        this.admission?.release();
+      }
     }
   }
 
@@ -243,6 +273,8 @@ class PluginBackendChannelSocketController {
       await this.session?.close(code, reason || "Browser disconnected");
     } catch (error) {
       this.logger.error({ err: error, pluginId: this.params.pluginId, operation: this.params.operation }, "plugin backend channel cleanup failed after disconnect");
+    } finally {
+      this.admission?.release();
     }
   }
 }
@@ -290,9 +322,18 @@ class ChannelRouteWriter implements PluginBackendChannelTransport {
     }
   }
 
-  close(code: number, reason: string): void {
+  async close(code: number, reason: string): Promise<void> {
     if (this.closed) return;
+    if (code === 1000) this.ready();
     this.closed = true;
+    if (code === 1000) {
+      try {
+        await this.sender.drain();
+      } catch (error) {
+        closeSocket(this.socket, 1011, `Plugin backend channel clean-close drain failed: ${boundedErrorMessage(error)}`);
+        throw error;
+      }
+    }
     closeSocket(this.socket, code, reason);
   }
 

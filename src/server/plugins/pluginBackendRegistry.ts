@@ -61,8 +61,8 @@ export interface PluginBackendChannelTransport {
   send(data: JsonValue): void;
   /** Send one attributed host error envelope when the transport still permits it. */
   sendError(code: string, message: string): void;
-  /** Close the host transport with one bounded reason. */
-  close(code: number, reason: string): void;
+  /** Close the host transport, draining accepted frames only for a clean close. */
+  close(code: number, reason: string): void | Promise<void>;
 }
 
 export interface PluginBackendChannelSession {
@@ -70,6 +70,18 @@ export interface PluginBackendChannelSession {
   readonly workspaceId: string;
   receive(data: unknown): Promise<void>;
   close(code?: number, reason?: string): Promise<void>;
+}
+
+export interface PluginBackendChannelAdmissionRequest {
+  readonly pluginId: string;
+  readonly projectId: string;
+  readonly workspaceId: string;
+}
+
+/** A connection-scoped reservation created before the client sends its open frame. */
+export interface PluginBackendChannelAdmission {
+  readonly signal: AbortSignal;
+  release(): void;
 }
 
 export type PluginBackendChannelErrorCode =
@@ -133,6 +145,7 @@ export class PluginBackendRegistry {
   private readonly channelMaxPerPlugin: number;
   private readonly channelMaxPerPluginWorkspace: number;
   private readonly channels = new Set<ManagedPluginBackendChannel>();
+  private readonly channelAdmissions = new Set<ManagedPluginBackendChannelAdmission>();
   private readonly openingChannelControllers = new Set<AbortController>();
   private readonly openingChannelTasks = new Set<Promise<void>>();
   private channelAdmissionCount = 0;
@@ -185,10 +198,39 @@ export class PluginBackendRegistry {
     }
   }
 
+  reserveChannel(request: PluginBackendChannelAdmissionRequest): PluginBackendChannelAdmission {
+    if (this.channelsAreShuttingDown()) throw channelError("shutdown", 1012, "Plugin backend channels are shutting down");
+    if (!isPiWebPluginId(request.pluginId)) throw channelError("inactive-plugin", 1008, `Server plugin is not active: ${request.pluginId}`);
+    if (request.projectId === "" || request.workspaceId === "") {
+      throw channelError("workspace-not-found", 1008, `Workspace not found for server plugin ${request.pluginId} channel`);
+    }
+    const pluginCount = this.channelsByPlugin.get(request.pluginId) ?? 0;
+    const scopeKey = channelScopeKey(request.pluginId, request.projectId, request.workspaceId);
+    const scopeCount = this.channelsByPluginWorkspace.get(scopeKey) ?? 0;
+    if (this.channelAdmissionCount >= this.channelMaxTotal || pluginCount >= this.channelMaxPerPlugin || scopeCount >= this.channelMaxPerPluginWorkspace) {
+      throw channelError("admission-denied", 1013, `Server plugin ${request.pluginId} channel admission limit was reached`);
+    }
+    this.channelAdmissionCount += 1;
+    this.channelsByPlugin.set(request.pluginId, pluginCount + 1);
+    this.channelsByPluginWorkspace.set(scopeKey, scopeCount + 1);
+    const admission = new ManagedPluginBackendChannelAdmission(
+      request,
+      () => {
+        this.channelAdmissions.delete(admission);
+        this.channelAdmissionCount -= 1;
+        decrementCount(this.channelsByPlugin, request.pluginId);
+        decrementCount(this.channelsByPluginWorkspace, scopeKey);
+      },
+    );
+    this.channelAdmissions.add(admission);
+    return admission;
+  }
+
   async openChannel(
     request: PluginBackendRequest,
     transport: PluginBackendChannelTransport,
     signal?: AbortSignal,
+    reservedAdmission?: PluginBackendChannelAdmission,
   ): Promise<PluginBackendChannelSession> {
     if (this.channelsAreShuttingDown()) throw channelError("shutdown", 1012, "Plugin backend channels are shutting down");
     const pluginId = parsePluginId(request.pluginId);
@@ -208,7 +250,11 @@ export class PluginBackendRegistry {
       );
     }
 
-    const releaseAdmission = this.reserveChannel(pluginId, request.project.id, request.workspaceId);
+    const admission = reservedAdmission === undefined
+      ? this.reserveChannel({ pluginId, projectId: request.project.id, workspaceId: request.workspaceId })
+      : requireManagedChannelAdmission(reservedAdmission, { pluginId, projectId: request.project.id, workspaceId: request.workspaceId });
+    const releaseAdmission = (): void => { admission.release(); };
+    const releaseAdmissionOnManagedClose = reservedAdmission === undefined;
     const lifetimeController = new AbortController();
     this.openingChannelControllers.add(lifetimeController);
     let resolveOpeningTask: () => void = () => undefined;
@@ -279,7 +325,7 @@ export class PluginBackendRegistry {
         lifetimeMs: this.channelLifetimeMs,
         onReleased: (released) => {
           this.channels.delete(released);
-          releaseAdmission();
+          if (releaseAdmissionOnManagedClose) releaseAdmission();
           signal?.removeEventListener("abort", abortFromCaller);
         },
         onCleanupFailure: (error) => {
@@ -322,6 +368,10 @@ export class PluginBackendRegistry {
 
   async closeAll(reason = "Session daemon shutdown"): Promise<void> {
     this.channelShutdown = true;
+    for (const admission of [...this.channelAdmissions]) {
+      admission.abort(reason);
+      admission.release();
+    }
     for (const controller of this.openingChannelControllers) {
       if (!controller.signal.aborted) controller.abort(new DOMException(reason, "AbortError"));
     }
@@ -341,32 +391,11 @@ export class PluginBackendRegistry {
   }
 
   activeChannelCount(): number {
-    return this.channels.size;
+    return this.channelAdmissionCount;
   }
 
   private channelsAreShuttingDown(): boolean {
     return this.channelShutdown;
-  }
-
-  private reserveChannel(pluginId: string, projectId: string, workspaceId: string): () => void {
-    if (workspaceId === "") throw channelError("workspace-not-found", 1008, `Workspace not found for server plugin ${pluginId} channel`);
-    const pluginCount = this.channelsByPlugin.get(pluginId) ?? 0;
-    const scopeKey = channelScopeKey(pluginId, projectId, workspaceId);
-    const scopeCount = this.channelsByPluginWorkspace.get(scopeKey) ?? 0;
-    if (this.channelAdmissionCount >= this.channelMaxTotal || pluginCount >= this.channelMaxPerPlugin || scopeCount >= this.channelMaxPerPluginWorkspace) {
-      throw channelError("admission-denied", 1013, `Server plugin ${pluginId} channel admission limit was reached`);
-    }
-    this.channelAdmissionCount += 1;
-    this.channelsByPlugin.set(pluginId, pluginCount + 1);
-    this.channelsByPluginWorkspace.set(scopeKey, scopeCount + 1);
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.channelAdmissionCount -= 1;
-      decrementCount(this.channelsByPlugin, pluginId);
-      decrementCount(this.channelsByPluginWorkspace, scopeKey);
-    };
   }
 
   private async dispatch(request: PluginBackendRequest, dispatchSignal: AbortSignal): Promise<JsonValue> {
@@ -474,6 +503,48 @@ export class PluginBackendRegistry {
   }
 }
 
+class ManagedPluginBackendChannelAdmission implements PluginBackendChannelAdmission {
+  private readonly controller = new AbortController();
+  private released = false;
+
+  constructor(
+    readonly request: PluginBackendChannelAdmissionRequest,
+    private readonly onRelease: () => void,
+  ) {}
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  abort(reason: string): void {
+    if (!this.controller.signal.aborted) this.controller.abort(new DOMException(reason, "AbortError"));
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    this.onRelease();
+  }
+}
+
+function requireManagedChannelAdmission(
+  admission: PluginBackendChannelAdmission,
+  expected: PluginBackendChannelAdmissionRequest,
+): ManagedPluginBackendChannelAdmission {
+  if (!(admission instanceof ManagedPluginBackendChannelAdmission)
+    || admission.request.pluginId !== expected.pluginId
+    || admission.request.projectId !== expected.projectId
+    || admission.request.workspaceId !== expected.workspaceId) {
+    admission.release();
+    throw channelError("admission-denied", 1013, `Server plugin ${expected.pluginId} channel admission reservation is invalid`);
+  }
+  if (admission.signal.aborted) {
+    admission.release();
+    throw channelError("shutdown", 1012, `Server plugin ${expected.pluginId} channel admission was cancelled`);
+  }
+  return admission;
+}
+
 interface ManagedPluginBackendChannelOptions {
   pluginId: string;
   workspaceId: string;
@@ -558,7 +629,7 @@ class ManagedPluginBackendChannel implements PluginBackendChannelSession {
       const reason = "Plugin completed channel";
       try {
         await this.close(1000, reason);
-        this.options.transport.close(1000, reason);
+        await this.options.transport.close(1000, reason);
       } catch (error) {
         await this.fail(
           "channel-closed",
@@ -596,7 +667,7 @@ class ManagedPluginBackendChannel implements PluginBackendChannelSession {
       await this.close(closeCode, message);
     } finally {
       try {
-        this.options.transport.close(closeCode, boundedPluginBackendChannelCloseReason(message));
+        await this.options.transport.close(closeCode, boundedPluginBackendChannelCloseReason(message));
       } catch {
         // Closing an already-disconnected transport is expected and does not change cleanup ownership.
       }

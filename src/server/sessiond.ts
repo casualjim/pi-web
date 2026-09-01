@@ -51,6 +51,7 @@ import { runSessionDaemonShutdown } from "./sessiond/sessionDaemonShutdown.js";
 import { sessionServiceDependencies } from "./sessiond/sessionServiceDependencies.js";
 import { registerWorkspaceCatalogRoutes } from "./sessiond/workspaceCatalogRoutes.js";
 import { registerPluginBackendChannelRoutes } from "./sessiond/pluginBackendChannelRoutes.js";
+import { installPluginBackendChannelWebSocketPayloadLimit } from "./webSocketBridge.js";
 import { registerPluginBackendRoutes } from "./sessiond/pluginBackendRoutes.js";
 import { registerWorkspaceRemovalRoutes } from "./sessiond/workspaceRemovalRoutes.js";
 import { createWorkspaceProviderRuntimeSnapshot } from "./workspaces/workspaceCatalog.js";
@@ -91,6 +92,7 @@ if (serverPluginRecovery.safeStartDiagnostic !== undefined) {
   );
 }
 await app.register(fastifyWebsocket);
+installPluginBackendChannelWebSocketPayloadLimit(app.websocketServer);
 let serverQuiescing = false;
 app.addHook("onRequest", (_request, reply, done) => {
   if (!serverQuiescing) {

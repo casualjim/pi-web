@@ -13,11 +13,11 @@ afterEach(() => {
 });
 
 describe("external plugin manifests", () => {
-  it("fetches the default manifest through the application base", async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(new Response(null, { status: 404 })));
+  it("treats a missing default manifest as an explicit required-load failure", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(null, { status: 404, statusText: "Not Found" })));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(loadExternalPlugins()).resolves.toEqual({ terminalMode: "recovery-disabled", registrations: [], failures: [] });
+    await expect(loadExternalPlugins()).rejects.toThrow("Failed to load plugin manifest (404 Not Found)");
 
     expect(fetchMock).toHaveBeenCalledWith("https://pi.example.test/pi-web-plugins/manifest.json", { cache: "no-store" });
   });

@@ -1,6 +1,8 @@
 import type {
   TerminalCommandRun,
   TerminalCommandRunHandle,
+  ContributionQueryValue,
+  QualifiedContributionId,
   TerminalCommandRunStatus,
   Workspace,
   WorkspaceBackend,
@@ -13,12 +15,19 @@ type TimerId = ReturnType<typeof globalThis.setTimeout>;
 type SetTimer = (handler: () => void, timeout: number) => TimerId;
 type ClearTimer = (id: TimerId) => void;
 
+export interface WorkspaceContributionNavigationV1 {
+  readonly contributionId: QualifiedContributionId;
+  readonly navigationAliases?: readonly QualifiedContributionId[];
+  readonly query: Readonly<Record<string, ContributionQueryValue | undefined | null>>;
+}
+
 export interface RequiredTerminalFacadeHostV1 {
-  openTerminal(workspace: Workspace | undefined, options?: { terminalId?: string | undefined }): void | Promise<void>;
+  navigateWorkspaceContribution(workspace: Workspace, navigation: WorkspaceContributionNavigationV1): void | Promise<void>;
 }
 
 export interface RequiredTerminalWorkspaceBindingV1 {
   readonly origin: string;
+  readonly registrationPluginId: string;
   readonly workspace: Workspace;
   readonly backend: WorkspaceBackend;
   readonly host: RequiredTerminalFacadeHostV1;
@@ -48,9 +57,13 @@ export interface TerminalFacadeOptions {
   clearTimeout?: ClearTimer;
 }
 
+const TERMINAL_PANEL_LOCAL_ID = "workspace.terminal";
+const TERMINAL_PANEL_NAVIGATION_ALIASES: readonly QualifiedContributionId[] = ["core:workspace.terminal"];
+
 export class TerminalFacade implements RequiredTerminalBrowserFacadeV1 {
   readonly version = 1 as const;
   private readonly pollIntervalMs: number;
+  private openRequestSequence = 0;
   private readonly setTimer: SetTimer;
   private readonly clearTimer: ClearTimer;
 
@@ -63,15 +76,28 @@ export class TerminalFacade implements RequiredTerminalBrowserFacadeV1 {
   createWorkspaceTerminal(binding: RequiredTerminalWorkspaceBindingV1): WorkspacePanelTerminal {
     const client = new TerminalBackendClient(binding.backend);
     return Object.freeze({
-      open: (options?: { terminalId?: string | undefined }) => { void binding.host.openTerminal(binding.workspace, options); },
+      open: (options?: { terminalId?: string | undefined }) => { this.openTerminal(binding, options); },
       runCommand: async (input: WorkspaceTerminalCommandInput): Promise<TerminalCommandRunHandle> => {
         const run = await client.runCommand(binding.origin, input);
-        if (input.open === true) void binding.host.openTerminal(binding.workspace, { terminalId: run.terminalId });
+        if (input.open === true) this.openTerminal(binding, { terminalId: run.terminalId });
         return Object.freeze({
           run,
           completed: waitForCommandRunCompletion(run, client, this.pollIntervalMs, this.setTimer, this.clearTimer),
         });
       },
+    });
+  }
+
+  private openTerminal(binding: RequiredTerminalWorkspaceBindingV1, options?: { terminalId?: string | undefined }): void {
+    const contributionId: QualifiedContributionId = `${binding.registrationPluginId}:${TERMINAL_PANEL_LOCAL_ID}`;
+    const terminalId = options?.terminalId;
+    const query: Record<string, ContributionQueryValue | undefined> = terminalId === undefined
+      ? { start: String(++this.openRequestSequence) }
+      : { terminal: terminalId, start: undefined };
+    void binding.host.navigateWorkspaceContribution(binding.workspace, {
+      contributionId,
+      navigationAliases: TERMINAL_PANEL_NAVIGATION_ALIASES,
+      query,
     });
   }
 

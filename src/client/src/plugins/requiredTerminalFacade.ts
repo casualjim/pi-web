@@ -1,12 +1,19 @@
 import type { TerminalCommandRun, TerminalCommandRunStatus, Workspace } from "../api";
-import type { WorkspaceBackend, WorkspacePanelTerminal, WorkspacePluginBinding, WorkspaceTerminalCommandInput } from "./types";
+import type { ContributionQueryValue, QualifiedContributionId, WorkspaceBackend, WorkspacePanelTerminal, WorkspacePluginBinding, WorkspaceTerminalCommandInput } from "./types";
+
+export interface WorkspaceContributionNavigationV1 {
+  readonly contributionId: QualifiedContributionId;
+  readonly navigationAliases?: readonly QualifiedContributionId[];
+  readonly query: Readonly<Record<string, ContributionQueryValue | undefined | null>>;
+}
 
 export interface RequiredTerminalFacadeHostV1 {
-  openTerminal(workspace: Workspace | undefined, options?: { terminalId?: string | undefined }): void | Promise<void>;
+  navigateWorkspaceContribution(workspace: Workspace, navigation: WorkspaceContributionNavigationV1): void | Promise<void>;
 }
 
 export interface RequiredTerminalWorkspaceBindingV1 {
   readonly origin: string;
+  readonly registrationPluginId: string;
   readonly workspace: Workspace;
   readonly backend: WorkspaceBackend;
   readonly host: RequiredTerminalFacadeHostV1;

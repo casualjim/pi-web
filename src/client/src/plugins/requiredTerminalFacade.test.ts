@@ -38,9 +38,10 @@ describe("required Terminal browser composition port", () => {
     });
     const terminal = facade.createWorkspaceTerminal({
       origin: "tasks",
+      registrationPluginId: "terminal",
       workspace,
       backend: { capabilityVersion: 1, request: vi.fn() },
-      host: { openTerminal: vi.fn() },
+      host: { navigateWorkspaceContribution: vi.fn() },
     });
 
     terminal.open({ terminalId: "terminal-1" });

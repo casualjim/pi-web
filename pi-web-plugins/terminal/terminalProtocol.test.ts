@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JsonValue, WorkspaceBackend, WorkspaceBackendChannel } from "@jmfederico/pi-web/plugin-api";
-import { TerminalBackendClient, parseTerminalCommandRun, parseTerminalServerFrame, terminalChannelFailureMessage } from "./terminalProtocol";
+import { TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES, TerminalBackendClient, parseTerminalCommandRun, parseTerminalServerFrame, terminalChannelFailureMessage, terminalInputFrames } from "./terminalProtocol";
 
 const terminal = {
   id: "terminal-1",
@@ -76,6 +76,21 @@ describe("Terminal paired-backend protocol", () => {
     expect(parseTerminalServerFrame({ type: "exit", exitCode: 0 })).toEqual({ type: "exit", exitCode: 0 });
     expect(parseTerminalServerFrame({ type: "error", message: "pty failed" })).toEqual({ type: "error", message: "pty failed" });
     expect(() => parseTerminalServerFrame({ type: "output", data: "bad" })).toThrow("replay must be a boolean");
+  });
+
+  it("splits large Unicode input into ordered JSON-byte-safe channel frames", () => {
+    const input = `${"paste😀\\\n".repeat(9_000)}${"\u0000".repeat(2_000)}tail`;
+    const frames = terminalInputFrames(input);
+
+    expect(frames.length).toBeGreaterThan(1);
+    expect(frames.map(({ data }) => data).join("")).toBe(input);
+    for (const frame of frames) {
+      expect(new TextEncoder().encode(JSON.stringify(frame)).byteLength).toBeLessThanOrEqual(TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES);
+      const first = frame.data.charCodeAt(0);
+      const last = frame.data.charCodeAt(frame.data.length - 1);
+      expect(first >= 0xdc00 && first <= 0xdfff).toBe(false);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    }
   });
 
   it("rejects malformed command records and attributes channel closure", () => {

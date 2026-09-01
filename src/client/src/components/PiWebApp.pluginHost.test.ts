@@ -54,6 +54,7 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "browser-only:workspace.panel",
       mainView: "browser-only:workspace.panel",
     });
+    installTestTerminalComposition(app, "local");
     const invalidated = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void>();
     appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
 
@@ -88,6 +89,7 @@ describe("PiWebApp plugin host", () => {
       workspaces: [workspace],
       workspaceTool: "core:workspace.files",
     });
+    installTestTerminalComposition(app, "local");
     let finishSubscription: () => void = () => undefined;
     const subscription = new Promise<void>((resolve) => { finishSubscription = resolve; });
     const subscribed = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => Promise<void>>(() => subscription);
@@ -139,6 +141,7 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "browser-only:workspace.panel",
       mainView: "browser-only:workspace.panel",
     });
+    setVerifiedPluginMode(app, "local", "recovery-disabled");
     let navigation: WorkspacePanelNavigationV1 | undefined;
     appPluginRegistry(app).register({
       id: "browser-only",
@@ -207,6 +210,7 @@ describe("PiWebApp plugin host", () => {
     });
     if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
     if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
+    installTestTerminalComposition(app, "local");
 
     const runtime = new FilesRuntime();
     const readFile = vi.fn<WorkspaceFilesCapabilityV1["readFile"]>((path) => Promise.resolve({
@@ -318,6 +322,7 @@ describe("PiWebApp plugin host", () => {
       },
       facade: testTerminalFacade(),
     });
+    setVerifiedPluginMode(app, "local", "required");
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }))));
 
     await callAsyncAppMethod(app, "restoreRoute", false);
@@ -661,6 +666,7 @@ describe("PiWebApp plugin host", () => {
     callAppMethod(app, "handleWorkspaceChange", previous, next);
     expect(appState(app).workspaceTool).toBeUndefined();
 
+    installTestTerminalComposition(app, "local");
     appPluginRegistry(app).register({
       id: "first",
       plugin: {
@@ -829,6 +835,8 @@ describe("PiWebApp plugin host", () => {
     stubPluginLoadRendering(app);
     const stableEntry = manifestEntry("stable");
     const retryEntry = manifestEntry("retry");
+    const stablePlugin = pluginWithAction("Stable", "act");
+    const retryPlugin = pluginWithAction("Retry", "act");
     const transientFailure = new Error("temporary module failure");
     let attempt = 0;
     vi.mocked(loadExternalPlugins).mockImplementation((_manifestUrl, options = {}) => {
@@ -836,14 +844,14 @@ describe("PiWebApp plugin host", () => {
       if (attempt === 1) {
         return Promise.resolve({
           terminalMode: "recovery-disabled",
-          registrations: [{ id: "stable", machineSpecific: false, plugin: emptyPlugin("Stable") }],
+          registrations: [{ id: "stable", machineSpecific: false, plugin: stablePlugin }],
           failures: [{ entry: retryEntry, error: transientFailure }],
         });
       }
       expect(options.shouldLoadPlugin?.(stableEntry)).toBe(false);
       return Promise.resolve({
         terminalMode: "recovery-disabled",
-        registrations: [{ id: "retry", machineSpecific: false, plugin: emptyPlugin("Retry") }],
+        registrations: [{ id: "retry", machineSpecific: false, plugin: retryPlugin }],
         failures: [],
       });
     });
@@ -853,6 +861,9 @@ describe("PiWebApp plugin host", () => {
 
     expect(appPluginRegistry(app).hasPlugin("stable")).toBe(true);
     expect(appPluginRegistry(app).hasPlugin("retry")).toBe(false);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "stable:act" }),
+    ]));
     expect(Reflect.get(app, "gatewayPluginLoadPromise")).toBeUndefined();
 
     await ensureGatewayPluginsLoaded(app);
@@ -860,6 +871,10 @@ describe("PiWebApp plugin host", () => {
     expect(loadExternalPlugins).toHaveBeenCalledTimes(2);
     expect(appPluginRegistry(app).hasPlugin("stable")).toBe(true);
     expect(appPluginRegistry(app).hasPlugin("retry")).toBe(true);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "stable:act" }),
+      expect.objectContaining({ id: "retry:act" }),
+    ]));
     expect(warning).toHaveBeenCalledWith(
       "Failed to load PI WEB plugin retry (./retry/plugin.js)",
       transientFailure,
@@ -1095,7 +1110,8 @@ describe("PiWebApp plugin host", () => {
       return Promise.resolve();
     })) throw new Error("Could not stub successful Terminal workspace restoration");
 
-    await callAsyncAppMethod(app, "openRuntimeTerminal", "local", workspace, { terminalId: "target-terminal-2" });
+    workspacePanelContextFromApp(app).terminal.open({ terminalId: "target-terminal-2" });
+    await vi.waitFor(() => { expect(browser.url.searchParams.get("terminal.workspace.terminal--terminal")).toBe("target-terminal-2"); });
 
     expect(browser.url.searchParams.get("project")).toBe(project.id);
     expect(browser.url.searchParams.get("workspace")).toBe(workspace.id);
@@ -1151,7 +1167,11 @@ describe("PiWebApp plugin host", () => {
     const publishWorkspaceTool = vi.fn();
     if (!Reflect.set(app, "publishWorkspaceTool", publishWorkspaceTool)) throw new Error("Could not observe Terminal panel publication");
 
-    const opening = Promise.resolve(callAppMethod(app, "openRuntimeTerminal", "local", workspace, { terminalId: "terminal-from-command" }));
+    const opening = callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", workspace, {
+      contributionId: TERMINAL_PANEL_ID,
+      navigationAliases: ["core:workspace.terminal"],
+      query: { terminal: "terminal-from-command", start: undefined },
+    });
     await started;
     setAppState(app, { ...appState(app), selectedWorkspace: otherWorkspace });
     finishRestore();
@@ -1241,6 +1261,41 @@ describe("PiWebApp plugin host", () => {
       .rejects.toThrow("Required Terminal plugin is unavailable");
   });
 
+  it("keeps a missing manifest failed closed until a valid required manifest retry succeeds", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.mocked(loadExternalPlugins)
+      .mockRejectedValueOnce(new Error("Failed to load plugin manifest (404 Not Found)"))
+      .mockResolvedValueOnce({
+        terminalMode: "required",
+        registrations: [{
+          id: "terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          backendCapabilityVersion: 1,
+          channelVersion: 1,
+          plugin: requiredTerminalPlugin(),
+        }],
+        failures: [],
+      });
+
+    await ensureGatewayPluginsLoaded(app);
+    expect(appState(app).error).toContain("404 Not Found");
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    expect(Reflect.get(app, "gatewayPluginLoadPromise")).toBeUndefined();
+
+    await ensureGatewayPluginsLoaded(app);
+    expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
+    expect(loadExternalPlugins).toHaveBeenCalledTimes(2);
+  });
+
   it("hides the core Terminal surface and rejects helpers in no-plugin recovery", async () => {
     const app = createApp();
     stubPluginLoadRendering(app);
@@ -1287,14 +1342,30 @@ describe("PiWebApp plugin host", () => {
       channelVersion: 1 as const,
       plugin: requiredTerminalPlugin(),
     };
+    const ordinaryRegistration = {
+      id: "ordinary",
+      machineSpecific: false,
+      plugin: {
+        apiVersion: 2 as const,
+        name: "Ordinary",
+        activate: () => ({
+          contributions: {
+            actions: [{ id: "act", title: "Ordinary action", run: () => undefined }],
+          },
+        }),
+      },
+    };
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await callAsyncAppMethod(app, "registerExternalPlugins", "Initial", () => Promise.resolve({
       terminalMode: "required",
-      registrations: [registration],
+      registrations: [registration, ordinaryRegistration],
       failures: [],
     }));
     expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "ordinary:act" }),
+    ]));
 
     await callAsyncAppMethod(app, "registerExternalPlugins", "Failed retry", () => Promise.resolve({
       terminalMode: "required",
@@ -1302,8 +1373,10 @@ describe("PiWebApp plugin host", () => {
       failures: [{ entry: manifestEntry("terminal"), error: new Error("manifest unavailable") }],
     }));
     expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    expect(appPluginRegistry(app).hasPlugin("ordinary")).toBe(true);
     expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.not.arrayContaining([
       expect.objectContaining({ id: "terminal:view.terminal" }),
+      expect.objectContaining({ id: "ordinary:act" }),
     ]));
 
     await callAsyncAppMethod(app, "registerExternalPlugins", "Recovered", () => Promise.resolve({
@@ -1314,6 +1387,7 @@ describe("PiWebApp plugin host", () => {
     expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
     expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "terminal:view.terminal" }),
+      expect.objectContaining({ id: "ordinary:act" }),
     ]));
   });
 
@@ -1373,8 +1447,18 @@ describe("PiWebApp plugin host", () => {
       },
     };
     vi.mocked(loadExternalPlugins).mockResolvedValue({
-      terminalMode: "recovery-disabled",
-      registrations: [{ id: "retryable", machineSpecific: false, plugin: retryable }],
+      terminalMode: "required",
+      registrations: [
+        {
+          id: "terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          backendCapabilityVersion: 1,
+          channelVersion: 1,
+          plugin: requiredTerminalPlugin(),
+        },
+        { id: "retryable", machineSpecific: false, plugin: retryable },
+      ],
       failures: [],
     });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -1605,6 +1689,13 @@ function installTestTerminalComposition(app: PiWebApp, machineId: string): void 
     },
     facade: testTerminalFacade(),
   });
+  setVerifiedPluginMode(app, machineId, "required");
+}
+
+function setVerifiedPluginMode(app: PiWebApp, machineId: string, mode: "required" | "recovery-disabled"): void {
+  const modes: unknown = Reflect.get(app, "verifiedPluginModeByMachine");
+  if (!(modes instanceof Map)) throw new Error("PiWebApp verified plugin mode map was unavailable");
+  modes.set(machineId, mode);
 }
 
 function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {
@@ -1690,12 +1781,16 @@ function requiredTerminalPlugin(facade: RequiredTerminalBrowserFacadeV1 = testTe
 }
 
 function testTerminalFacade(): RequiredTerminalBrowserFacadeV1 {
+  const facade = new TerminalFacade();
   return {
     version: 1 as const,
-    createWorkspaceTerminal: (binding: RequiredTerminalWorkspaceBindingV1) => ({
-      open: (options?: { terminalId?: string }) => { void binding.host.openTerminal(binding.workspace, options); },
-      runCommand: () => Promise.reject(new Error("Test Terminal command execution was not configured")),
-    }),
+    createWorkspaceTerminal: (binding: RequiredTerminalWorkspaceBindingV1) => {
+      const terminal = facade.createWorkspaceTerminal(binding);
+      return {
+        open: (options) => { terminal.open(options); },
+        runCommand: () => Promise.reject(new Error("Test Terminal command execution was not configured")),
+      };
+    },
     listCommandRuns: () => Promise.resolve([]),
     parseCommandRun: () => { throw new Error("Test Terminal command parsing was not configured"); },
   };
@@ -1721,6 +1816,14 @@ function isRequiredTerminalComposition(value: unknown): value is { binding: unkn
 
 function emptyPlugin(name: string): PiWebPlugin {
   return { apiVersion: 2, name, activate: () => ({ contributions: {} }) };
+}
+
+function pluginWithAction(name: string, actionId: string): PiWebPlugin {
+  return {
+    apiVersion: 2,
+    name,
+    activate: () => ({ contributions: { actions: [{ id: actionId, title: name, run: () => undefined }] } }),
+  };
 }
 
 function callAppMethod(app: PiWebApp, name: string, ...args: unknown[]): unknown {

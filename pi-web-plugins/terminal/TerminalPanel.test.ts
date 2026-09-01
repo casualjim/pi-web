@@ -4,6 +4,7 @@ import type { JsonValue, WorkspaceBackend, WorkspaceBackendChannelOptions, Works
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalBrowserRuntime } from "./TerminalBrowserRuntime";
 import { TerminalPanel, filterTerminalInput } from "./TerminalPanel";
+import { TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES } from "./terminalProtocol";
 import { InMemoryTerminalSelectionMemory } from "./terminalSelection";
 
 afterEach(() => {
@@ -362,6 +363,20 @@ describe("Terminal panel lifecycle", () => {
     callPanelMethod(panel, "fitAndNotify");
     expect(send).toHaveBeenNthCalledWith(1, { type: "input", data: "beforeafter\r" });
     expect(send).toHaveBeenNthCalledWith(2, { type: "resize", cols: 80, rows: 24 });
+
+    const largePaste = `${"λ😀".repeat(24_000)}${"\u0000".repeat(4_000)}done`;
+    callPanelMethod(panel, "sendTerminalInput", largePaste);
+    const pasteFrames: unknown[] = [];
+    for (const call of send.mock.calls.slice(2)) {
+      const frame: unknown = call[0];
+      pasteFrames.push(frame);
+    }
+    expect(pasteFrames.length).toBeGreaterThan(1);
+    expect(pasteFrames.map((frame) => {
+      if (!isInputFrame(frame)) throw new Error("Expected Terminal input frame");
+      expect(new TextEncoder().encode(JSON.stringify(frame)).byteLength).toBeLessThanOrEqual(TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES);
+      return frame.data;
+    }).join("")).toBe(largePaste);
   });
 
   it("filters Xterm focus-reporting bytes without changing ordinary input", () => {
@@ -369,6 +384,10 @@ describe("Terminal panel lifecycle", () => {
     expect(filterTerminalInput("npm test\r")).toBe("npm test\r");
   });
 });
+
+function isInputFrame(value: unknown): value is { type: "input"; data: string } {
+  return typeof value === "object" && value !== null && Reflect.get(value, "type") === "input" && typeof Reflect.get(value, "data") === "string";
+}
 
 function createTerminalPanel(): TerminalPanel {
   if (customElements.get("test-terminal-panel") === undefined) customElements.define("test-terminal-panel", TerminalPanel);

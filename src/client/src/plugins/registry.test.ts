@@ -63,6 +63,63 @@ describe("PluginRegistry", () => {
     expect(registry.resolveWorkspacePanelRouteId("core:workspace.files", "local")).toBeUndefined();
   });
 
+  it("dynamically gates every ordinary contribution surface without discarding registration", async () => {
+    let enabled = true;
+    const actionRun = vi.fn();
+    const panelRender = vi.fn(() => html`<p>Panel</p>`);
+    const panelInvalidate = vi.fn();
+    const labelItems = vi.fn(() => [{ type: "text" as const, text: "label" }]);
+    const activate = vi.fn<PiWebPlugin["activate"]>(() => ({
+      contributions: {
+        actions: [{ id: "act", title: "Act", run: actionRun }],
+        workspacePanels: [{
+          id: "workspace.panel",
+          title: "Panel",
+          routeAliases: ["legacy:workspace.panel"],
+          onInvalidate: panelInvalidate,
+          render: panelRender,
+        }],
+        workspaceLabels: [{ id: "label", items: labelItems }],
+        themes: [{ id: "light", name: "Light", colorScheme: "light", tokens: testThemeTokens() }],
+        themePairs: [{ id: "pair", name: "Pair", light: "light", dark: "light" }],
+      },
+    }));
+    const registry = new PluginRegistry({ isContributionEnabled: () => enabled });
+    registry.register({ id: "ordinary", plugin: { apiVersion: 2, name: "Ordinary", activate } });
+    const runtime = createContext({ selectedMachine: testMachine("local"), selectedWorkspace: testWorkspace() }).context;
+    const panelContext = createWorkspacePanelContext("local");
+    const labelContext = createWorkspaceLabelContext("local");
+    const staleAction = registry.getActions(runtime)[0];
+    const panel = registry.getWorkspacePanels()[0];
+
+    expect(registry.resolveWorkspacePanelRouteId("legacy:workspace.panel", "local")).toBe("ordinary:workspace.panel");
+    expect(registry.getWorkspaceLabelItems(labelContext)).toEqual([{ type: "text", text: "label" }]);
+    expect(registry.getThemes()).toHaveLength(1);
+    expect(registry.getThemePairs()).toHaveLength(1);
+
+    enabled = false;
+    expect(registry.hasPlugin("ordinary")).toBe(true);
+    expect(registry.getActions(runtime)).toEqual([]);
+    expect(registry.resolveWorkspacePanelRouteId("legacy:workspace.panel", "local")).toBeUndefined();
+    expect(panel?.visible?.(panelContext)).toBe(false);
+    panel?.render(panelContext);
+    await registry.invalidateWorkspacePanels(panelContext);
+    await staleAction?.run();
+    expect(panelRender).not.toHaveBeenCalled();
+    expect(panelInvalidate).not.toHaveBeenCalled();
+    expect(actionRun).not.toHaveBeenCalled();
+    expect(registry.getWorkspaceLabelItems(labelContext)).toEqual([]);
+    expect(labelItems).toHaveBeenCalledOnce();
+    expect(registry.getThemes()).toEqual([]);
+    expect(registry.getThemePairs()).toEqual([]);
+
+    enabled = true;
+    expect(registry.getActions(runtime)).toHaveLength(1);
+    expect(registry.getWorkspaceLabelItems(labelContext)).toEqual([{ type: "text", text: "label" }]);
+    expect(registry.getThemes()).toHaveLength(1);
+    expect(activate).toHaveBeenCalledOnce();
+  });
+
   it("rejects legacy browser plugins with an attributed API-version error", () => {
     const registry = new PluginRegistry();
     const legacyPlugin: PiWebPlugin = {

@@ -5,6 +5,8 @@ import { WebSocket, type RawData } from "ws";
 import type { JsonValue } from "../../server-plugin-api.js";
 import {
   parsePluginBackendChannelServerEnvelope,
+  PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   serializePluginBackendChannelDataEnvelope,
   serializePluginBackendChannelOpenEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
@@ -12,6 +14,7 @@ import { PluginBackendRegistry } from "../plugins/pluginBackendRegistry.js";
 import type { ServerPluginPairedBackendContribution } from "../plugins/serverPluginRuntime.js";
 import type { Project } from "../types.js";
 import { WorkspaceProviderRegistry } from "../workspaces/workspaceProviderRegistry.js";
+import { installPluginBackendChannelWebSocketPayloadLimit } from "../webSocketBridge.js";
 import { registerPluginBackendChannelRoutes } from "./pluginBackendChannelRoutes.js";
 
 const project: Project = {
@@ -27,6 +30,7 @@ let sockets: WebSocket[];
 beforeEach(async () => {
   app = Fastify({ logger: false });
   await app.register(fastifyWebsocket);
+  installPluginBackendChannelWebSocketPayloadLimit(app.websocketServer);
   sockets = [];
 });
 
@@ -77,6 +81,109 @@ describe("session daemon plugin backend channels", () => {
     await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
     expect(close).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledWith(expect.objectContaining({ code: 1000, reason: "panel closed" }));
+  });
+
+  it("drains plugin frames in order before clean completion closes the real socket", async () => {
+    const workspaces = workspaceRegistry();
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected workspace");
+    const registry = new PluginBackendRegistry({
+      contributions: [contribution(({ send }) => {
+        send({ sequence: 1 });
+        send({ sequence: 2 });
+        return { receive: () => undefined, closed: Promise.resolve() };
+      })],
+      workspaces,
+    });
+    registerPluginBackendChannelRoutes(app, { projects: projectReader(), backends: registry });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const socket = connect(workspaceId);
+    const messages = socketMessages(socket);
+    const closed = nextClose(socket);
+    await waitForOpen(socket);
+    socket.send(serializePluginBackendChannelOpenEnvelope("terminal-r1", null));
+
+    expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({ version: 1, kind: "ready" });
+    expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({ version: 1, kind: "data", data: { sequence: 1 } });
+    expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toEqual({ version: 1, kind: "data", data: { sequence: 2 } });
+    await expect(closed).resolves.toMatchObject({ code: 1000 });
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+  });
+
+  it("reserves admission before open and releases no-open sockets exactly once", async () => {
+    const workspaces = workspaceRegistry();
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected workspace");
+    const registry = new PluginBackendRegistry({
+      contributions: [contribution(() => ({ receive: () => undefined }))],
+      workspaces,
+      channelMaxTotal: 1,
+    });
+    registerPluginBackendChannelRoutes(app, { projects: projectReader(), backends: registry });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const waiting = connect(workspaceId);
+    await waitForOpen(waiting);
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(1); });
+
+    const denied = connect(workspaceId);
+    const deniedMessages = socketMessages(denied);
+    const deniedClose = nextClose(denied);
+    await waitForOpen(denied);
+    expect(parsePluginBackendChannelServerEnvelope(await deniedMessages.next())).toMatchObject({
+      kind: "error",
+      code: "admission-denied",
+    });
+    await expect(deniedClose).resolves.toMatchObject({ code: 1013 });
+    expect(registry.activeChannelCount()).toBe(1);
+
+    waiting.close(1000, "retry");
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+    const retry = connect(workspaceId);
+    await waitForOpen(retry);
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(1); });
+    retry.close(1000, "done");
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+  });
+
+  it("enforces open and post-open data payload limits in the WebSocket receiver", async () => {
+    const workspaces = workspaceRegistry();
+    const workspaceId = (await workspaces.resolve(project)).workspaces[0]?.id;
+    if (workspaceId === undefined) throw new Error("Expected workspace");
+    const registry = new PluginBackendRegistry({
+      contributions: [contribution(() => ({ receive: () => undefined }))],
+      workspaces,
+    });
+    registerPluginBackendChannelRoutes(app, { projects: projectReader(), backends: registry });
+    app.get("/unrelated-session-socket", { websocket: true }, (socket) => {
+      socket.on("message", (data, isBinary) => { socket.send(data, { binary: isBinary }); });
+    });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const oversizedOpen = connect(workspaceId);
+    const oversizedOpenClose = nextClose(oversizedOpen);
+    await waitForOpen(oversizedOpen);
+    oversizedOpen.send("x".repeat(PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES + 1));
+    await expect(oversizedOpenClose).resolves.toMatchObject({ code: 1009 });
+
+    const oversizedData = connect(workspaceId);
+    const messages = socketMessages(oversizedData);
+    await waitForOpen(oversizedData);
+    oversizedData.send(serializePluginBackendChannelOpenEnvelope("terminal-r1", null));
+    expect(parsePluginBackendChannelServerEnvelope(await messages.next())).toMatchObject({ kind: "ready" });
+    const oversizedDataClose = nextClose(oversizedData);
+    oversizedData.send("x".repeat(PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES + 1));
+    await expect(oversizedDataClose).resolves.toMatchObject({ code: 1009 });
+    await vi.waitFor(() => { expect(registry.activeChannelCount()).toBe(0); });
+
+    const unrelated = new WebSocket(`${serverUrl(app)}/unrelated-session-socket`);
+    sockets.push(unrelated);
+    await waitForOpen(unrelated);
+    const unrelatedPayload = "s".repeat(PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES + 1);
+    const echoed = socketMessages(unrelated);
+    unrelated.send(unrelatedPayload);
+    await expect(echoed.next()).resolves.toBe(unrelatedPayload);
   });
 
   it("attributes stale revisions, plugin receive failures, and binary input before closing", async () => {

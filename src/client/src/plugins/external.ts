@@ -40,7 +40,6 @@ export interface ExternalPluginLoadResult {
 export async function loadExternalPlugins(manifestUrl = "pi-web-plugins/manifest.json", options: LoadExternalPluginsOptions = {}): Promise<ExternalPluginLoadResult> {
   const resolvedManifestUrl = resolveAppUrl(manifestUrl);
   const manifest = await fetchPluginManifest(resolvedManifestUrl);
-  if (manifest === undefined) return { terminalMode: "recovery-disabled", registrations: [], failures: [] };
 
   const registrations: PiWebPluginRegistration[] = [];
   const failures: ExternalPluginLoadFailure[] = [];
@@ -78,9 +77,8 @@ async function importPluginModule(moduleUrl: string): Promise<unknown> {
   return import(/* @vite-ignore */ moduleUrl);
 }
 
-async function fetchPluginManifest(manifestUrl: string): Promise<PluginManifest | undefined> {
+async function fetchPluginManifest(manifestUrl: string): Promise<PluginManifest> {
   const response = await fetch(manifestUrl, { cache: "no-store" });
-  if (response.status === 404) return undefined;
   if (!response.ok) throw new Error(await pluginManifestResponseError(response));
   return parseManifest(await response.json());
 }

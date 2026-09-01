@@ -4,6 +4,7 @@ export type QueryValue = string | number | boolean | readonly (string | number |
 export type ContributionQueryValue = string | readonly string[];
 export type ContributionQuerySnapshot = Readonly<Record<string, ContributionQueryValue>>;
 export type ContributionQueryRecord = Record<string, string | string[]>;
+export type ContributionQueryPatch = Readonly<Record<string, QueryValue | undefined | null>>;
 
 const qualifiedContributionIdPattern = /^[a-z][a-z0-9.-]*:[a-z][a-z0-9.-]*$/u;
 const localQueryKeyPattern = /^[a-z][a-z0-9.-]*$/u;
@@ -88,6 +89,41 @@ export function normalizeContributionQueryRecord(value: unknown): ContributionQu
     recordLength += candidateLength;
   }
   return result;
+}
+
+/** Apply a bounded local-key patch while removing stale canonical and alias values. */
+export function patchContributionQueryRecord(
+  record: Readonly<Record<string, ContributionQueryValue>>,
+  contributionId: QualifiedContributionId,
+  aliases: readonly QualifiedContributionId[],
+  patch: ContributionQueryPatch,
+): ContributionQueryRecord {
+  assertQualifiedContributionId(contributionId);
+  for (const alias of aliases) assertQualifiedContributionId(alias);
+  const normalized = normalizeContributionQueryRecord(record);
+  const replacementKeys = new Set<string>();
+  const callerParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(patch)) {
+    if (!isContributionQueryLocalKey(key)) throw new Error(`Invalid contribution navigation key: ${key}`);
+    for (const id of uniqueContributionIds(contributionId, aliases)) {
+      replacementKeys.add(`${queryNamespace(id)}--${key}`);
+    }
+    if (value === undefined || value === null) continue;
+    const canonicalKey = `${queryNamespace(contributionId)}--${key}`;
+    for (const item of serializeContributionQueryValue(key, value)) callerParams.append(canonicalKey, item);
+  }
+  assertContributionQueryParamsWithinLimits(callerParams);
+
+  const candidates = new URLSearchParams(callerParams);
+  for (const [key, value] of Object.entries(normalized)) {
+    if (replacementKeys.has(key)) continue;
+    if (typeof value === "string") candidates.append(key, value);
+    else for (const item of value) candidates.append(key, item);
+  }
+  return readBoundedQueryFromParams(
+    candidates,
+    (parameter) => isContributionQueryParameter(parameter) ? { key: parameter, parameterLength: parameter.length } : undefined,
+  );
 }
 
 /** Replace all contribution-owned parameters while preserving route, unrelated query, path, and hash. */

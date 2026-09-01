@@ -8,7 +8,7 @@ import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
 import type { TerminalCommandRun, WorkspaceBackendChannel, WorkspaceBackendChannelClose, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 import { writeClipboardText } from "./clipboard";
 import { selectFallbackTerminal, selectPreferredTerminal } from "./terminalSelection";
-import { TerminalBackendClient, terminalChannelFailureMessage, type TerminalInfo, type TerminalServerFrame, type TerminalSize } from "./terminalProtocol";
+import { TerminalBackendClient, terminalChannelFailureMessage, terminalInputFrames, type TerminalClientFrame, type TerminalInfo, type TerminalServerFrame, type TerminalSize } from "./terminalProtocol";
 import { createTerminalCopySnapshot, DEFAULT_TERMINAL_ANSI_THEME, type TerminalCopyRunStyle, type TerminalCopySnapshot } from "./terminalCopySnapshot";
 import { createTerminalSoftKeysDefaultEnvironmentMedia, hasTerminalSoftKeysPreference, initialTerminalSoftKeysEnabled, isTerminalSoftKeysDefaultEnvironment, writeTerminalSoftKeysPreference } from "./terminalSoftKeysPreference";
 import type { TerminalBrowserRuntime } from "./TerminalBrowserRuntime";
@@ -679,7 +679,9 @@ export class TerminalPanel extends LitElement {
 
   private sendTerminalInput(data: string): void {
     const filtered = filterTerminalInput(data);
-    if (filtered !== "") this.send({ type: "input", data: filtered });
+    for (const frame of terminalInputFrames(filtered)) {
+      if (!this.send(frame)) return;
+    }
   }
 
   private sendSoftKeyInput(data: string, options: TerminalSoftKeyInputOptions): void {
@@ -695,11 +697,15 @@ export class TerminalPanel extends LitElement {
     requestAnimationFrame(() => { terminal.focus(); });
   }
 
-  private send(message: { type: "input"; data: string } | { type: "resize"; cols: number; rows: number }): void {
+  private send(message: TerminalClientFrame): boolean {
+    const channel = this.channel;
+    if (channel === undefined) return false;
     try {
-      this.channel?.send(message);
+      channel.send(message);
+      return true;
     } catch (error) {
       this.connectionError = `Terminal send failed: ${errorMessage(error)}`;
+      return false;
     }
   }
 

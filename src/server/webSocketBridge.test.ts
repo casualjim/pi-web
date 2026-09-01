@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
+  serializePluginBackendChannelDataEnvelope,
   serializePluginBackendChannelOpenEnvelope,
   serializePluginBackendChannelReadyEnvelope,
 } from "../shared/pluginBackendProtocol.js";
@@ -70,6 +71,25 @@ describe("bounded plugin backend channel bridge", () => {
     const forwardedReady = nextMessage(clientSide.peerSocket);
     upstreamSide.peerSocket.send(ready);
     await expect(forwardedReady).resolves.toBe(ready);
+  });
+
+  it("drains bridged frames before propagating a clean upstream close", async () => {
+    const clientSide = await createSocketPair();
+    const upstreamSide = await createSocketPair();
+    const onClosed = vi.fn();
+    bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket, { onClosed });
+    const messages = socketMessages(clientSide.peerSocket);
+    const closed = nextClose(clientSide.peerSocket);
+    const first = serializePluginBackendChannelDataEnvelope({ sequence: 1 });
+    const second = serializePluginBackendChannelDataEnvelope({ sequence: 2 });
+
+    upstreamSide.peerSocket.send(first);
+    upstreamSide.peerSocket.send(second, () => { upstreamSide.peerSocket.close(1000, "complete"); });
+
+    await expect(messages.next()).resolves.toBe(first);
+    await expect(messages.next()).resolves.toBe(second);
+    await closed;
+    expect(onClosed).toHaveBeenCalledOnce();
   });
 
   it("closes both directions for binary or invalid-direction frames", async () => {
@@ -210,6 +230,25 @@ function nextMessage(socket: WebSocket): Promise<string> {
       resolve(rawDataToString(data));
     });
   });
+}
+
+function socketMessages(socket: WebSocket): { next(): Promise<string> } {
+  const queued: string[] = [];
+  const waiters: ((value: string) => void)[] = [];
+  socket.on("message", (data) => {
+    const value = rawDataToString(data);
+    const waiter = waiters.shift();
+    if (waiter === undefined) queued.push(value);
+    else waiter(value);
+  });
+  return {
+    next: () => {
+      const value = queued.shift();
+      return value === undefined
+        ? new Promise<string>((resolve) => { waiters.push(resolve); })
+        : Promise.resolve(value);
+    },
+  };
 }
 
 function rawDataToString(data: RawData): string {

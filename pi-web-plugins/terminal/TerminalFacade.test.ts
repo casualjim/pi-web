@@ -40,12 +40,13 @@ describe("Terminal facade", () => {
       if (operation === "terminal.run") return Promise.resolve(runJson(succeededRun));
       return Promise.reject(new Error(`unexpected operation ${operation}`));
     });
-    const openTerminal = vi.fn();
+    const navigateWorkspaceContribution = vi.fn();
     const terminal = new TerminalFacade().createWorkspaceTerminal({
       origin: "actions",
+      registrationPluginId: "terminal",
       workspace,
       backend: backend(request),
-      host: { openTerminal },
+      host: { navigateWorkspaceContribution },
     });
 
     const handle = await terminal.runCommand({ title: "Build", command: "npm run build", metadata: { source: "task" }, open: true });
@@ -56,7 +57,11 @@ describe("Terminal facade", () => {
       command: "npm run build",
       metadata: { source: "task" },
     }, undefined);
-    expect(openTerminal).toHaveBeenCalledWith(workspace, { terminalId: "t1" });
+    expect(navigateWorkspaceContribution).toHaveBeenCalledWith(workspace, {
+      contributionId: "terminal:workspace.terminal",
+      navigationAliases: ["core:workspace.terminal"],
+      query: { terminal: "t1", start: undefined },
+    });
     await expect(handle.completed).resolves.toEqual(succeededRun);
   });
 
@@ -70,9 +75,10 @@ describe("Terminal facade", () => {
     const facade = new TerminalFacade({ pollIntervalMs: 25 });
     const terminal = facade.createWorkspaceTerminal({
       origin: "actions",
+      registrationPluginId: "terminal",
       workspace,
       backend: backend(request),
-      host: { openTerminal: vi.fn() },
+      host: { navigateWorkspaceContribution: vi.fn() },
     });
 
     const handle = await terminal.runCommand({ title: "Build", command: "npm run build" });
@@ -91,9 +97,10 @@ describe("Terminal facade", () => {
     });
     const terminal = new TerminalFacade({ pollIntervalMs: 25 }).createWorkspaceTerminal({
       origin: "actions",
+      registrationPluginId: "terminal",
       workspace,
       backend: backend(request),
-      host: { openTerminal: vi.fn() },
+      host: { navigateWorkspaceContribution: vi.fn() },
     });
 
     const handle = await terminal.runCommand({ title: "Build", command: "npm run build" });
@@ -101,6 +108,39 @@ describe("Terminal facade", () => {
     await vi.advanceTimersByTimeAsync(25);
     await completion;
     expect(request.mock.calls.filter(([operation]) => operation === "terminal.get-run")).toHaveLength(1);
+  });
+
+  it("owns explicit-open start sequencing and Terminal navigation query semantics", () => {
+    const navigateWorkspaceContribution = vi.fn();
+    const terminal = new TerminalFacade().createWorkspaceTerminal({
+      origin: "actions",
+      registrationPluginId: "machine.remote.terminal",
+      workspace,
+      backend: backend(vi.fn(() => Promise.resolve(null))),
+      host: { navigateWorkspaceContribution },
+    });
+
+    terminal.open();
+    terminal.open();
+    terminal.open({ terminalId: "selected" });
+
+    expect(navigateWorkspaceContribution.mock.calls).toEqual([
+      [workspace, {
+        contributionId: "machine.remote.terminal:workspace.terminal",
+        navigationAliases: ["core:workspace.terminal"],
+        query: { start: "1" },
+      }],
+      [workspace, {
+        contributionId: "machine.remote.terminal:workspace.terminal",
+        navigationAliases: ["core:workspace.terminal"],
+        query: { start: "2" },
+      }],
+      [workspace, {
+        contributionId: "machine.remote.terminal:workspace.terminal",
+        navigationAliases: ["core:workspace.terminal"],
+        query: { terminal: "selected", start: undefined },
+      }],
+    ]);
   });
 
   it("lists command runs with only plugin-owned scoped filters", async () => {
@@ -124,9 +164,10 @@ describe("Terminal facade", () => {
     const facade = new TerminalFacade();
     expect(() => facade.createWorkspaceTerminal({
       origin: "actions",
+      registrationPluginId: "terminal",
       workspace,
       backend: { request: () => Promise.resolve(null) },
-      host: { openTerminal: vi.fn() },
+      host: { navigateWorkspaceContribution: vi.fn() },
     })).toThrow("Required Terminal paired backend capability v1 is unavailable");
   });
 });

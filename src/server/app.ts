@@ -34,6 +34,7 @@ import { MachineService } from "./machines/machineService.js";
 import { registerMachineRoutes } from "./machines/machineRoutes.js";
 import { registerMachineProxyRoutes } from "./machines/machineProxyRoutes.js";
 import { registerPluginBackendChannelProxyRoutes } from "./plugins/pluginBackendChannelProxyRoutes.js";
+import { installPluginBackendChannelWebSocketPayloadLimit } from "./webSocketBridge.js";
 import { registerPluginBackendProxyRoutes } from "./plugins/pluginBackendProxyRoutes.js";
 import { proxyMachinePluginAsset, registerMachinePluginProxyRoutes } from "./machines/machinePluginProxyRoutes.js";
 import type { Project, WorkspaceEffectiveConfig, WorkspaceProviderResolution } from "./types.js";
@@ -167,6 +168,7 @@ export async function buildApp(deps: AppDependencies = {}): Promise<FastifyInsta
     threshold: 1024,
   });
   await app.register(fastifyWebsocket);
+  installPluginBackendChannelWebSocketPayloadLimit(app.websocketServer);
 
   const projects = deps.projects ?? new ProjectService(new ProjectStore());
   const configService = deps.config ?? createFilePiWebConfigService();

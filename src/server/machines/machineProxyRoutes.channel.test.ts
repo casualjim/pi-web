@@ -3,9 +3,12 @@ import fastifyWebsocket from "@fastify/websocket";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  parsePluginBackendChannelServerEnvelope,
+  PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   serializePluginBackendChannelOpenEnvelope,
   serializePluginBackendChannelReadyEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
+import { PluginBackendChannelProxyAdmissionPool } from "../plugins/pluginBackendChannelProxyAdmission.js";
 import type { MachineClient } from "./machineClient.js";
 import { registerMachineProxyRoutes } from "./machineProxyRoutes.js";
 
@@ -29,7 +32,7 @@ afterEach(async () => {
 
 describe("machine plugin backend channel proxy", () => {
   it("forwards the sole generic federated channel route with bounded host envelopes", async () => {
-    const paths: string[] = [];
+    const connections: { path: string; maxPayload: number | undefined }[] = [];
     let resolveRemoteOpen: ((value: string) => void) | undefined;
     const remoteOpen = new Promise<string>((resolve) => { resolveRemoteOpen = resolve; });
     const remoteConnected = new Promise<WebSocket>((resolve) => {
@@ -45,9 +48,9 @@ describe("machine plugin backend channel proxy", () => {
     const client: MachineClient = {
       request: () => Promise.reject(new Error("HTTP not expected")),
       requestJson: () => Promise.reject(new Error("HTTP not expected")),
-      connectWebSocket(path) {
-        paths.push(path);
-        const socket = new WebSocket(`${webSocketServerUrl(remoteServer)}${path}`);
+      connectWebSocket(path, options) {
+        connections.push({ path, maxPayload: options?.maxPayload });
+        const socket = new WebSocket(`${webSocketServerUrl(remoteServer)}${path}`, options);
         sockets.push(socket);
         return socket;
       },
@@ -70,7 +73,62 @@ describe("machine plugin backend channel proxy", () => {
     const browserReady = nextMessage(browser);
     remote.send(ready);
     await expect(browserReady).resolves.toBe(ready);
-    expect(paths).toEqual(["/api/plugin-backends/terminal/projects/p%201/workspaces/w%201/channels/terminal.attach"]);
+    expect(connections).toEqual([{
+      path: "/api/plugin-backends/terminal/projects/p%201/workspaces/w%201/channels/terminal.attach",
+      maxPayload: PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+    }]);
+  });
+
+  it("reserves federation admission before resolving the remote client", async () => {
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ maxTotal: 1, openTimeoutMs: 1_000 });
+    let remoteClientCalls = 0;
+    let resolveRemoteClientCalled: (() => void) | undefined;
+    const remoteClientCalled = new Promise<void>((resolve) => { resolveRemoteClientCalled = resolve; });
+    const unresolved = new Promise<MachineClient | undefined>(() => { /* Keep remote lookup pending. */ });
+    registerMachineProxyRoutes(app, {
+      remoteClient() {
+        remoteClientCalls += 1;
+        resolveRemoteClientCalled?.();
+        return unresolved;
+      },
+    }, admissions);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const first = new WebSocket(`${fastifyServerUrl(app)}/api/machines/remote/plugin-backends/terminal/projects/p/workspaces/w/channels/attach`);
+    sockets.push(first);
+    await waitForOpen(first);
+    await remoteClientCalled;
+    expect(admissions.activeCount).toBe(1);
+
+    const second = new WebSocket(`${fastifyServerUrl(app)}/api/machines/remote/plugin-backends/terminal/projects/p/workspaces/w/channels/attach`);
+    sockets.push(second);
+    const errorFrame = nextMessage(second).then((text) => parsePluginBackendChannelServerEnvelope(text));
+    const rejected = nextClose(second);
+    await waitForOpen(second);
+    await expect(errorFrame).resolves.toMatchObject({ kind: "error", code: "admission-denied" });
+    await expect(rejected).resolves.toMatchObject({ code: 1013 });
+    expect(remoteClientCalls).toBe(1);
+    expect(admissions.activeCount).toBe(1);
+
+    const firstClosed = nextClose(first);
+    first.close();
+    await firstClosed;
+    expect(admissions.activeCount).toBe(0);
+  });
+
+  it("times out unresolved federation setup and releases its admission", async () => {
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ openTimeoutMs: 30 });
+    registerMachineProxyRoutes(app, {
+      remoteClient: () => new Promise<MachineClient | undefined>(() => { /* Keep remote lookup pending. */ }),
+    }, admissions);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const browser = new WebSocket(`${fastifyServerUrl(app)}/api/machines/remote/plugin-backends/terminal/projects/p/workspaces/w/channels/attach`);
+    sockets.push(browser);
+    const closed = nextClose(browser);
+    await waitForOpen(browser);
+    await expect(closed).resolves.toMatchObject({ code: 1011 });
+    expect(admissions.activeCount).toBe(0);
   });
 });
 
@@ -92,6 +150,14 @@ function nextMessage(socket: WebSocket): Promise<string> {
     socket.once("message", (data, isBinary) => {
       if (isBinary) throw new Error("Expected text frame");
       resolve(rawDataToString(data));
+    });
+  });
+}
+
+function nextClose(socket: WebSocket): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve) => {
+    socket.once("close", (code, reason) => {
+      resolve({ code, reason: reason.toString("utf8") });
     });
   });
 }

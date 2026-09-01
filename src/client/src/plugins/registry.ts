@@ -15,6 +15,11 @@ type WorkspacePanelScope = (
 const workspacePanelScopes = new WeakMap<WorkspacePanelContext, WorkspacePanelScope>();
 const workspaceLabelScopes = new WeakMap<WorkspaceLabelContext, (binding: WorkspacePluginBinding) => WorkspaceLabelContext>();
 
+export interface PluginRegistryOptions {
+  /** Host lifecycle gate for one registration scope; kernel registrations may remain available. */
+  isContributionEnabled?: (pluginId: string, machineId: string | undefined) => boolean;
+}
+
 type RegisteredPluginAction = Omit<PluginAction, "id"> & {
   id: QualifiedContributionId;
   pluginId: string;
@@ -35,6 +40,8 @@ export class PluginRegistry {
   private readonly gatewayMachineSpecificPluginIds = new Set<string>();
   private readonly remoteMachineSpecificPluginIds = new Map<string, Set<string>>();
   private readonly contributionIds = new Set<QualifiedContributionId>();
+
+  constructor(private readonly options: PluginRegistryOptions = {}) {}
 
   register(registration: PiWebPluginRegistration, validateActivation?: (activation: PluginActivationResult) => void): void {
     const { plugin } = registration;
@@ -115,7 +122,9 @@ export class PluginRegistry {
         localId: action.localId,
         ...(action.machineId === undefined ? {} : { machineId: action.machineId }),
         title: action.title,
-        run: () => action.run(scopedContext),
+        run: () => this.isContributionActive(action.pluginId, action.machineId, runtimeContextMachineId(context), action.sourcePluginId)
+          ? action.run(pluginRuntimeContextFor(context, action.pluginId))
+          : undefined,
       };
       if (action.description !== undefined) qualified.description = action.description;
       if (action.shortcut !== undefined) qualified.shortcut = action.shortcut;
@@ -174,11 +183,15 @@ export class PluginRegistry {
   }
 
   getThemes(): QualifiedThemeContribution[] {
-    return [...this.themes].sort((left, right) => (left.order ?? 1000) - (right.order ?? 1000) || left.name.localeCompare(right.name));
+    return this.themes
+      .filter((theme) => this.isContributionEnabled(theme.pluginId, undefined))
+      .sort((left, right) => (left.order ?? 1000) - (right.order ?? 1000) || left.name.localeCompare(right.name));
   }
 
   getThemePairs(): QualifiedThemePairContribution[] {
-    return [...this.themePairs].sort((left, right) => (left.order ?? 1000) - (right.order ?? 1000) || left.name.localeCompare(right.name));
+    return this.themePairs
+      .filter((pair) => this.isContributionEnabled(pair.pluginId, undefined))
+      .sort((left, right) => (left.order ?? 1000) - (right.order ?? 1000) || left.name.localeCompare(right.name));
   }
 
   getWorkspaceLabelItems(context: WorkspaceLabelContext): WorkspaceLabelItem[] {
@@ -248,7 +261,9 @@ export class PluginRegistry {
         const contextForPanel = scopedContext(context);
         return invalidation === undefined ? onInvalidate(contextForPanel) : onInvalidate(contextForPanel, invalidation);
       } }),
-      render: (context: WorkspacePanelContext) => panel.render(scopedContext(context)),
+      render: (context: WorkspacePanelContext) => this.isContributionActive(pluginId, machineId, context.machine.id, sourcePluginId)
+        ? panel.render(scopedContext(context))
+        : html``,
     };
   }
 
@@ -308,8 +323,13 @@ export class PluginRegistry {
   }
 
   private isContributionActive(pluginId: string, machineId: string | undefined, selectedMachineId: string, sourcePluginId: string | undefined): boolean {
+    if (!this.isContributionEnabled(pluginId, machineId)) return false;
     if (machineId === undefined) return !this.isGatewayPluginHiddenForMachine(pluginId, selectedMachineId);
     return machineId === selectedMachineId && !this.isRemotePluginHiddenByGateway(sourcePluginId, machineId);
+  }
+
+  private isContributionEnabled(pluginId: string, machineId: string | undefined): boolean {
+    return this.options.isContributionEnabled?.(pluginId, machineId) ?? true;
   }
 
   private isRemoteDuplicateHiddenByGateway(sourcePluginId: string | undefined, machineId: string | undefined, machineSpecific: boolean): boolean {

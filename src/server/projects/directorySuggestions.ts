@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
-import { readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, stat } from "node:fs/promises";
 import type { ClientFileSuggestion } from "../types.js";
 
 export function expandUserPath(path: string): string {
@@ -33,4 +33,21 @@ export async function listDirectorySuggestions(query = ""): Promise<ClientFileSu
   }
 
   return suggestions.sort((a, b) => a.path.localeCompare(b.path)).slice(0, 80);
+}
+
+export async function createProjectDirectory(path: string): Promise<ClientFileSuggestion> {
+  const raw = path.trim();
+  if (raw === "") throw new Error("Directory path is required");
+  const target = expandUserPath(raw);
+  try {
+    await mkdir(target);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EEXIST")) throw new Error("Directory already exists", { cause: error });
+    throw error;
+  }
+  return { path: `${target}/`, kind: "other" };
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }

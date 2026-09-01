@@ -18,6 +18,9 @@ export class AddWorkspaceDialog extends LitElement {
   @state() private loading = false;
   @state() private browseError = "";
   @state() private name = "";
+  @state() private folderForm = false;
+  @state() private folderName = "";
+  @state() private folderError = "";
   @query("input.name") private nameInput?: HTMLInputElement;
 
   private browseRequestId = 0;
@@ -54,6 +57,20 @@ export class AddWorkspaceDialog extends LitElement {
     this.onSubmit?.(trimTrailingSlash(this.location), this.name.trim());
   }
 
+  private async createFolder(): Promise<void> {
+    const name = this.folderName.trim();
+    if (name === "") return;
+    try {
+      const created = await api.projectDirectoryCreate(`${trimTrailingSlash(this.location)}/${name}`, this.machineId);
+      this.folderForm = false;
+      this.folderName = "";
+      this.folderError = "";
+      this.browse(trimTrailingSlash(created.path));
+    } catch (error) {
+      this.folderError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   private canSubmit(): boolean {
     return !this.busy && this.name.trim() !== "" && this.location !== "";
   }
@@ -82,6 +99,22 @@ export class AddWorkspaceDialog extends LitElement {
             Create in
             <output class="location">${this.location}</output>
           </label>
+          <div class="toolbar">
+            <button @click=${() => { this.folderForm = !this.folderForm; this.folderError = ""; }}>New folder</button>
+          </div>
+          ${this.folderForm ? html`
+            <div class="new-folder">
+              <input
+                class="folder-name"
+                placeholder="new-folder"
+                .value=${this.folderName}
+                @input=${(event: InputEvent) => { if (event.target instanceof HTMLInputElement) this.folderName = event.target.value; }}
+                @keydown=${(event: KeyboardEvent) => { if (event.key === "Enter") { event.preventDefault(); void this.createFolder(); } }}
+              />
+              <button @click=${() => { void this.createFolder(); }}>Create</button>
+            </div>
+            ${this.folderError === "" ? null : html`<div class="hint error">${this.folderError}</div>`}
+          ` : null}
           <div class="browser" role="listbox" aria-label="Folders">
             ${parent === this.location ? null : html`
               <button role="option" aria-selected="false" @click=${() => { this.browse(parent); }}>../</button>
@@ -126,6 +159,9 @@ export class AddWorkspaceDialog extends LitElement {
     .location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text); font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     input { box-sizing: border-box; width: 100%; border: 1px solid var(--pi-border); border-radius: 10px; background: var(--pi-bg); color: var(--pi-text); padding: 9px; font: var(--pi-control-font-size, 16px) var(--pi-control-monospace-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
     .browser { min-height: 90px; max-height: 320px; overflow: auto; border: 1px solid var(--pi-border); border-radius: 10px; background: var(--pi-surface); }
+    .toolbar { display: flex; justify-content: start; }
+    .new-folder { display: flex; gap: 8px; }
+    .new-folder input { flex: 1; width: auto; }
     .browser button { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-bottom: 1px solid var(--pi-border); border-radius: 0; background: transparent; color: var(--pi-text); padding: 8px 10px; text-align: left; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .browser button:hover { background: var(--pi-selection-bg); }
     .hint { padding: 12px; color: var(--pi-muted); }

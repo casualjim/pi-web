@@ -17,3 +17,5 @@ dist/
 
 # Dev docs site staging output (scripts/build-docs-dev.mjs).
 /docs/.deploy/
+.pi/heimdall.json
+mise.toml

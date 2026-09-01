@@ -56,6 +56,43 @@ describe("add-workspace-dialog", () => {
     expect(createButton(dialog).disabled).toBe(false);
   });
 
+  it("creates a new folder and browses into it", async () => {
+    const dialog = await mountDialog();
+    vi.spyOn(api, "projectDirectoryCreate").mockResolvedValue({ path: "/work/newsite/", kind: "other" });
+
+    toolbarButton(dialog, "New folder").click();
+    await settleRenderedDialog(dialog);
+    const input = requiredElement(dialog.shadowRoot?.querySelector<HTMLInputElement>("input.folder-name"), "folder name input");
+    input.value = "newsite";
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    await settleRenderedDialog(dialog);
+    toolbarButton(dialog, "Create").click();
+
+    await vi.waitFor(() => {
+      expect(location(dialog).textContent).toBe("/work/newsite");
+    });
+    expect(api.projectDirectoryCreate).toHaveBeenCalledWith("/work/newsite", "local");
+    expect(api.projectDirectories).toHaveBeenCalledWith("/work/newsite/", "local");
+  });
+
+  it("shows the folder creation failure and stays on the current folder", async () => {
+    const dialog = await mountDialog();
+    vi.spyOn(api, "projectDirectoryCreate").mockRejectedValue(new Error("Directory already exists"));
+
+    toolbarButton(dialog, "New folder").click();
+    await settleRenderedDialog(dialog);
+    const input = requiredElement(dialog.shadowRoot?.querySelector<HTMLInputElement>("input.folder-name"), "folder name input");
+    input.value = "proj";
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    await settleRenderedDialog(dialog);
+    toolbarButton(dialog, "Create").click();
+
+    await vi.waitFor(() => {
+      expect(dialog.shadowRoot?.querySelector(".hint.error")?.textContent).toContain("Directory already exists");
+    });
+    expect(location(dialog).textContent).toBe("/work");
+  });
+
   it("shows the browse failure instead of an empty folder list", async () => {
     const dialog = await mountDialog();
     vi.mocked(api.projectDirectories).mockRejectedValue(new Error("permission denied"));
@@ -76,6 +113,7 @@ async function mountDialog(props: AddWorkspaceDialogProps = {}): Promise<AddWork
     { path: "/work/proj/", kind: "other" },
     { path: "/work/other/", kind: "other" },
   ]);
+  vi.spyOn(api, "projectDirectoryCreate").mockResolvedValue({ path: "/work/created/", kind: "other" });
   const dialog = new AddWorkspaceDialog();
   dialog.projectPath = "/work/proj";
   if (props.onSubmit !== undefined) dialog.onSubmit = props.onSubmit;
@@ -100,4 +138,10 @@ function nameInput(dialog: AddWorkspaceDialog): HTMLInputElement {
 
 function createButton(dialog: AddWorkspaceDialog): HTMLButtonElement {
   return requiredElement(dialog.shadowRoot?.querySelector<HTMLButtonElement>("button.primary"), "add-workspace-dialog create button");
+}
+
+function toolbarButton(dialog: AddWorkspaceDialog, label: string): HTMLButtonElement {
+  const buttons = [...dialog.shadowRoot?.querySelectorAll<HTMLButtonElement>(".toolbar button, .new-folder button") ?? []];
+  const match = buttons.find((candidate) => candidate.textContent.trim() === label);
+  return requiredElement(match, `add-workspace-dialog "${label}" button`);
 }

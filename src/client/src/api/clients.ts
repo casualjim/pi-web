@@ -153,6 +153,7 @@ export const projectsApi = {
   addProject: (path: string, name?: string, create?: boolean, machineId = "local") => request(`${machinePrefix(machineId)}/projects`, parseProject, { method: "POST", body: JSON.stringify({ path, name, create }) }),
   closeProject: (projectId: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}`, parseClosed, { method: "DELETE" }),
   projectDirectories: (query: string, machineId = "local") => request(`${machinePrefix(machineId)}/project-directories?q=${encodeURIComponent(query)}`, arrayOf(parseFileSuggestion)),
+  projectDirectoryCreate: (path: string, machineId = "local") => request(`${machinePrefix(machineId)}/project-directories`, parseFileSuggestion, { method: "POST", body: JSON.stringify({ path }) }),
 };
 
 function workspaceResolution(projectId: string, machineId = "local") {

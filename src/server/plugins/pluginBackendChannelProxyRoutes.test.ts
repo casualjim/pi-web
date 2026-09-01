@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   parsePluginBackendChannelServerEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+  serializePluginBackendChannelDataEnvelope,
   serializePluginBackendChannelOpenEnvelope,
   serializePluginBackendChannelReadyEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
@@ -31,7 +32,8 @@ afterEach(async () => {
 });
 
 describe("local plugin backend channel proxy", () => {
-  it("encodes the daemon path and boundedly bridges channel host envelopes", async () => {
+  it("bridges data beyond the transport-connect deadline and releases after clean physical teardown", async () => {
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ transportConnectTimeoutMs: 250 });
     const connections: { path: string; maxPayload: number | undefined }[] = [];
     const upstreamConnected = new Promise<WebSocket>((resolve) => {
       upstream.once("connection", (socket) => {
@@ -46,7 +48,7 @@ describe("local plugin backend channel proxy", () => {
         sockets.push(socket);
         return socket;
       },
-    });
+    }, "/api", admissions);
     await app.listen({ host: "127.0.0.1", port: 0 });
 
     const browser = new WebSocket(`${fastifyServerUrl(app)}/api/plugin-backends/terminal.tools/projects/project%20one/workspaces/workspace%20one/channels/terminal.attach`);
@@ -62,14 +64,31 @@ describe("local plugin backend channel proxy", () => {
     const forwardedReady = nextMessage(browser);
     upstreamSocket.send(ready);
     await expect(forwardedReady).resolves.toBe(ready);
+    expect(admissions.activeCount).toBe(1);
+
+    await delay(350);
+    const lateClientData = serializePluginBackendChannelDataEnvelope({ direction: "upstream" });
+    const forwardedLateClientData = nextMessage(upstreamSocket);
+    browser.send(lateClientData);
+    await expect(forwardedLateClientData).resolves.toBe(lateClientData);
+    const lateServerData = serializePluginBackendChannelDataEnvelope({ direction: "browser" });
+    const forwardedLateServerData = nextMessage(browser);
+    upstreamSocket.send(lateServerData);
+    await expect(forwardedLateServerData).resolves.toBe(lateServerData);
     expect(connections).toEqual([{
       path: "/plugin-backends/terminal.tools/projects/project%20one/workspaces/workspace%20one/channels/terminal.attach",
       maxPayload: PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
     }]);
+
+    const browserClosed = nextClose(browser);
+    const upstreamClosed = nextClose(upstreamSocket);
+    browser.close(1000, "complete");
+    await Promise.all([browserClosed, upstreamClosed]);
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
   });
 
   it("rejects excess proxy admissions before opening another daemon socket", async () => {
-    const admissions = new PluginBackendChannelProxyAdmissionPool({ maxTotal: 1, openTimeoutMs: 1_000 });
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ maxTotal: 1, transportConnectTimeoutMs: 1_000 });
     let connectionCount = 0;
     let resolveDaemonConnected: ((socket: WebSocket) => void) | undefined;
     const daemonConnected = new Promise<WebSocket>((resolve) => { resolveDaemonConnected = resolve; });
@@ -111,7 +130,7 @@ describe("local plugin backend channel proxy", () => {
     await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
   });
 
-  it("times out and releases an admission when the daemon WebSocket upgrade stalls", async () => {
+  it("times out and releases when the daemon WebSocket upgrade stalls", async () => {
     const stalledSockets = new Set<NetSocket>();
     let resolveStalledClosed: (() => void) | undefined;
     const stalledClosed = new Promise<void>((resolve) => { resolveStalledClosed = resolve; });
@@ -124,7 +143,7 @@ describe("local plugin backend channel proxy", () => {
       socket.resume();
     });
     await listen(stalled);
-    const admissions = new PluginBackendChannelProxyAdmissionPool({ openTimeoutMs: 30 });
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ transportConnectTimeoutMs: 100 });
     try {
       registerPluginBackendChannelProxyRoutes(app, {
         connectWebSocket(_path, options) {
@@ -141,7 +160,56 @@ describe("local plugin backend channel proxy", () => {
       sockets.push(browser);
       const closed = nextClose(browser);
       await waitForOpen(browser);
-      await expect(closed).resolves.toMatchObject({ code: 1011 });
+      const closeEvent = await closed;
+      expect(closeEvent.code).toBe(1011);
+      expect(closeEvent.reason).toContain("transport connection timed out");
+      await stalledClosed;
+      await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
+      expect(stalledSockets.size).toBe(0);
+    } finally {
+      for (const socket of stalledSockets) socket.destroy();
+      await close(stalled);
+    }
+  });
+
+  it("cancels a connecting daemon socket when the downstream closes early", async () => {
+    const stalledSockets = new Set<NetSocket>();
+    let resolveAccepted: (() => void) | undefined;
+    const accepted = new Promise<void>((resolve) => { resolveAccepted = resolve; });
+    let resolveStalledClosed: (() => void) | undefined;
+    const stalledClosed = new Promise<void>((resolve) => { resolveStalledClosed = resolve; });
+    const stalled = createServer((socket) => {
+      stalledSockets.add(socket);
+      resolveAccepted?.();
+      socket.once("close", () => {
+        stalledSockets.delete(socket);
+        resolveStalledClosed?.();
+      });
+      socket.resume();
+    });
+    await listen(stalled);
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ transportConnectTimeoutMs: 1_000 });
+    try {
+      registerPluginBackendChannelProxyRoutes(app, {
+        connectWebSocket(_path, options) {
+          const address = stalled.address();
+          if (address === null || typeof address === "string") throw new Error("Expected TCP server address");
+          const socket = new WebSocket(`ws://127.0.0.1:${String(address.port)}`, options);
+          sockets.push(socket);
+          return socket;
+        },
+      }, "/api", admissions);
+      await app.listen({ host: "127.0.0.1", port: 0 });
+
+      const browser = new WebSocket(`${fastifyServerUrl(app)}/api/plugin-backends/terminal/projects/p/workspaces/w/channels/attach`);
+      sockets.push(browser);
+      await waitForOpen(browser);
+      await accepted;
+      expect(admissions.activeCount).toBe(1);
+
+      const browserClosed = nextClose(browser);
+      browser.close(1000, "cancel setup");
+      await browserClosed;
       await stalledClosed;
       await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
       expect(stalledSockets.size).toBe(0);
@@ -199,6 +267,10 @@ function close(server: NetServer): Promise<void> {
       else resolve();
     });
   });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 function webSocketServerUrl(server: WebSocketServer): string {

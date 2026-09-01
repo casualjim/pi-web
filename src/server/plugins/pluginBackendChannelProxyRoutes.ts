@@ -1,14 +1,14 @@
 import type { FastifyInstance } from "fastify";
-import { WebSocket } from "ws";
+import type { WebSocket } from "ws";
 import { PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES, PLUGIN_BACKEND_CHANNEL_ROUTE_PATH } from "../../shared/pluginBackendProtocol.js";
-import { bridgePluginBackendChannelSockets, closePluginBackendChannelWebSocket } from "../webSocketBridge.js";
 import {
-  PluginBackendChannelProxyAdmissionError,
   type PluginBackendChannelProxyAdmissionPool,
-  type PluginBackendChannelProxyLease,
   pluginBackendChannelProxyAdmissionPool,
-  rejectPluginBackendChannelProxyAdmission,
 } from "./pluginBackendChannelProxyAdmission.js";
+import {
+  coordinatePluginBackendChannelProxy,
+  PluginBackendChannelProxyConnectionError,
+} from "./pluginBackendChannelProxyCoordinator.js";
 
 interface PluginBackendChannelProxyParams {
   pluginId: string;
@@ -32,34 +32,30 @@ export function registerPluginBackendChannelProxyRoutes(
     `${prefix}${PLUGIN_BACKEND_CHANNEL_ROUTE_PATH}`,
     { websocket: true },
     (socket, request) => {
-      let lease: PluginBackendChannelProxyLease;
-      try {
-        lease = admissions.admit(socket, {
+      const upstreamPath = daemonPluginBackendChannelPath(request.params);
+      void coordinatePluginBackendChannelProxy({
+        downstream: socket,
+        admissions,
+        scope: {
           authorityId: "local",
           pluginId: request.params.pluginId,
           projectId: request.params.projectId,
           workspaceId: request.params.workspaceId,
-        });
-      } catch (error) {
-        if (error instanceof PluginBackendChannelProxyAdmissionError) {
-          rejectPluginBackendChannelProxyAdmission(socket, error);
-          return;
-        }
-        void closePluginBackendChannelWebSocket(socket, 1011, `Plugin backend channel admission failed: ${errorMessage(error)}`, { terminateImmediately: true });
-        return;
-      }
-
-      try {
-        const upstream = daemon.connectWebSocket(
-          daemonPluginBackendChannelPath(request.params),
-          { maxPayload: PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES },
-        );
-        if (!lease.attachUpstream(upstream)) return;
-        bridgePluginBackendChannelSockets(socket, upstream, { onClosed: () => { lease.release(); } });
-        lease.bridgeStarted();
-      } catch (error) {
-        lease.fail(1011, `Session daemon unavailable: ${errorMessage(error)}`);
-      }
+        },
+        connectUpstream() {
+          try {
+            return daemon.connectWebSocket(upstreamPath, {
+              maxPayload: PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+            });
+          } catch (error) {
+            throw new PluginBackendChannelProxyConnectionError(
+              1011,
+              `Session daemon unavailable: ${errorMessage(error)}`,
+              { cause: error },
+            );
+          }
+        },
+      });
     },
   );
 }

@@ -136,7 +136,7 @@ export function createBoundedTextWebSocketSender(
       fail(error instanceof Error ? error : new Error(String(error)));
     }
   };
-  socket.on("open", flush);
+  if (socket.readyState === WebSocket.CONNECTING) socket.once("open", flush);
 
   const send = (text: string): void => {
     if (failure !== undefined || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) {
@@ -174,25 +174,38 @@ export function createBoundedTextWebSocketSender(
 export interface PluginBackendChannelBridgeOptions {
   /** Already validated client frames captured while an asynchronous upstream was resolved. */
   initialClientFrames?: readonly string[];
-  /** Invoked once after failure cleanup or a propagated close has drained accepted frames. */
-  onClosed?: () => void;
 }
 
-/** Validate and boundedly bridge generic channel envelopes without reading plugin data semantics. */
+/**
+ * Validate and boundedly bridge generic channel envelopes without reading
+ * plugin data semantics. The returned lifetime resolves only after both
+ * physical sockets have closed and accepted clean-close frames have drained.
+ */
 export function bridgePluginBackendChannelSockets(
   client: WebSocket,
   upstream: WebSocket,
   options: PluginBackendChannelBridgeOptions = {},
-): void {
+): Promise<void> {
   setPluginBackendChannelSocketPayloadLimit(client, PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES);
   let closing = false;
   let closeNotified = false;
   let receivedClientFrame = false;
+  let resolveCompletion: () => void = () => undefined;
+  const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
   const isClosing = (): boolean => closing;
+  const detachBridgeListeners = (): void => {
+    client.off("message", onClientMessage);
+    upstream.off("message", onUpstreamMessage);
+    client.off("close", onClientClose);
+    upstream.off("close", onUpstreamClose);
+    client.off("error", onClientError);
+    upstream.off("error", onUpstreamError);
+  };
   const notifyClosed = (): void => {
     if (closeNotified) return;
     closeNotified = true;
-    options.onClosed?.();
+    detachBridgeListeners();
+    resolveCompletion();
   };
   const fail = (code: number, reason: string): void => {
     if (closing) return;
@@ -218,15 +231,15 @@ export function bridgePluginBackendChannelSockets(
     }
     sendToUpstream(text);
   };
-  client.on("message", (data, isBinary) => {
+  function onClientMessage(data: RawData, isBinary: boolean): void {
     try {
       if (isBinary) throw new BinaryPluginBackendChannelFrameError();
       forwardClientText(decodeTextWebSocketFrame(data));
     } catch (error) {
       fail(error instanceof BinaryPluginBackendChannelFrameError ? 1003 : 1008, bridgeErrorMessage(error));
     }
-  });
-  upstream.on("message", (data, isBinary) => {
+  }
+  function onUpstreamMessage(data: RawData, isBinary: boolean): void {
     try {
       if (isBinary) throw new BinaryPluginBackendChannelFrameError();
       const text = decodeTextWebSocketFrame(data);
@@ -235,19 +248,29 @@ export function bridgePluginBackendChannelSockets(
     } catch (error) {
       fail(error instanceof BinaryPluginBackendChannelFrameError ? 1003 : 1008, bridgeErrorMessage(error));
     }
-  });
-  client.once("close", (code, reason) => {
+  }
+  function onClientClose(code: number, reason: Buffer): void {
     if (closing) return;
     closing = true;
     void propagatePluginChannelClose(upstream, sendToUpstream, code, decodeCloseReason(reason)).finally(notifyClosed);
-  });
-  upstream.once("close", (code, reason) => {
+  }
+  function onUpstreamClose(code: number, reason: Buffer): void {
     if (closing) return;
     closing = true;
     void propagatePluginChannelClose(client, sendToClient, code, decodeCloseReason(reason)).finally(notifyClosed);
-  });
-  client.once("error", (error) => { fail(1011, `Plugin backend channel client transport failed: ${bridgeErrorMessage(error)}`); });
-  upstream.once("error", (error) => { fail(1011, `Plugin backend channel upstream transport failed: ${bridgeErrorMessage(error)}`); });
+  }
+  function onClientError(error: Error): void {
+    fail(1011, `Plugin backend channel client transport failed: ${bridgeErrorMessage(error)}`);
+  }
+  function onUpstreamError(error: Error): void {
+    fail(1011, `Plugin backend channel upstream transport failed: ${bridgeErrorMessage(error)}`);
+  }
+  client.on("message", onClientMessage);
+  upstream.on("message", onUpstreamMessage);
+  client.once("close", onClientClose);
+  upstream.once("close", onUpstreamClose);
+  client.once("error", onClientError);
+  upstream.once("error", onUpstreamError);
 
   for (const text of options.initialClientFrames ?? []) {
     if (isClosing()) break;
@@ -257,6 +280,7 @@ export function bridgePluginBackendChannelSockets(
       fail(1008, bridgeErrorMessage(error));
     }
   }
+  return completion;
 }
 
 async function propagatePluginChannelClose(

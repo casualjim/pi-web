@@ -17,21 +17,14 @@ export interface PluginBackendChannelProxyScope {
 }
 
 export interface PluginBackendChannelProxyAdmissionPoolOptions {
-  openTimeoutMs?: number;
+  transportConnectTimeoutMs?: number;
   maxTotal?: number;
   maxPerPlugin?: number;
   maxPerPluginWorkspace?: number;
 }
 
-export interface PluginBackendChannelProxyLease {
-  readonly active: boolean;
-  /** Resolves when setup fails, the client disconnects, or bridge cleanup completes. */
-  readonly released: Promise<void>;
-  /** Attach the outbound socket while its WebSocket handshake is still bounded. */
-  attachUpstream(upstream: WebSocket): boolean;
-  /** Transfer close/error cleanup to the bounded bridge after its listeners exist. */
-  bridgeStarted(): void;
-  fail(code: number, reason: string): void;
+export interface PluginBackendChannelProxyReservation {
+  readonly transportConnectTimeoutMs: number;
   release(): void;
 }
 
@@ -48,12 +41,12 @@ export class PluginBackendChannelProxyAdmissionError extends Error {
 }
 
 /**
- * Browser/API-process admission is intentionally separate from sessiond's
- * authoritative plugin admission. It bounds sockets while an upstream daemon
- * or federated WebSocket has not completed its own upgrade yet.
+ * Browser/API-process accounting is intentionally separate from sessiond's
+ * authoritative semantic and scoped admission. It only bounds edge transport
+ * ownership while a proxy channel is physically alive.
  */
 export class PluginBackendChannelProxyAdmissionPool {
-  private readonly openTimeoutMs: number;
+  private readonly transportConnectTimeoutMs: number;
   private readonly maxTotal: number;
   private readonly maxPerPlugin: number;
   private readonly maxPerPluginWorkspace: number;
@@ -62,7 +55,11 @@ export class PluginBackendChannelProxyAdmissionPool {
   private readonly byPluginWorkspace = new Map<string, number>();
 
   constructor(options: PluginBackendChannelProxyAdmissionPoolOptions = {}) {
-    this.openTimeoutMs = positiveInteger(options.openTimeoutMs, PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS, "openTimeoutMs");
+    this.transportConnectTimeoutMs = positiveInteger(
+      options.transportConnectTimeoutMs,
+      PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
+      "transportConnectTimeoutMs",
+    );
     this.maxTotal = positiveInteger(options.maxTotal, PLUGIN_BACKEND_CHANNEL_MAX_TOTAL, "maxTotal");
     this.maxPerPlugin = positiveInteger(options.maxPerPlugin, PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN, "maxPerPlugin");
     this.maxPerPluginWorkspace = positiveInteger(
@@ -76,7 +73,7 @@ export class PluginBackendChannelProxyAdmissionPool {
     return this.total;
   }
 
-  admit(client: WebSocket, scope: PluginBackendChannelProxyScope): PluginBackendChannelProxyLease {
+  admit(scope: PluginBackendChannelProxyScope): PluginBackendChannelProxyReservation {
     const pluginCount = this.byPlugin.get(scope.pluginId) ?? 0;
     const workspaceKey = proxyWorkspaceKey(scope);
     const workspaceCount = this.byPluginWorkspace.get(workspaceKey) ?? 0;
@@ -91,14 +88,17 @@ export class PluginBackendChannelProxyAdmissionPool {
     this.total += 1;
     this.byPlugin.set(scope.pluginId, pluginCount + 1);
     this.byPluginWorkspace.set(workspaceKey, workspaceCount + 1);
-    let counted = true;
-    return new ManagedPluginBackendChannelProxyLease(client, this.openTimeoutMs, () => {
-      if (!counted) return;
-      counted = false;
-      this.total -= 1;
-      decrementCount(this.byPlugin, scope.pluginId);
-      decrementCount(this.byPluginWorkspace, workspaceKey);
-    });
+    let active = true;
+    return {
+      transportConnectTimeoutMs: this.transportConnectTimeoutMs,
+      release: () => {
+        if (!active) return;
+        active = false;
+        this.total -= 1;
+        decrementCount(this.byPlugin, scope.pluginId);
+        decrementCount(this.byPluginWorkspace, workspaceKey);
+      },
+    };
   }
 }
 
@@ -113,128 +113,32 @@ export function pluginBackendChannelProxyAdmissionPool(owner: object): PluginBac
   return created;
 }
 
-/** Best-effort attributed rejection followed by immediate physical teardown. */
+/** Send a best-effort attributed rejection, then await immediate physical teardown. */
 export function rejectPluginBackendChannelProxyAdmission(
   socket: WebSocket,
   error: PluginBackendChannelProxyAdmissionError,
-): void {
-  const terminate = (): void => {
-    void closePluginBackendChannelWebSocket(socket, error.closeCode, error.message, { terminateImmediately: true });
-  };
+): Promise<void> {
   if (socket.readyState !== WebSocket.OPEN) {
-    terminate();
-    return;
+    return closePluginBackendChannelWebSocket(socket, error.closeCode, error.message, { terminateImmediately: true });
   }
-  const deadline = setTimeout(terminate, PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS);
-  deadline.unref();
-  try {
-    socket.send(serializePluginBackendChannelErrorEnvelope(error.code, error.message), { binary: false }, () => {
+
+  return new Promise<void>((resolve) => {
+    let teardownStarted = false;
+    function teardown(): void {
+      if (teardownStarted) return;
+      teardownStarted = true;
       clearTimeout(deadline);
-      terminate();
-    });
-  } catch {
-    clearTimeout(deadline);
-    terminate();
-  }
-}
-
-class ManagedPluginBackendChannelProxyLease implements PluginBackendChannelProxyLease {
-  private phase: "active" | "tearing-down" | "released" = "active";
-  private upstream: WebSocket | undefined;
-  private resolveReleased: () => void = () => undefined;
-  readonly released = new Promise<void>((resolve) => { this.resolveReleased = resolve; });
-  private readonly timer: ReturnType<typeof setTimeout>;
-
-  private readonly onClientSetupClosed = (): void => {
-    this.beginTeardown(1001, "Plugin backend channel client disconnected during proxy setup");
-  };
-
-  private readonly onUpstreamSetupClosed = (): void => {
-    this.beginTeardown(1011, "Plugin backend channel upstream disconnected during proxy setup");
-  };
-
-  private readonly onUpstreamOpen = (): void => {
-    clearTimeout(this.timer);
-  };
-
-  constructor(
-    private readonly client: WebSocket,
-    openTimeoutMs: number,
-    private readonly releaseCount: () => void,
-  ) {
-    client.once("close", this.onClientSetupClosed);
-    client.once("error", this.onClientSetupClosed);
-    this.timer = setTimeout(() => {
-      this.fail(1011, `Plugin backend channel proxy handshake timed out after ${String(openTimeoutMs)}ms`);
-    }, openTimeoutMs);
-    this.timer.unref();
-  }
-
-  get active(): boolean {
-    return this.phase === "active";
-  }
-
-  attachUpstream(upstream: WebSocket): boolean {
-    if (!this.active) {
-      void closePluginBackendChannelWebSocket(upstream, 1001, "Plugin backend channel proxy setup was cancelled", { terminateImmediately: true });
-      return false;
+      void closePluginBackendChannelWebSocket(socket, error.closeCode, error.message, { terminateImmediately: true })
+        .then(resolve, resolve);
     }
-    this.upstream = upstream;
-    if (upstream.readyState === WebSocket.OPEN) {
-      clearTimeout(this.timer);
-    } else if (upstream.readyState === WebSocket.CONNECTING) {
-      upstream.once("open", this.onUpstreamOpen);
-    } else {
-      this.fail(1011, "Plugin backend channel upstream was not available");
-      return false;
+    const deadline = setTimeout(teardown, PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS);
+    deadline.unref();
+    try {
+      socket.send(serializePluginBackendChannelErrorEnvelope(error.code, error.message), { binary: false }, teardown);
+    } catch {
+      teardown();
     }
-    upstream.once("close", this.onUpstreamSetupClosed);
-    upstream.once("error", this.onUpstreamSetupClosed);
-    return true;
-  }
-
-  bridgeStarted(): void {
-    if (!this.active) return;
-    this.detachSetupListeners();
-  }
-
-  fail(code: number, reason: string): void {
-    this.beginTeardown(code, reason);
-  }
-
-  /** The bridge calls this only after both physical sockets have closed. */
-  release(): void {
-    this.finalizeRelease();
-  }
-
-  private beginTeardown(code: number, reason: string): void {
-    if (!this.active) return;
-    this.phase = "tearing-down";
-    clearTimeout(this.timer);
-    this.detachSetupListeners();
-    const sockets = this.upstream === undefined ? [this.client] : [this.client, this.upstream];
-    void Promise.allSettled(sockets.map((socket) => closePluginBackendChannelWebSocket(socket, code, reason)))
-      .finally(() => { this.finalizeRelease(); });
-  }
-
-  private detachSetupListeners(): void {
-    this.client.off("close", this.onClientSetupClosed);
-    this.client.off("error", this.onClientSetupClosed);
-    if (this.upstream !== undefined) {
-      this.upstream.off("open", this.onUpstreamOpen);
-      this.upstream.off("close", this.onUpstreamSetupClosed);
-      this.upstream.off("error", this.onUpstreamSetupClosed);
-    }
-  }
-
-  private finalizeRelease(): void {
-    if (this.phase === "released") return;
-    this.phase = "released";
-    clearTimeout(this.timer);
-    this.detachSetupListeners();
-    this.releaseCount();
-    this.resolveReleased();
-  }
+  });
 }
 
 function proxyWorkspaceKey(scope: PluginBackendChannelProxyScope): string {

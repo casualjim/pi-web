@@ -60,7 +60,7 @@ describe("bounded plugin backend channel bridge", () => {
   it("validates and forwards host envelopes in both directions", async () => {
     const clientSide = await createSocketPair();
     const upstreamSide = await createSocketPair();
-    bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
+    void bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
 
     const open = serializePluginBackendChannelOpenEnvelope("server-r1", { terminalId: "t1" });
     const forwardedOpen = nextMessage(upstreamSide.peerSocket);
@@ -76,8 +76,7 @@ describe("bounded plugin backend channel bridge", () => {
   it("drains bridged frames before propagating a clean upstream close", async () => {
     const clientSide = await createSocketPair();
     const upstreamSide = await createSocketPair();
-    const onClosed = vi.fn();
-    bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket, { onClosed });
+    const completion = bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
     const messages = socketMessages(clientSide.peerSocket);
     const closed = nextClose(clientSide.peerSocket);
     const first = serializePluginBackendChannelDataEnvelope({ sequence: 1 });
@@ -89,13 +88,13 @@ describe("bounded plugin backend channel bridge", () => {
     await expect(messages.next()).resolves.toBe(first);
     await expect(messages.next()).resolves.toBe(second);
     await closed;
-    await vi.waitFor(() => { expect(onClosed).toHaveBeenCalledOnce(); });
+    await completion;
   });
 
   it("closes both directions for binary or invalid-direction frames", async () => {
     const binaryClientSide = await createSocketPair();
     const binaryUpstreamSide = await createSocketPair();
-    bridgePluginBackendChannelSockets(binaryClientSide.bridgeSocket, binaryUpstreamSide.bridgeSocket);
+    void bridgePluginBackendChannelSockets(binaryClientSide.bridgeSocket, binaryUpstreamSide.bridgeSocket);
     const clientClosed = nextClose(binaryClientSide.peerSocket);
     const upstreamClosed = nextClose(binaryUpstreamSide.peerSocket);
     binaryClientSide.peerSocket.send(Buffer.from("binary"), { binary: true });
@@ -103,7 +102,7 @@ describe("bounded plugin backend channel bridge", () => {
 
     const invalidClientSide = await createSocketPair();
     const invalidUpstreamSide = await createSocketPair();
-    bridgePluginBackendChannelSockets(invalidClientSide.bridgeSocket, invalidUpstreamSide.bridgeSocket);
+    void bridgePluginBackendChannelSockets(invalidClientSide.bridgeSocket, invalidUpstreamSide.bridgeSocket);
     const invalidClosed = nextClose(invalidClientSide.peerSocket);
     invalidUpstreamSide.peerSocket.send(serializePluginBackendChannelOpenEnvelope("server-r1", null));
     await invalidClosed;

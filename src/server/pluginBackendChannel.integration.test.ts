@@ -88,6 +88,29 @@ describe("plugin backend channel end-to-end teardown and receive drain", () => {
     });
   });
 
+  it.each(["local-proxy", "federated"] as const)(
+    "forwards semantically invalid bounded text through %s for sessiond rejection",
+    async (kind) => {
+      const topology = await createTopology(() => ({ receive: () => undefined }));
+      const browser = topology.connect(kind);
+      const messages = socketMessages(browser);
+      const closed = nextClose(browser);
+      await waitForOpen(browser);
+
+      browser.send("{");
+
+      const rejection = parsePluginBackendChannelServerEnvelope(await messages.next());
+      expect(rejection).toMatchObject({ kind: "error", code: "invalid-frame" });
+      if (rejection.kind !== "error") throw new Error("Expected sessiond protocol rejection");
+      expect(rejection.message).toContain("must be valid JSON");
+      await expect(closed).resolves.toMatchObject({ code: 1008 });
+      await vi.waitFor(() => {
+        expect(topology.registry.activeChannelCount()).toBe(0);
+        expect(topology.activeProxyAdmissions()).toEqual({ local: 0, federated: 0 });
+      });
+    },
+  );
+
   it("retains admission until concurrent shutdown physically terminates a paused peer", async () => {
     const topology = await createTopology(() => ({ receive: () => undefined }));
     const browser = topology.connect("direct");

@@ -1,7 +1,5 @@
 import { WebSocket } from "ws";
 import {
-  PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN,
-  PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE,
   PLUGIN_BACKEND_CHANNEL_MAX_TOTAL,
   PLUGIN_BACKEND_CHANNEL_OPEN_TIMEOUT_MS,
   PLUGIN_BACKEND_CHANNEL_TEARDOWN_TIMEOUT_MS,
@@ -19,8 +17,6 @@ export interface PluginBackendChannelProxyScope {
 export interface PluginBackendChannelProxyAdmissionPoolOptions {
   transportConnectTimeoutMs?: number;
   maxTotal?: number;
-  maxPerPlugin?: number;
-  maxPerPluginWorkspace?: number;
 }
 
 export interface PluginBackendChannelProxyReservation {
@@ -48,11 +44,7 @@ export class PluginBackendChannelProxyAdmissionError extends Error {
 export class PluginBackendChannelProxyAdmissionPool {
   private readonly transportConnectTimeoutMs: number;
   private readonly maxTotal: number;
-  private readonly maxPerPlugin: number;
-  private readonly maxPerPluginWorkspace: number;
   private total = 0;
-  private readonly byPlugin = new Map<string, number>();
-  private readonly byPluginWorkspace = new Map<string, number>();
 
   constructor(options: PluginBackendChannelProxyAdmissionPoolOptions = {}) {
     this.transportConnectTimeoutMs = positiveInteger(
@@ -61,12 +53,6 @@ export class PluginBackendChannelProxyAdmissionPool {
       "transportConnectTimeoutMs",
     );
     this.maxTotal = positiveInteger(options.maxTotal, PLUGIN_BACKEND_CHANNEL_MAX_TOTAL, "maxTotal");
-    this.maxPerPlugin = positiveInteger(options.maxPerPlugin, PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN, "maxPerPlugin");
-    this.maxPerPluginWorkspace = positiveInteger(
-      options.maxPerPluginWorkspace,
-      PLUGIN_BACKEND_CHANNEL_MAX_PER_PLUGIN_WORKSPACE,
-      "maxPerPluginWorkspace",
-    );
   }
 
   get activeCount(): number {
@@ -74,20 +60,15 @@ export class PluginBackendChannelProxyAdmissionPool {
   }
 
   admit(scope: PluginBackendChannelProxyScope): PluginBackendChannelProxyReservation {
-    const pluginCount = this.byPlugin.get(scope.pluginId) ?? 0;
-    const workspaceKey = proxyWorkspaceKey(scope);
-    const workspaceCount = this.byPluginWorkspace.get(workspaceKey) ?? 0;
-    if (this.total >= this.maxTotal || pluginCount >= this.maxPerPlugin || workspaceCount >= this.maxPerPluginWorkspace) {
+    if (this.total >= this.maxTotal) {
       throw new PluginBackendChannelProxyAdmissionError(
         "admission-denied",
         1013,
-        `Server plugin ${scope.pluginId} channel proxy admission limit was reached`,
+        `Plugin backend channel edge resource limit was reached for ${scope.pluginId} in ${scope.projectId}/${scope.workspaceId} via ${scope.authorityId}`,
       );
     }
 
     this.total += 1;
-    this.byPlugin.set(scope.pluginId, pluginCount + 1);
-    this.byPluginWorkspace.set(workspaceKey, workspaceCount + 1);
     let active = true;
     return {
       transportConnectTimeoutMs: this.transportConnectTimeoutMs,
@@ -95,8 +76,6 @@ export class PluginBackendChannelProxyAdmissionPool {
         if (!active) return;
         active = false;
         this.total -= 1;
-        decrementCount(this.byPlugin, scope.pluginId);
-        decrementCount(this.byPluginWorkspace, workspaceKey);
       },
     };
   }
@@ -139,16 +118,6 @@ export function rejectPluginBackendChannelProxyAdmission(
       teardown();
     }
   });
-}
-
-function proxyWorkspaceKey(scope: PluginBackendChannelProxyScope): string {
-  return JSON.stringify([scope.authorityId, scope.pluginId, scope.projectId, scope.workspaceId]);
-}
-
-function decrementCount(counts: Map<string, number>, key: string): void {
-  const count = counts.get(key);
-  if (count === undefined || count <= 1) counts.delete(key);
-  else counts.set(key, count - 1);
 }
 
 function positiveInteger(value: number | undefined, fallback: number, label: string): number {

@@ -1,6 +1,5 @@
 import { WebSocket, type RawData } from "ws";
 import {
-  parsePluginBackendChannelClientEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_QUEUE_MAX_BYTES,
@@ -10,6 +9,8 @@ import {
 import {
   bridgePluginBackendChannelSockets,
   closePluginBackendChannelWebSocket,
+  decodeBoundedPluginBackendChannelTextFrame,
+  PluginBackendChannelTransportFrameError,
   setPluginBackendChannelSocketPayloadLimit,
 } from "../webSocketBridge.js";
 import {
@@ -257,13 +258,14 @@ class PluginBackendChannelPrelude {
 
   private readonly onMessage = (data: RawData, isBinary: boolean): void => {
     try {
-      if (isBinary) {
-        this.onFailure(1003, "Plugin backend channels accept text JSON frames only");
-        return;
-      }
-      const text = decodePluginChannelText(data);
-      parsePluginBackendChannelClientEnvelope(text);
-      if (this.frames.length === 0) {
+      const firstFrame = this.frames.length === 0;
+      const text = decodeBoundedPluginBackendChannelTextFrame(
+        data,
+        isBinary,
+        firstFrame ? PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES : PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+        firstFrame ? "Plugin backend channel first client frame" : "Plugin backend channel client frame",
+      );
+      if (firstFrame) {
         setPluginBackendChannelSocketPayloadLimit(
           this.downstream,
           PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
@@ -278,7 +280,10 @@ class PluginBackendChannelPrelude {
       this.frames.push(text);
       this.bytes += frameBytes;
     } catch (error) {
-      this.onFailure(1008, errorMessage(error));
+      this.onFailure(
+        error instanceof PluginBackendChannelTransportFrameError ? error.closeCode : 1011,
+        errorMessage(error),
+      );
     }
   };
 
@@ -311,17 +316,6 @@ class PluginBackendChannelPrelude {
     this.downstream.off("close", this.onClose);
     this.downstream.off("error", this.onError);
   }
-}
-
-function decodePluginChannelText(data: RawData): string {
-  const value = data instanceof ArrayBuffer
-    ? new Uint8Array(data)
-    : Array.isArray(data)
-      ? Buffer.concat(data)
-      : data;
-  return typeof value === "string"
-    ? value
-    : new TextDecoder("utf-8", { fatal: true }).decode(value);
 }
 
 function errorMessage(error: unknown): string {

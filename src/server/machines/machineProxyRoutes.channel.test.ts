@@ -11,6 +11,7 @@ import {
   serializePluginBackendChannelReadyEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
 import { PluginBackendChannelProxyAdmissionPool } from "../plugins/pluginBackendChannelProxyAdmission.js";
+import { registerPluginBackendChannelProxyRoutes } from "../plugins/pluginBackendChannelProxyRoutes.js";
 import type { MachineClient } from "./machineClient.js";
 import { registerMachineProxyRoutes } from "./machineProxyRoutes.js";
 
@@ -33,7 +34,7 @@ afterEach(async () => {
 });
 
 describe("machine plugin backend channel proxy", () => {
-  it("transfers the ordered prelude and bridges data beyond the transport-connect deadline", async () => {
+  it("transfers an opaque ordered prelude and bridges data beyond the transport-connect deadline", async () => {
     const admissions = new PluginBackendChannelProxyAdmissionPool({ transportConnectTimeoutMs: 250 });
     const connections: { path: string; maxPayload: number | undefined }[] = [];
     const remoteConnected = new Promise<{ socket: WebSocket; messages: ReturnType<typeof socketMessages> }>((resolve) => {
@@ -61,14 +62,14 @@ describe("machine plugin backend channel proxy", () => {
     sockets.push(browser);
     await waitForOpen(browser);
 
-    const open = serializePluginBackendChannelOpenEnvelope("terminal-r1", null);
-    const earlyData = serializePluginBackendChannelDataEnvelope({ sequence: 1 });
-    browser.send(open);
-    browser.send(earlyData);
+    const firstPreludeFrame = "not-json-and-not-an-envelope";
+    const secondPreludeFrame = "still-not-a-channel-envelope";
+    browser.send(firstPreludeFrame);
+    browser.send(secondPreludeFrame);
     resolveRemoteClient?.(client);
     const remote = await remoteConnected;
-    await expect(remote.messages.next()).resolves.toBe(open);
-    await expect(remote.messages.next()).resolves.toBe(earlyData);
+    await expect(remote.messages.next()).resolves.toBe(firstPreludeFrame);
+    await expect(remote.messages.next()).resolves.toBe(secondPreludeFrame);
 
     const ready = serializePluginBackendChannelReadyEnvelope();
     const browserReady = nextMessage(browser);
@@ -93,6 +94,51 @@ describe("machine plugin backend channel proxy", () => {
     const remoteClosed = nextClose(remote.socket);
     browser.close(1000, "complete");
     await Promise.all([browserClosed, remoteClosed]);
+    await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
+  });
+
+  it("shares one attributed aggregate admission cap across local and federated routes", async () => {
+    const admissions = new PluginBackendChannelProxyAdmissionPool({ maxTotal: 1, transportConnectTimeoutMs: 1_000 });
+    const localUpstreamConnected = new Promise<WebSocket>((resolve) => {
+      remoteServer.once("connection", (socket) => {
+        sockets.push(socket);
+        resolve(socket);
+      });
+    });
+    registerPluginBackendChannelProxyRoutes(app, {
+      connectWebSocket(path, options) {
+        const socket = new WebSocket(`${webSocketServerUrl(remoteServer)}${path}`, options);
+        sockets.push(socket);
+        return socket;
+      },
+    }, "/api", admissions);
+    const remoteClient = vi.fn(() => Promise.resolve(undefined));
+    registerMachineProxyRoutes(app, { remoteClient }, admissions);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    const local = new WebSocket(`${fastifyServerUrl(app)}/api/plugin-backends/terminal/projects/local-project/workspaces/local-workspace/channels/attach`);
+    sockets.push(local);
+    await waitForOpen(local);
+    const localUpstream = await localUpstreamConnected;
+    expect(admissions.activeCount).toBe(1);
+
+    const federated = new WebSocket(`${fastifyServerUrl(app)}/api/machines/remote-one/plugin-backends/other.tools/projects/remote-project/workspaces/remote-workspace/channels/attach`);
+    sockets.push(federated);
+    const errorFrame = nextMessage(federated).then((text) => parsePluginBackendChannelServerEnvelope(text));
+    const federatedClosed = nextClose(federated);
+    await waitForOpen(federated);
+    const rejection = await errorFrame;
+    expect(rejection).toMatchObject({ kind: "error", code: "admission-denied" });
+    if (rejection.kind !== "error") throw new Error("Expected aggregate admission error");
+    expect(rejection.message).toContain("other.tools in remote-project/remote-workspace via remote-one");
+    await expect(federatedClosed).resolves.toMatchObject({ code: 1006 });
+    expect(remoteClient).not.toHaveBeenCalled();
+    expect(admissions.activeCount).toBe(1);
+
+    const localClosed = nextClose(local);
+    const upstreamClosed = nextClose(localUpstream);
+    local.close(1000, "complete");
+    await Promise.all([localClosed, upstreamClosed]);
     await vi.waitFor(() => { expect(admissions.activeCount).toBe(0); });
   });
 

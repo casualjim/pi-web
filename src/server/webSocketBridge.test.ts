@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
+  PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+  PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
   serializePluginBackendChannelDataEnvelope,
-  serializePluginBackendChannelOpenEnvelope,
-  serializePluginBackendChannelReadyEnvelope,
 } from "../shared/pluginBackendProtocol.js";
 import {
   bridgePluginBackendChannelSockets,
@@ -57,20 +57,20 @@ describe("bridgeSockets", () => {
 });
 
 describe("bounded plugin backend channel bridge", () => {
-  it("validates and forwards host envelopes in both directions", async () => {
+  it("forwards opaque bounded UTF-8 text without interpreting envelope semantics", async () => {
     const clientSide = await createSocketPair();
     const upstreamSide = await createSocketPair();
     void bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
 
-    const open = serializePluginBackendChannelOpenEnvelope("server-r1", { terminalId: "t1" });
-    const forwardedOpen = nextMessage(upstreamSide.peerSocket);
-    clientSide.peerSocket.send(open);
-    await expect(forwardedOpen).resolves.toBe(open);
+    const opaqueClientFrame = "not-json-and-not-an-envelope";
+    const forwardedClientFrame = nextMessage(upstreamSide.peerSocket);
+    clientSide.peerSocket.send(opaqueClientFrame);
+    await expect(forwardedClientFrame).resolves.toBe(opaqueClientFrame);
 
-    const ready = serializePluginBackendChannelReadyEnvelope();
-    const forwardedReady = nextMessage(clientSide.peerSocket);
-    upstreamSide.peerSocket.send(ready);
-    await expect(forwardedReady).resolves.toBe(ready);
+    const opaqueUpstreamFrame = "also-not-json-and-not-an-envelope";
+    const forwardedUpstreamFrame = nextMessage(clientSide.peerSocket);
+    upstreamSide.peerSocket.send(opaqueUpstreamFrame);
+    await expect(forwardedUpstreamFrame).resolves.toBe(opaqueUpstreamFrame);
   });
 
   it("drains bridged frames before propagating a clean upstream close", async () => {
@@ -91,21 +91,76 @@ describe("bounded plugin backend channel bridge", () => {
     await completion;
   });
 
-  it("closes both directions for binary or invalid-direction frames", async () => {
+  it("closes both directions for binary or invalid UTF-8 frames", async () => {
     const binaryClientSide = await createSocketPair();
     const binaryUpstreamSide = await createSocketPair();
     void bridgePluginBackendChannelSockets(binaryClientSide.bridgeSocket, binaryUpstreamSide.bridgeSocket);
-    const clientClosed = nextClose(binaryClientSide.peerSocket);
-    const upstreamClosed = nextClose(binaryUpstreamSide.peerSocket);
+    const binaryClientClosed = nextCloseEvent(binaryClientSide.peerSocket);
+    const binaryUpstreamClosed = nextCloseEvent(binaryUpstreamSide.peerSocket);
     binaryClientSide.peerSocket.send(Buffer.from("binary"), { binary: true });
-    await Promise.all([clientClosed, upstreamClosed]);
+    await expect(binaryClientClosed).resolves.toMatchObject({ code: 1003 });
+    await expect(binaryUpstreamClosed).resolves.toMatchObject({ code: 1003 });
 
-    const invalidClientSide = await createSocketPair();
-    const invalidUpstreamSide = await createSocketPair();
-    void bridgePluginBackendChannelSockets(invalidClientSide.bridgeSocket, invalidUpstreamSide.bridgeSocket);
-    const invalidClosed = nextClose(invalidClientSide.peerSocket);
-    invalidUpstreamSide.peerSocket.send(serializePluginBackendChannelOpenEnvelope("server-r1", null));
-    await invalidClosed;
+    const invalidUtf8ClientSide = await createSocketPair();
+    const invalidUtf8UpstreamSide = await createSocketPair();
+    void bridgePluginBackendChannelSockets(invalidUtf8ClientSide.bridgeSocket, invalidUtf8UpstreamSide.bridgeSocket);
+    const invalidUtf8ClientClosed = nextCloseEvent(invalidUtf8ClientSide.peerSocket);
+    const invalidUtf8UpstreamClosed = nextCloseEvent(invalidUtf8UpstreamSide.peerSocket);
+    invalidUtf8ClientSide.bridgeSocket.emit("message", Buffer.from([0xc3, 0x28]), false);
+    await expect(invalidUtf8ClientClosed).resolves.toMatchObject({ code: 1007 });
+    await expect(invalidUtf8UpstreamClosed).resolves.toMatchObject({ code: 1007 });
+  });
+
+  it("allows the larger first client frame and enforces subsequent and upstream frame bounds", async () => {
+    const clientSide = await createSocketPair();
+    const upstreamSide = await createSocketPair();
+    const completion = bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
+    const largeFirstFrame = "f".repeat(PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES + 1);
+    const forwardedFirstFrame = nextMessage(upstreamSide.peerSocket);
+    clientSide.peerSocket.send(largeFirstFrame);
+    await expect(forwardedFirstFrame).resolves.toBe(largeFirstFrame);
+
+    const clientClosed = nextCloseEvent(clientSide.peerSocket);
+    const upstreamClosed = nextCloseEvent(upstreamSide.peerSocket);
+    clientSide.peerSocket.send(largeFirstFrame);
+    await expect(clientClosed).resolves.toMatchObject({ code: 1009 });
+    await expect(upstreamClosed).resolves.toMatchObject({ code: 1011 });
+    await completion;
+
+    const oversizedClientSide = await createSocketPair();
+    const oversizedUpstreamSide = await createSocketPair();
+    void bridgePluginBackendChannelSockets(oversizedClientSide.bridgeSocket, oversizedUpstreamSide.bridgeSocket);
+    const oversizedClientClosed = nextCloseEvent(oversizedClientSide.peerSocket);
+    const oversizedUpstreamClosed = nextCloseEvent(oversizedUpstreamSide.peerSocket);
+    oversizedClientSide.peerSocket.send("o".repeat(PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES + 1));
+    await expect(oversizedClientClosed).resolves.toMatchObject({ code: 1009 });
+    await expect(oversizedUpstreamClosed).resolves.toMatchObject({ code: 1011 });
+
+    const upstreamOversizedClientSide = await createSocketPair();
+    const upstreamOversizedSide = await createSocketPair();
+    void bridgePluginBackendChannelSockets(upstreamOversizedClientSide.bridgeSocket, upstreamOversizedSide.bridgeSocket);
+    const upstreamOversizedClientClosed = nextCloseEvent(upstreamOversizedClientSide.peerSocket);
+    const upstreamOversizedClosed = nextCloseEvent(upstreamOversizedSide.peerSocket);
+    upstreamOversizedSide.peerSocket.send("u".repeat(PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES + 1));
+    await expect(upstreamOversizedClientClosed).resolves.toMatchObject({ code: 1009 });
+    await expect(upstreamOversizedClosed).resolves.toMatchObject({ code: 1009 });
+  });
+
+  it("fails both physical sides when the active client-to-upstream queue overflows", async () => {
+    const clientSide = await createSocketPair();
+    const upstreamSide = await createSocketPair();
+    const completion = bridgePluginBackendChannelSockets(clientSide.bridgeSocket, upstreamSide.bridgeSocket);
+    const clientClosed = nextCloseEvent(clientSide.peerSocket);
+    const upstreamClosed = nextCloseEvent(upstreamSide.peerSocket);
+    const frame = "q".repeat(PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES);
+
+    for (let index = 0; index < 20; index += 1) {
+      clientSide.bridgeSocket.emit("message", frame, false);
+    }
+
+    await expect(clientClosed).resolves.toMatchObject({ code: 1013 });
+    await expect(upstreamClosed).resolves.toMatchObject({ code: 1013 });
+    await completion;
   });
 
   it("rejects sender queue overflow while a socket is connecting", async () => {
@@ -220,6 +275,14 @@ function nextClose(socket: WebSocket): Promise<void> {
   if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
   return new Promise((resolve) => {
     socket.once("close", () => { resolve(); });
+  });
+}
+
+function nextCloseEvent(socket: WebSocket): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve) => {
+    socket.once("close", (code, reason) => {
+      resolve({ code, reason: reason.toString("utf8") });
+    });
   });
 }
 

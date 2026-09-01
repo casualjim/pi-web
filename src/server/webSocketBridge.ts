@@ -1,8 +1,6 @@
 import { WebSocket, type Data, type RawData, type WebSocketServer } from "ws";
 import {
   boundedPluginBackendChannelCloseReason,
-  parsePluginBackendChannelClientEnvelope,
-  parsePluginBackendChannelServerEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   PLUGIN_BACKEND_CHANNEL_DRAIN_TIMEOUT_MS,
   PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES,
@@ -14,6 +12,50 @@ import {
 } from "../shared/pluginBackendProtocol.js";
 
 const pluginChannelLimitedServers = new WeakSet<WebSocketServer>();
+
+export class PluginBackendChannelTransportFrameError extends Error {
+  override name = "PluginBackendChannelTransportFrameError";
+
+  constructor(
+    readonly closeCode: number,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+/** Decode one opaque text frame while enforcing only physical-hop bounds. */
+export function decodeBoundedPluginBackendChannelTextFrame(
+  data: RawData | string,
+  isBinary: boolean,
+  maxBytes: number,
+  label: string,
+): string {
+  if (isBinary) {
+    throw new PluginBackendChannelTransportFrameError(1003, "Plugin backend channels accept text frames only");
+  }
+  if (typeof data === "string") {
+    if (utf8ByteLength(data) > maxBytes) {
+      throw new PluginBackendChannelTransportFrameError(1009, `${label} exceeds the ${String(maxBytes)} byte transport limit`);
+    }
+    return data;
+  }
+
+  const bytes = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : Array.isArray(data)
+      ? Buffer.concat(data)
+      : data;
+  if (bytes.byteLength > maxBytes) {
+    throw new PluginBackendChannelTransportFrameError(1009, `${label} exceeds the ${String(maxBytes)} byte transport limit`);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new PluginBackendChannelTransportFrameError(1007, `${label} must be valid UTF-8 text`, { cause: error });
+  }
+}
 
 /** Select the plugin-channel ingress cap before ws allocates its receiver. */
 export function installPluginBackendChannelWebSocketPayloadLimit(server: WebSocketServer): void {
@@ -172,14 +214,14 @@ export function createBoundedTextWebSocketSender(
 }
 
 export interface PluginBackendChannelBridgeOptions {
-  /** Already validated client frames captured while an asynchronous upstream was resolved. */
+  /** Opaque bounded text frames captured while an asynchronous upstream was resolved. */
   initialClientFrames?: readonly string[];
 }
 
 /**
- * Validate and boundedly bridge generic channel envelopes without reading
- * plugin data semantics. The returned lifetime resolves only after both
- * physical sockets have closed and accepted clean-close frames have drained.
+ * Boundedly bridge opaque generic-channel text without reading plugin or host
+ * envelope semantics. The returned lifetime resolves only after both physical
+ * sockets have closed and accepted clean-close frames have drained.
  */
 export function bridgePluginBackendChannelSockets(
   client: WebSocket,
@@ -223,9 +265,15 @@ export function bridgePluginBackendChannelSockets(
     onOverflow: (error) => { fail(1013, error.message); },
   });
 
-  const forwardClientText = (text: string): void => {
-    parsePluginBackendChannelClientEnvelope(text);
-    if (!receivedClientFrame) {
+  const forwardClientFrame = (data: RawData | string, isBinary: boolean): void => {
+    const firstFrame = !receivedClientFrame;
+    const text = decodeBoundedPluginBackendChannelTextFrame(
+      data,
+      isBinary,
+      firstFrame ? PLUGIN_BACKEND_CHANNEL_OPEN_FRAME_MAX_BYTES : PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+      firstFrame ? "Plugin backend channel first client frame" : "Plugin backend channel client frame",
+    );
+    if (firstFrame) {
       receivedClientFrame = true;
       setPluginBackendChannelSocketPayloadLimit(client, PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES);
     }
@@ -233,20 +281,22 @@ export function bridgePluginBackendChannelSockets(
   };
   function onClientMessage(data: RawData, isBinary: boolean): void {
     try {
-      if (isBinary) throw new BinaryPluginBackendChannelFrameError();
-      forwardClientText(decodeTextWebSocketFrame(data));
+      forwardClientFrame(data, isBinary);
     } catch (error) {
-      fail(error instanceof BinaryPluginBackendChannelFrameError ? 1003 : 1008, bridgeErrorMessage(error));
+      fail(transportFrameCloseCode(error), bridgeErrorMessage(error));
     }
   }
   function onUpstreamMessage(data: RawData, isBinary: boolean): void {
     try {
-      if (isBinary) throw new BinaryPluginBackendChannelFrameError();
-      const text = decodeTextWebSocketFrame(data);
-      parsePluginBackendChannelServerEnvelope(text);
+      const text = decodeBoundedPluginBackendChannelTextFrame(
+        data,
+        isBinary,
+        PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
+        "Plugin backend channel upstream frame",
+      );
       sendToClient(text);
     } catch (error) {
-      fail(error instanceof BinaryPluginBackendChannelFrameError ? 1003 : 1008, bridgeErrorMessage(error));
+      fail(transportFrameCloseCode(error), bridgeErrorMessage(error));
     }
   }
   function onClientClose(code: number, reason: Buffer): void {
@@ -275,9 +325,9 @@ export function bridgePluginBackendChannelSockets(
   for (const text of options.initialClientFrames ?? []) {
     if (isClosing()) break;
     try {
-      forwardClientText(text);
+      forwardClientFrame(text, false);
     } catch (error) {
-      fail(1008, bridgeErrorMessage(error));
+      fail(transportFrameCloseCode(error), bridgeErrorMessage(error));
     }
   }
   return completion;
@@ -337,15 +387,8 @@ function isPluginBackendChannelUpgradePath(rawUrl: string | undefined): boolean 
     && segments[index + 6] === "channels";
 }
 
-function decodeTextWebSocketFrame(data: RawData): string {
-  const bytes = typeof data === "string"
-    ? new TextEncoder().encode(data)
-    : data instanceof ArrayBuffer
-      ? new Uint8Array(data)
-      : Array.isArray(data)
-        ? Buffer.concat(data)
-        : data;
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+function transportFrameCloseCode(error: unknown): number {
+  return error instanceof PluginBackendChannelTransportFrameError ? error.closeCode : 1011;
 }
 
 function decodeCloseReason(reason: Buffer): string {
@@ -406,10 +449,4 @@ export function closePluginBackendChannelWebSocket(
 function bridgeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return boundedPluginBackendChannelCloseReason(message);
-}
-
-class BinaryPluginBackendChannelFrameError extends Error {
-  constructor() {
-    super("Plugin backend channels accept text JSON frames only");
-  }
 }

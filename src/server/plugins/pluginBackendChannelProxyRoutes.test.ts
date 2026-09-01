@@ -7,8 +7,6 @@ import {
   parsePluginBackendChannelServerEnvelope,
   PLUGIN_BACKEND_CHANNEL_DATA_FRAME_MAX_BYTES,
   serializePluginBackendChannelDataEnvelope,
-  serializePluginBackendChannelOpenEnvelope,
-  serializePluginBackendChannelReadyEnvelope,
 } from "../../shared/pluginBackendProtocol.js";
 import { PluginBackendChannelProxyAdmissionPool } from "./pluginBackendChannelProxyAdmission.js";
 import { registerPluginBackendChannelProxyRoutes } from "./pluginBackendChannelProxyRoutes.js";
@@ -32,7 +30,7 @@ afterEach(async () => {
 });
 
 describe("local plugin backend channel proxy", () => {
-  it("bridges data beyond the transport-connect deadline and releases after clean physical teardown", async () => {
+  it("bridges opaque bounded text beyond the transport-connect deadline and releases after clean physical teardown", async () => {
     const admissions = new PluginBackendChannelProxyAdmissionPool({ transportConnectTimeoutMs: 250 });
     const connections: { path: string; maxPayload: number | undefined }[] = [];
     const upstreamConnected = new Promise<WebSocket>((resolve) => {
@@ -55,15 +53,15 @@ describe("local plugin backend channel proxy", () => {
     sockets.push(browser);
     const upstreamSocket = await upstreamConnected;
     await waitForOpen(browser);
-    const open = serializePluginBackendChannelOpenEnvelope("server-r1", null);
-    const forwardedOpen = nextMessage(upstreamSocket);
-    browser.send(open);
-    await expect(forwardedOpen).resolves.toBe(open);
+    const opaqueClientFrame = "not-json-and-not-an-envelope";
+    const forwardedClientFrame = nextMessage(upstreamSocket);
+    browser.send(opaqueClientFrame);
+    await expect(forwardedClientFrame).resolves.toBe(opaqueClientFrame);
 
-    const ready = serializePluginBackendChannelReadyEnvelope();
-    const forwardedReady = nextMessage(browser);
-    upstreamSocket.send(ready);
-    await expect(forwardedReady).resolves.toBe(ready);
+    const opaqueUpstreamFrame = "also-not-json-and-not-an-envelope";
+    const forwardedUpstreamFrame = nextMessage(browser);
+    upstreamSocket.send(opaqueUpstreamFrame);
+    await expect(forwardedUpstreamFrame).resolves.toBe(opaqueUpstreamFrame);
     expect(admissions.activeCount).toBe(1);
 
     await delay(350);
